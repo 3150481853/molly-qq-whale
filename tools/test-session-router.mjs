@@ -235,16 +235,29 @@ console.log('\n[5] 路由计数 + 离线 e2e（命令→work，改代码→code�
   eq('建了 work 会话', ctxEnv.created[0].sessionId, 'qq-whale-work-111111111')
   eq('work 用 kimi-k2.6', ctxEnv.created[0].agentOptions.model, 'kimi-k2.6')
 
-  // 改代码 → code
+  /*
+   * 改代码意图但**没有**「命令 」前缀、也没有 #code → 只是建议，不进命令链路。
+   * 真机事故（2026-10-20 15:22，群 777777777）：群里一句「尖酸刻薄代码没删干净」
+   * 被模型兜底判成 code 就真跑了 runCommand，冒出一条「已完成，用时 8 秒」的进度行。
+   */
   r = await engine.routeAndDispatch({ ev, conv, norm: { text: '帮我把 engine.js 改一下' }, userName: '群主', scene: 'group_mention' })
-  eq('改代码 route=code', r.route.route, 'code')
+  eq('无前缀改代码 route=code', r.route.route, 'code')
+  eq('无前缀改代码 handled=false（不进命令链路）', r.handled, false)
+  ok('  标记 downgradeWhy=no-explicit-prefix', engine.routeState.last.downgradeWhy === 'no-explicit-prefix')
+  await sleep(800)
+  ok('  没有建 code 会话', !ctxEnv.created.some((c) => c.sessionId === 'qq-whale-code-111111111'))
+
+  // 显式 #code 才真跑，并建 code 会话
+  r = await engine.routeAndDispatch({ ev, conv, norm: { text: '#code 帮我把 engine.js 改一下' }, userName: '群主', scene: 'group_mention' })
+  eq('#code 覆盖 → code', r.route.route, 'code')
+  eq('#code handled=true', r.handled, true)
   await sleep(3600)
   const codeCreate = ctxEnv.created.find((c) => c.sessionId === 'qq-whale-code-111111111')
   ok('建了 code 会话', Boolean(codeCreate))
   eq('code 用 flash', codeCreate?.agentOptions.model, 'deepseek-v4.1-flash')
 
-  // 计数
-  eq('counts.chat', engine.routeState.counts.chat, 1)
+  // 计数：闲聊 1 + 无前缀降级 1 = 2
+  eq('counts.chat', engine.routeState.counts.chat, 2)
   ok('counts.work >= 1', engine.routeState.counts.work >= 1, String(engine.routeState.counts.work))
   ok('counts.code >= 1', engine.routeState.counts.code >= 1, String(engine.routeState.counts.code))
   eq('last.route=code', engine.routeState.last.route, 'code')

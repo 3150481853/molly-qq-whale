@@ -1651,6 +1651,23 @@ export class ChatEngine {
       this.logger('debug', `路由=chat（${route.why}）`)
       return { handled: false, route }
     }
+    /*
+     * bug1（2026-10-20）：没有「命令 」前缀、也不是 #work/#code 的句子，
+     * 哪怕意图里带「删/改/修」，也绝对不能进命令链路——以前模型兜底
+     * 把「尖酸刻薄代码没删干净」判成 code 就直接跑了，用户看到的是
+     * 一条压根没下命令的消息触发了进度行 + 审核话术。
+     * 判错一律错向聊天（权限最小）。
+     */
+    if (route.explicit !== true) {
+      this.logger('info', `路由=${route.route}（${route.why}）但没有显式指令前缀 → 按聊天处理`)
+      if (this.routeState.last) {
+        this.routeState.last.downgradedToChat = true
+        this.routeState.last.downgradeWhy = 'no-explicit-prefix'
+      }
+      this.routeState.counts[route.route] -= 1
+      this.routeState.counts.chat += 1
+      return { handled: false, route }
+    }
     const ex = this.executorFor(route.route)
     if (!ex || !ex.isCommander?.(ev.user_id, ev)) {
       this.logger('info', `路由=${route.route}（${route.why}），但 ${ev.user_id} 没有指令权限 → 按聊天处理`)

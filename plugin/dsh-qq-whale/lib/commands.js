@@ -467,8 +467,14 @@ export class CommandExecutor {
             '',
             '## 改 Molly 自己的代码 → 一律不执行',
             '任何「改 Molly 的代码 / 插件 / 配置 / 人设 / 提示词」的请求，**不要动手**，也不要试图用别的工具绕过去。',
-            `直接回这一句（不要改写）：${REVIEW_REPLY}`,
-            '真实情况是：这类请求已经被代码层拦下并私聊报给主人了，你只需要把上面那句告诉请求的人。',
+            /*
+             * bug2（2026-10-20）：原来这里写「真实情况是：已经被拦下并私聊报给主人了」，
+             * 模型就照念这句话，可它一次工具都没调、护栏压根没触发 ⇒ 主人什么也没收到。
+             * 现在只把「如实说什么」讲清楚，是否真上报由代码判定（见 _runOnce 兜底）。
+             */
+            `如果工具层已经拒了你（会明确告诉你"已拦下"），就直接回它给你的那句：${REVIEW_REPLY}`,
+            '否则（你压根没动手）就说人话：这属于改 Molly 自己的代码，我做不了，得主人点头——不要说你已经报给主人了。',
+            '说「已上报给主人」这句话之前先想一遍：你是不是真的被工具层拦下了。没被拦下就别这么说。',
             /*
              * task-44（2026-10-20）：worker 调 ask_user_question 后整个 session
              * 永久挂住——QQ 后台没有人能点那个弹窗，后面的命令全部排队超时。
@@ -1167,6 +1173,25 @@ export class CommandExecutor {
        * 不采用模型临场编的解释（真机上它会把「要过审核」说成「我做不到」）。
        * handleEscalations 同时落 pending-code.json 并私聊主人，失败不影响答复。
        */
+      /*
+       * bug2 兜底：模型可能只念了审核话术、没真的被拦下（人设里那句话原本就教它这么讲）。
+       * 既然已经对外承诺「报给主人了」，就必须真的报一次——落 pending-code.json + 私聊主人，
+       * 否则主人永远收不到（真机实测 pending-code.json 从来不存在）。
+       */
+      if (
+        (!Array.isArray(this._escalations) || this._escalations.length === 0) &&
+        text && String(text).includes(REVIEW_REPLY.slice(0, 8))
+      ) {
+        this._escalations = [
+          {
+            task: String(task || ''),
+            fromUin: String(this.currentCommand?.fromUin || ''),
+            groupId: String(this.currentCommand?.groupId || ''),
+            paths: [],
+            tool: 'model-claim',
+          },
+        ]
+      }
       if (Array.isArray(this._escalations) && this._escalations.length > 0) {
         try {
           await this.handleEscalations()

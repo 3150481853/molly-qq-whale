@@ -41,6 +41,9 @@ const FILES = [
   // README / LICENSE 放在 publish-assets/ 里维护（不直接放仓库根，避免和运行时文件混在一起）
   ['publish-assets/README.md', 'README.md'],
   ['publish-assets/LICENSE', 'LICENSE'],
+  // CONTRIBUTING.md 也走 publish-assets（2026-10-20：它是在上次 build 之后手写的，
+  // 没进白名单会被下一次「白名单复制」当孤儿文件删掉 —— 真发生过一次）
+  ['publish-assets/CONTRIBUTING.md', 'CONTRIBUTING.md'],
   ['tools/console-server.mjs', 'tools/console-server.mjs'],
   ['tools/watchdog.mjs', 'tools/watchdog.mjs'],
   ['tools/watchdog-hidden.vbs', 'tools/watchdog-hidden.vbs'],

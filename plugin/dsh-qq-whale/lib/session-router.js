@@ -82,26 +82,27 @@ export function ruleRoute({ text, prefixes = [] } = {}) {
   const raw = String(text || '')
   const ov = stripOverride(raw)
   if (ov.route) {
-    return { route: ov.route, by: 'override', why: `显式前缀 #${ov.route}`, text: ov.text }
+    return { route: ov.route, by: 'override', explicit: true, why: `显式前缀 #${ov.route}`, text: ov.text }
   }
   const body = raw.trim()
   if (isTrivial(body)) {
-    return { route: 'chat', by: 'rule', why: '空消息/纯表情', text: body }
+    return { route: 'chat', by: 'rule', explicit: false, why: '空消息/纯表情', text: body }
   }
   const cmd = matchCommandPrefix(body, prefixes)
   if (cmd !== null) {
-    return { route: 'work', by: 'rule', why: `命令前缀（${prefixes.find((p) => p && body.startsWith(p)) || '命令'}）→ 查询会话`, text: cmd }
+    return { route: 'work', by: 'rule', explicit: true, why: `命令前缀（${prefixes.find((p) => p && body.startsWith(p)) || '命令'}）→ 查询会话`, text: cmd }
   }
   const intent = CODE_INTENT_RE.test(body)
   const context = CODE_CONTEXT_RE.test(body)
   if (intent && context) {
-    return { route: 'code', by: 'rule', why: '改代码意图 + 文件/代码上下文', text: body }
+    /* 没有命令前缀的「改代码意图」只是建议，不是指令（bug1） */
+    return { route: 'code', by: 'rule', explicit: false, why: '改代码意图 + 文件/代码上下文', text: body }
   }
   if (intent && !context) {
     // 半确定：只有意图词，没法确定是不是在说代码。交给模型分类，失败按 chat。
     return { route: null, by: 'model', why: '改代码意图但没提文件/路径', text: body }
   }
-  return { route: 'chat', by: 'rule', why: '无指令/无改代码特征', text: body }
+  return { route: 'chat', by: 'rule', explicit: false, why: '无指令/无改代码特征', text: body }
 }
 
 /** 模型分类器的 system prompt（极短，maxTokens 32 就够）。 */
@@ -149,5 +150,6 @@ export async function routeMessage({ text, prefixes = [], classify } = {}) {
       why = `模型兜底失败（按 chat）：${modelError}`
     }
   }
-  return { route, by: 'model', why, text: base.text, modelError }
+  /* 模型兜底一律不算 explicit：判错时会真的去执行命令（bug1 的根） */
+  return { route, by: 'model', explicit: false, why, text: base.text, modelError }
 }

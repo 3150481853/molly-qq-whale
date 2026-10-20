@@ -1,0 +1,23 @@
+# cordis.patch.yml 示例（节选）
+# 复制进你的 profile 后，把 ${...} 全换成自己的值。
+- insert:
+    - id: dsh-qq-whale
+      name: 'dsh-qq-whale'
+      config:
+        selfId: '111111111'
+        ownerUin: '222222222'
+        admUins: ['333333333']
+        commanderUsers: ['222222222', '333333333']
+        commandEnabled: true
+        commandPrefixes: ['命令 ']
+        commandGroups: ['666666666']
+        modelBackend: wbai
+        memoryDir: '${MOLLY_ROOT}/data/qq-whale/memory'
+        stickerDir: '${MOLLY_ROOT}/data/qq-whale/stickers'
+        personaDir: '${MOLLY_ROOT}/plugin/dsh-qq-whale/persona'
+        napcat:
+          baseUrl: 'http://127.0.0.1:6099'
+          token: '${NAPCAT_TOKEN}'
+        onebot:
+          ws: 'ws://127.0.0.1:3001'
+          token: '${ONEBOT_TOKEN}'

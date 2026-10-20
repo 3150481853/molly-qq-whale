@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Molly 控制台</title>
+<!-- 图标内联，避免控制台离线时还去请求 favicon -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%90%B3%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/console.css">
+<script src="/console.js" defer></script>
+</head>
+<body>
+
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">🐳</span>
+      <span class="brand-text">Molly 控制台</span>
+    </div>
+
+    <nav class="nav" id="nav" aria-label="主导航">
+      <a class="nav-item" href="#/overview" data-page="overview">总览</a>
+      <a class="nav-item" href="#/chats" data-page="chats">会话与消息</a>
+      <a class="nav-item" href="#/memory" data-page="memory">记忆</a>
+      <a class="nav-item" href="#/pending" data-page="pending">待核实<span class="nav-badge" id="pendBadge" hidden>0</span></a>
+      <a class="nav-item" href="#/stickers" data-page="stickers">表情包</a>
+      <a class="nav-item" href="#/budget" data-page="budget">预算</a>
+      <a class="nav-item" href="#/work" data-page="work">干活</a>
+      <a class="nav-item" href="#/watchdog" data-page="watchdog">守护</a>
+      <a class="nav-item" href="#/napcat" data-page="napcat">NapCat</a>
+      <a class="nav-item" href="#/login" data-page="login">登录<span class="nav-badge is-warn nav-dot" id="loginBadge" hidden aria-hidden="true"></span></a>
+      <a class="nav-item" href="#/exec" data-page="exec">执行块</a>
+      <a class="nav-item" href="#/settings" data-page="settings">设置</a>
+    </nav>
+
+    <div class="sidebar-foot">
+      <span class="mono" id="footVersion">v1</span>
+      <span class="sidebar-foot-dot">·</span>
+      <span class="mono">127.0.0.1</span>
+    </div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <div class="topbar-left">
+        <span class="pill pill-idle" id="pillMolly"><i class="dot"></i>Molly 未知</span>
+        <span class="pill pill-idle" id="pillNapcat"><i class="dot"></i>NapCat 未知</span>
+        <span class="pill pill-idle" id="pillWatchdog"><i class="dot"></i>守护 未知</span>
+        <span class="pill pill-bad" id="pillLink" hidden><i class="dot"></i>连接中断</span>
+      </div>
+      <div class="topbar-right">
+        <span class="topbar-meta">模型 <b class="mono" id="topModel">—</b></span>
+        <span class="topbar-meta">积分 <b class="mono" id="topBudget">—</b></span>
+        <span class="topbar-meta">刷新 <b class="mono" id="topRefresh">—</b></span>
+        <button class="btn btn-ghost btn-sm" id="btnRefresh" type="button">刷新</button>
+      </div>
+    </header>
+
+    <main class="content" id="content">
+
+      <!-- 总览 -->
+      <section class="page" data-page="overview">
+        <div class="page-head">
+          <h1>总览</h1>
+          <p class="page-sub">Molly 的运行状态、模型与数据源一览。</p>
+        </div>
+        <!-- 掉登录时插在最上面：整条可点，跳到「登录」页并直接开始生成二维码 -->
+        <a class="ov-login-banner" id="ovLoginBanner" href="#/login" hidden>
+          <span>⚠️ Molly 掉登录了 —— 点这里扫码</span>
+          <span class="ov-login-banner-go">去登录 →</span>
+        </a>
+        <div class="stat-grid" id="ovStats"></div>
+        <div class="card-grid" id="ovCards"></div>
+      </section>
+
+      <!-- 会话与消息 -->
+      <section class="page" data-page="chats" hidden>
+        <div class="page-head">
+          <h1>会话与消息</h1>
+          <p class="page-sub">消息量、响应耗时与学习器的取舍记录。</p>
+        </div>
+        <div class="card-grid" id="chatCards"></div>
+      </section>
+
+      <!-- 记忆 -->
+      <section class="page" data-page="memory" hidden>
+        <div class="page-head page-head-row">
+          <div>
+            <h1>记忆</h1>
+            <p class="page-sub" id="memSub">正在读取…</p>
+          </div>
+          <button class="btn btn-primary" id="memAdd" type="button" disabled>+ 新增记忆</button>
+        </div>
+        <div class="notice" id="memNotice" hidden></div>
+        <div class="toolbar">
+          <input class="input" id="memSearch" type="search" placeholder="搜索正文 / 日期 / 类型 / 人 / QQ 号" autocomplete="off" spellcheck="false">
+          <button class="btn btn-ghost btn-sm" id="memReload" type="button">重新加载</button>
+        </div>
+        <div id="memGroups"></div>
+      </section>
+
+      <!-- 待核实：拦下来的记忆先放这儿，等人过目 -->
+      <section class="page" data-page="pending" hidden>
+        <div class="page-head page-head-row">
+          <div>
+            <h1>待核实</h1>
+            <p class="page-sub">这些是自动写入时被拦下的记忆，通过后才会进正式记忆。</p>
+          </div>
+          <button class="btn btn-danger" id="pendRejectAll" type="button" disabled>全部丢弃</button>
+        </div>
+        <div class="notice" id="pendNotice" hidden></div>
+        <div class="toolbar">
+          <span class="pend-stat" id="pendStat">待核实 — 条</span>
+          <span class="pend-hint" id="pendHint" hidden></span>
+          <button class="btn btn-ghost btn-sm" id="pendReload" type="button">刷新</button>
+        </div>
+        <div class="pend-error" id="pendError" hidden></div>
+        <div id="pendList" class="pend-list"></div>
+        <div class="empty" id="pendEmpty" hidden>没有待核实的记忆，拦下来的都会先放这儿。</div>
+      </section>
+
+      <!-- 表情包 -->
+      <section class="page" data-page="stickers" hidden>
+        <div class="page-head page-head-row">
+          <div>
+            <h1>表情包</h1>
+            <p class="page-sub" id="stkSub">正在读取…</p>
+          </div>
+          <button class="btn btn-primary" id="stkAdd" type="button">+ 上传表情包</button>
+        </div>
+        <div class="toolbar">
+          <button class="btn btn-ghost btn-sm" id="stkReload" type="button">重新加载</button>
+        </div>
+        <div class="sticker-grid" id="stkGrid"></div>
+        <div class="empty" id="stkEmpty" hidden></div>
+      </section>
+
+      <!-- 预算 -->
+      <section class="page" data-page="budget" hidden>
+        <div class="page-head">
+          <h1>预算</h1>
+          <p class="page-sub">每日积分上限与实际用量。改动额度请到「执行块 → 积分限制」。</p>
+        </div>
+        <div class="card-grid" id="budgetCards"></div>
+      </section>
+
+      <!-- 干活 -->
+      <section class="page" data-page="work" hidden>
+        <div class="page-head">
+          <h1>干活</h1>
+          <p class="page-sub">工作总线、研究开关与学习器。快捷动作与「执行块」共用同一套接口。</p>
+        </div>
+        <div class="card-grid" id="workCards"></div>
+        <div class="card card-block">
+          <h2 class="card-title">快捷执行</h2>
+          <div class="field">
+            <label class="field-label" for="workTask">指令内容</label>
+            <input class="input" id="workTask" type="text" placeholder="例如：总结一下今天群里的讨论" autocomplete="off">
+          </div>
+          <div class="row-actions">
+            <button class="btn btn-primary" id="workProbe" type="button">探活</button>
+            <button class="btn btn-ghost" id="workRun" type="button">跑一条指令</button>
+            <button class="btn btn-ghost" id="workResearch" type="button">研究测试</button>
+          </div>
+          <div class="action-result" id="workOut" hidden></div>
+        </div>
+      </section>
+
+      <!-- 守护 -->
+      <section class="page" data-page="watchdog" hidden>
+        <div class="page-head">
+          <h1>守护</h1>
+          <p class="page-sub">watchdog 的巡检状态、配置与计划任务。</p>
+        </div>
+        <!-- 骂人模式开关：独立容器。守护不可达时它也要照常显示与可点。 -->
+        <div class="card-grid" id="pestCards"></div>
+        <div class="card-grid" id="wdCards"></div>
+        <div class="card card-block">
+          <h2 class="card-title">快捷动作</h2>
+          <div class="row-actions">
+            <button class="btn btn-primary" id="wdStatus" type="button">读取状态</button>
+            <button class="btn btn-ghost" id="wdOnce" type="button">立即巡检一次</button>
+            <button class="btn btn-ghost" id="wdNotify" type="button">测试通知</button>
+            <button class="btn btn-ghost" id="wdLogs" type="button">查看日志</button>
+          </div>
+          <div class="action-result" id="wdOut" hidden></div>
+        </div>
+      </section>
+
+      <!-- NapCat -->
+      <section class="page" data-page="napcat" hidden>
+        <div class="page-head">
+          <h1>NapCat</h1>
+          <p class="page-sub">QQ 登录态与扫码入口。重启登录请到「执行块」，那里有二次确认。</p>
+        </div>
+        <div class="card-grid" id="ncCards"></div>
+        <div class="card card-block">
+          <h2 class="card-title">登录二维码</h2>
+          <p class="card-sub">二维码由 make-qr.mjs 现场生成，扫完即失效。</p>
+          <div class="row-actions">
+            <button class="btn btn-primary" id="ncQr" type="button">生成二维码</button>
+          </div>
+          <div class="action-result" id="ncOut" hidden></div>
+        </div>
+      </section>
+
+      <!-- 登录：扫码自助页。只在等待扫码期间轮询，进页面不会自动发请求 -->
+      <section class="page" data-page="login" hidden>
+        <div class="page-head">
+          <h1>登录</h1>
+          <p class="page-sub">二维码在本机现场生成，扫完即失效。这里只生成二维码，不会重启任何进程。</p>
+        </div>
+        <div class="login-status" id="loginStatus"></div>
+        <div class="login-success" id="loginSuccess" hidden></div>
+        <div class="login-error" id="loginError" hidden></div>
+        <div class="card card-block login-main">
+          <div class="login-actions">
+            <button class="btn btn-primary" id="loginGen" type="button">生成二维码</button>
+            <button class="btn btn-ghost btn-sm" id="loginRefresh" type="button">刷新状态</button>
+            <span class="login-progress" id="loginProgress" hidden></span>
+            <span class="login-countdown" id="loginCountdown" hidden></span>
+          </div>
+          <div class="login-qr" id="loginQr" hidden>
+            <img class="login-qr-img" id="loginQrImg" alt="QQ 登录二维码">
+            <div class="login-link-row">
+              <input class="input input-sm mono" id="loginUrl" type="text" readonly aria-label="二维码链接" spellcheck="false">
+              <button class="btn btn-ghost btn-sm" id="loginCopy" type="button">复制链接</button>
+            </div>
+            <p class="login-hint" id="loginHint"></p>
+          </div>
+          <div class="login-idle" id="loginIdle">
+            <p class="card-sub">点「生成二维码」会现场刷新一张新码（约 2–6 秒），然后用手机 QQ 扫码。</p>
+            <p class="login-hint">二维码约 2 分钟过期；过期后会自动换一张，最多连换 3 次。已登录时不需要扫码。</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- 执行块 -->
+      <section class="page" data-page="exec" hidden>
+        <div class="page-head">
+          <h1>执行块</h1>
+          <p class="page-sub">契约 §4.2 的 14 个动作。红色按钮会重启进程或改写配置，执行前会二次确认并写明后果。</p>
+        </div>
+        <div class="action-grid" id="actionGrid"></div>
+      </section>
+
+      <!-- 设置 -->
+      <section class="page" data-page="settings" hidden>
+        <div class="page-head">
+          <h1>设置</h1>
+          <p class="page-sub">连接信息与诊断。这里只读，真正的开关都在「执行块」。</p>
+        </div>
+        <div class="card-grid" id="setCards"></div>
+        <div class="card card-block">
+          <h2 class="card-title">诊断</h2>
+          <p class="card-sub">把当前 overview / memory / stickers 的原始 JSON 复制走，方便贴给 Molly 排查。</p>
+          <div class="row-actions">
+            <button class="btn btn-primary" id="setCopyDiag" type="button">复制诊断信息</button>
+            <button class="btn btn-ghost" id="setOpenLogs" type="button">打开日志抽屉</button>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+</div>
+
+<!-- 右下角浮动日志抽屉 -->
+<button class="btn log-fab" id="logFab" type="button">日志</button>
+<aside class="drawer" id="drawer" hidden aria-label="日志">
+  <div class="drawer-head">
+    <strong class="drawer-title">日志</strong>
+    <select class="input input-sm" id="logSource">
+      <option value="watchdog">watchdog</option>
+      <option value="plugin">plugin</option>
+    </select>
+    <span class="drawer-path mono" id="logPath"></span>
+    <button class="btn btn-ghost btn-sm" id="logReload" type="button">刷新</button>
+    <button class="btn btn-ghost btn-sm" id="logClose" type="button">收起</button>
+  </div>
+  <pre class="log-body mono" id="logBody">（尚未加载）</pre>
+</aside>
+
+<!-- 通用 CRUD 弹层：记忆新增/编辑/删除、表情包上传/改关键词/删除共用 -->
+<div class="modal" id="crudModal" hidden role="dialog" aria-modal="true" aria-labelledby="crudTitle">
+  <div class="modal-card crud-card">
+    <div class="crud-head">
+      <h2 class="card-title" id="crudTitle">编辑</h2>
+      <button class="btn btn-ghost btn-sm" id="crudClose" type="button" aria-label="关闭">×</button>
+    </div>
+    <div class="crud-body" id="crudBody"></div>
+    <p class="crud-error" id="crudError" hidden></p>
+    <div class="crud-foot">
+      <span class="crud-hint" id="crudHint"></span>
+      <button class="btn btn-ghost" id="crudCancel" type="button">取消</button>
+      <button class="btn btn-primary" id="crudOk" type="button">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 表情大图预览 -->
+<div class="modal" id="stkModal" hidden>
+  <div class="modal-card">
+    <img class="modal-img" id="stkModalImg" alt="">
+    <div class="modal-foot">
+      <span class="mono modal-name" id="stkModalName"></span>
+      <button class="btn btn-ghost btn-sm" id="stkModalClose" type="button">关闭</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<noscript><p class="noscript">控制台需要 JavaScript 才能读取数据。</p></noscript>
+
+</body>
+</html>

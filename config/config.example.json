@@ -1,0 +1,26 @@
+{
+  "$comment": "示例配置：复制成 config.local.json 再填自己的值。所有 ${...} 都需要替换。",
+  "napcat": {
+    "baseUrl": "http://127.0.0.1:6099",
+    "token": "${NAPCAT_TOKEN}",
+    "webuiJwtSecret": "${NAPCAT_JWT_SECRET}"
+  },
+  "onebot": {
+    "ws": "ws://127.0.0.1:3001",
+    "token": "${ONEBOT_TOKEN}",
+    "selfId": "111111111"
+  },
+  "console": {
+    "host": "127.0.0.1",
+    "port": 19392,
+    "token": "${CONSOLE_TOKEN}"
+  },
+  "plugin": {
+    "base": "http://127.0.0.1:7053/dsh-qq-whale",
+    "memoryDir": "${MOLLY_ROOT}/data/qq-whale/memory",
+    "stickerDir": "${MOLLY_ROOT}/data/qq-whale/stickers"
+  },
+  "pushplus": {
+    "token": "${PUSHPLUS_TOKEN}"
+  }
+}

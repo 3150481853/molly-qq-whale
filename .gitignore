@@ -1,0 +1,22 @@
+# 运行时数据（真实记忆/表情包/审批记录）
+data/
+memory.json
+memory.md
+pending.json
+gatekeeper.json
+relations.json
+pest.json
+stickers/
+persona/core.md
+
+# 本地配置与凭据
+config.local.*
+.env
+.env.*
+
+# 产物与日志
+out/
+dist/
+node_modules/
+*.log
+*.bak-*

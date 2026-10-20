@@ -1,0 +1,27 @@
+{
+  "name": "dsh-qq-whale",
+  "version": "0.1.0",
+  "description": "QQ 通道 for DeepSeek Harness — 蓝色大肥鱼住进 QQ：活人感回复、表情包斗图、持久记忆",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "qq",
+    "onebot",
+    "napcat",
+    "chatbot",
+    "persona"
+  ],
+  "type": "module",
+  "main": "lib/boot.js",
+  "files": [
+    "lib",
+    "persona",
+    "assets"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "license": "MIT"
+}

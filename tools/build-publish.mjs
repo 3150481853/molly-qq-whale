@@ -356,8 +356,22 @@ function fail(msg) {
   process.exit(1)
 }
 
+// 保留 .git：这个脚本会反复重跑，而 publish 目录整体重建会连带删掉
+// 之前 commit 过的历史、配好的 remote、以及已经 push 过的分支状态。
+// 做法是构建前把 .git 挪到旁边的临时目录，构建完再挪回来（内容一字不动）。
+const GIT_STASH = OUT + '.git-stash'
+const hadGit = fs.existsSync(path.join(OUT, '.git'))
+if (hadGit) {
+  fs.rmSync(GIT_STASH, { recursive: true, force: true })
+  fs.cpSync(path.join(OUT, '.git'), GIT_STASH, { recursive: true })
+}
 fs.rmSync(OUT, { recursive: true, force: true })
 fs.mkdirSync(OUT, { recursive: true })
+if (hadGit) {
+  fs.cpSync(GIT_STASH, path.join(OUT, '.git'), { recursive: true })
+  fs.rmSync(GIT_STASH, { recursive: true, force: true })
+  console.log('   · 已保留原有 .git（历史与 remote 不动）')
+}
 
 let copied = 0
 let bytes = 0

@@ -112,6 +112,8 @@ const DEFAULTS = {
   fallbackProvider: 'deepseek',
   fallbackModel: 'deepseek-chat',
   rateLimitRetryWaits: [4000, 9000, 18000],
+  /** 连续多次限流后的慢速重试（engine.js:2479 用 `?? [15000,30000]` 兜底） */
+  rateLimitRetryWaitsSlow: [15000, 30000],
 
   // —— 谁可以聊 ——
   allowedUsers: [],
@@ -455,10 +457,11 @@ function _configShapeReference(Schema) {
     maxTokens: s.natural().default(DEFAULTS.maxTokens),
     temperature: s.number().default(DEFAULTS.temperature),
     reasoningEffort: s.string().default(DEFAULTS.reasoningEffort),
-    fallbackEnabled: s.boolean().default(true).description('免费额度被限流时，降级到宿主模型继续聊（要花钱，但对话不断）'),
-    fallbackProvider: s.string().default(DEFAULTS.fallbackProvider).description('降级用的 provider（空=同 provider）'),
-    fallbackModel: s.string().default(DEFAULTS.fallbackModel).description('降级用的模型；留空则只重试不降级'),
+    fallbackEnabled: s.boolean().default(true).description('【预留·当前未接线】engine.js 只构造了 this.fallback，全文件没有调用点，改了不生效。限流最后一层是「说一句人话」；想接着聊请用备用脑 spareModel 或 traeProvider/traeModel'),
+    fallbackProvider: s.string().default(DEFAULTS.fallbackProvider).description('【预留·当前未接线】降级用的 provider（空=同 provider）'),
+    fallbackModel: s.string().default(DEFAULTS.fallbackModel).description('【预留·当前未接线】降级用的模型；留空则只重试不降级'),
     rateLimitRetryWaits: s.array(s.natural()).default(DEFAULTS.rateLimitRetryWaits).description('限流后的重试等待毫秒数，按序执行'),
+    rateLimitRetryWaitsSlow: s.array(s.natural()).default(DEFAULTS.rateLimitRetryWaitsSlow).description('连续多次限流后的慢速重试等待毫秒数（engine.js 里 `?? [15000,30000]` 兜底；之前缺 schema 项，UI 上没法配）'),
     allowedUsers: s.array(s.string()).default([]).description('允许私聊的 QQ 号'),
     ownerUin: s.string().default(DEFAULTS.ownerUin).description('主人 QQ 号（只有一个；留空则用 allowedUsers 第一个）'),
     approverUins: s

@@ -13,7 +13,7 @@ import path from 'node:path'
 // 教训（用户 m16827 段）：改完源码不 Copy-Item 就测，测的是旧代码，白跑一轮。
 const MOD =
   process.env.PEST_MODULE ||
-  'C:/Users/example/.dsh/profiles/desktop/node_modules/dsh-qq-whale/lib/pest.js'
+  'C:/Users/example/.dsh/profiles/desktop/node_modules/dsh-qq-pest/lib/pest.js'
 const { detectInjection, isStopWord, pickStopWord, PestKeeper, STOP_WORD_POOL } = await import(
   'file:///' + MOD
 )

@@ -46,7 +46,8 @@ const { CreditBudget, localDateKey } = await import(sub('./budget.js'))
 const { SpareBudget } = await import(sub('./spare-budget.js'))
 const { Researcher, needsResearch } = await import(sub('./research.js'))
 const { Gatekeeper, parseVerdict, personLabel } = await import(sub('./gatekeeper.js'))
-const { PestKeeper, detectInjection, isStopWord } = await import(sub('./pest.js'))
+// task-53 收口：pest 实现只在独立包 dsh-qq-pest 里，主包不再 import ./pest.js。
+// 主包拿到 qqPest 服务后由 main.js 把 keeper 注入 this.pest（取不到就是 null = 功能关闭）。
 const {
   inRestWindow,
   planDelivery,
@@ -59,11 +60,19 @@ const { mergeReportTexts, coreText, similarity, containment } = await import(sub
 // 出站 markdown 清洗（P6）。persona.js 的 splitReply 已经挂了这个，
 // 但下面三条直发路径绕过了 splitReply，得自己洗一遍。
 const { sanitizeOutbound } = await import(sub('./persona-sanitize.js'))
+// Stage 3 Step 1：纯文本碎屑（主人称呼/兜底话术/降智补丁/说话人标签/名片后缀）。
+// 全是纯函数；下面保留同名方法做一行转发，调用点一个都不动。
+const engineText = await import(sub('./engine-text.js'))
+const engineContext = await import(sub('./engine-context.js'))
+// Stage 3 Step 2：决策层（要不要理 / 要不要查 / 要不要停）。纯规则，状态全走 deps 注入。
+const engineDecision = await import(sub('./engine-decision.js'))
 
 const SCENE_PRIVATE = 'private'
 const SCENE_MENTION = 'group_mention'
 const SCENE_BYSTANDER = 'group_bystander'
 const SCENE_STICKER = 'sticker'
+// 决策层用的场景常量：模块不复制字符串，改协议时只有这一处
+const SCENES = { PRIVATE: SCENE_PRIVATE, MENTION: SCENE_MENTION, BYSTANDER: SCENE_BYSTANDER }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, Math.max(0, ms)))
 
@@ -459,20 +468,16 @@ export class ChatEngine {
      *
      * pestTargets 为空时整个模块不启用，行为跟加这个模块之前完全一样。
      */
-    const pestTargets = (Array.isArray(config.pestTargets) ? config.pestTargets : [])
-      .map((x) => String(x || '').trim())
-      .filter((x) => /^\d{5,12}$/.test(x))
-    this.pest = new PestKeeper({
-      dir: config.memoryDir,
-      logger,
-      targets: pestTargets,
-      dailyCap: Number(config.pestDailyCap ?? 8),
-      intervalMinutes: Number(config.pestIntervalMinutes ?? 45),
-      // 睡觉不骂人：复用主配置的休息时段
-      restWindows: config.restWindows || [],
-      // 只对熟人开团。陌生人不主动骂——那不是玩，是骚扰。
-      isKnown: (uid) => this.isAllowedUser(uid),
-    })
+    /*
+     * task-53 收口：pest 只有**一份实现**，在独立包 dsh-qq-pest 里。
+     *
+     * engine 不再自己 new：主包从 qqPest 服务拿到 createKeeper 后，会把实例注入
+     * 到 this.pest；拿不到就保持 null。下面所有判定（停止词、静音、开团、播报）
+     * 都用 `this.pest?.` 守卫，null 等价于「pest 功能整体不可用」——聊天主链路
+     * 完全不受影响，缺口在 /state.plugins 的 missing 里看得见。
+     * 这样就不会出现「主包一份旧副本 + 新包一份新实现」的双写源。
+     */
+    this.pest = null
 
     /**
      * 最近一次「问主人」的时间戳。
@@ -512,6 +517,15 @@ export class ChatEngine {
     }
   }
 
+  /**
+   * 当前时间（毫秒）。Stage 3 Step 2 起统一走这里，不再直接摸 Date.now：
+   * 快照机可以把时钟钉死，才能覆盖限流重试/slowMode/trae/@冷却这些时间相关分支。
+   * 默认就是 Date.now()，行为不变；需要注入时赋值 this.now = () => 固定值。
+   */
+  now() {
+    return Date.now()
+  }
+
   async init() {
     const s = this.stickers.scan()
     this.logger('info', `表情包图库：${s.count} 张（跳过 ${s.skipped} 个超大文件）`)
@@ -538,7 +552,7 @@ export class ChatEngine {
    */
   startTraeHealthLoop() {
     if (!this.trae) {
-      this.traeHealth = { ok: false, error: '备用脑未配置', at: Date.now() }
+      this.traeHealth = { ok: false, error: '备用脑未配置', at: this.now() }
       return
     }
     const interval = this.config.traeHealthIntervalMs ?? 10 * 60 * 1000
@@ -565,7 +579,7 @@ export class ChatEngine {
       ok: Boolean(res?.ok),
       error: res?.ok ? '' : String(res?.error || '未知错误').slice(0, 120),
       ms: res?.ms ?? 0,
-      at: Date.now(),
+      at: this.now(),
     }
     if (res?.ok) this.logger('debug', `备用脑探活通过（${this.traeHealth.ms}ms）`)
     else this.logger('warn', `备用脑探活失败：${this.traeHealth.error}`)
@@ -619,30 +633,11 @@ export class ChatEngine {
    * 私聊 → private；群里 @ 我或回我 → group_mention；否则 bystander。
    */
   decideScene(ev, norm) {
-    if (ev.message_type !== 'group') return SCENE_PRIVATE
-    if (norm.isAtMe) return SCENE_MENTION
-    // 回复我的消息也算点名
-    if (norm.replyTo && this.isReplyToMe(ev, norm.replyTo)) return SCENE_MENTION
-    /*
-     * 文本兜底：@ 不一定是独立的消息段。
-     *
-     * 真机踩过（2026-10-18 09:28/09:50/09:59 连续三次 @ 无回应）：
-     * NapCat 推上来的 message 里，用户@"Molly（在想…） 给我介绍一下MARSOC"
-     * 是**整条一个 text 段**，没有任何 at 段：
-     *
-     *   message: [{type:'text', data:{text:'@Molly（在想…） 给我介绍一下MARSOC'}}]
-     *
-     * 于是 norm.isAtMe 恒 false → scene 判成 SCENE_BYSTANDER →
-     * shouldRespond 走 willingness 打分（没有问号、没有食物词、长度不够，
-     * 0.18 分）→ 被 bystanderThreshold 拦掉 → 她一声不吭。
-     * 表现就是"群里 @ 她不回，私聊却好好的"。
-     *
-     * 判据用**昵称 + 群名片 + QQ 号**三种写法：群名片会改（她自己的名片
-     * 还带着「（在想…）」这种实时状态），昵称也可能被改，只有号最稳，
-     * 但 QQ 客户端 @ 人时显示的是名字不是号，所以三种都要认。
-     */
-    if (this.looksLikeAtMe(norm.text)) return SCENE_MENTION
-    return SCENE_BYSTANDER
+    return engineDecision.decideScene(ev, norm, {
+      scenes: SCENES,
+      looksLikeAtMe: (t) => this.looksLikeAtMe(t),
+      isReplyToMe: (e, id) => this.isReplyToMe(e, id),
+    })
   }
 
   /**
@@ -653,51 +648,19 @@ export class ChatEngine {
    * 名字，名字之后必须是分隔符（空白 / 标点 / 结尾）。
    */
   looksLikeAtMe(text) {
-    const t = String(text || '')
-    const at = t.indexOf('@')
-    if (at < 0) return false
-    const names = []
-    const push = (v) => {
-      const s = String(v || '').trim()
-      if (s && !names.includes(s)) names.push(s)
-    }
-    push(this.selfId)          // QQ 号：最稳，但客户端 @ 时通常显示名字
-    push(this.client?.self?.nickname)  // 昵称
-    // 群名片：她自己的名片带「（在想…）」这类实时状态，基础名也要认
-    try {
-      for (const base of this.groupCardBase?.values?.() || []) push(base)
-    } catch {}
-    const rest = t.slice(at + 1)
-    /*
-     * 名字之后必须是「边界」——空白、标点、括号、结尾。
-     * 否则群里有人叫「Molly的粉丝」，@他时会被当成 @我。
-     * 中文名字后面常常直接跟标点或空格，所以边界集要宽：
-     * 全角/半角括号、冒号、逗号、句号、空格、换行、结尾。
-     */
-    const isBoundary = (ch) => ch === undefined || ch === '' || /[\s，。！？、：；,.!?:;()（）【】\[\]"'“”‘’…~～\-—_]/.test(ch)
-
-    const tryName = (n) => {
-      if (!n) return false
-      if (!rest.startsWith(n)) return false
-      const after = rest.charAt(n.length)
-      return isBoundary(after)
-    }
-
-    for (const n of names) {
-      if (tryName(n)) return true
-    }
-    // 兜底：名字带状态后缀的形式（Molly（在想…））—— 去掉括号部分再试
-    for (const n of names) {
-      const base = n.replace(/[（(].*?[)）]$/, '').trim()
-      if (base && base !== n && tryName(base)) return true
-    }
-    return false
+    // Stage 3 Step 2：规则在 engine-decision.js，这里只注入状态
+    return engineDecision.looksLikeAtMe(text, {
+      selfId: this.selfId,
+      nickname: this.client?.self?.nickname,
+      groupCardBases: this.groupCardBase,
+    })
   }
 
   isReplyToMe(ev, replyMessageId) {
-    const conv = this.conversations.get(this.conversationKey(ev))
-    if (!conv) return false
-    return conv.history.some((h) => h.messageId === replyMessageId && h.role === 'assistant')
+    return engineDecision.isReplyToMe(ev, replyMessageId, {
+      conversations: this.conversations,
+      conversationKey: (e) => this.conversationKey(e),
+    })
   }
 
   /**
@@ -705,45 +668,15 @@ export class ChatEngine {
    * 私聊必回（除非睡觉且不是被叫醒）；群里按意愿分掷骰子。
    */
   shouldRespond({ scene, ev, norm, conv }) {
-    if (scene === SCENE_PRIVATE) {
-      /*
-       * 私聊三态（用户 m16260 改的）：
-       *   1. 主人 / 白名单里的人 → 照常聊
-       *   2. 陌生人 → **不回复对方**，转成一条审批请求发给主人
-       *   3. 已拒绝的人 → 静默
-       *
-       * 注意第 2 条：这里返回 yes:false 是有意的。绝不能让陌生人收到
-       * 任何自动回复 —— 一旦回了，对方就知道背后有人在看，还会被用来
-       * 试探"发一条就能确认有人"。真正的动作（私信主人）在 onMessage 里
-       * 由 handleStranger 单独做，跟"要不要回这条消息"是两件事。
-       */
-      if (!this.isAllowedUser(ev.user_id)) return { yes: false, reason: '陌生人来访（转审批）' }
-      return { yes: true }
-    }
-    // 群聊
-    if (!this.isAllowedGroup(ev.group_id)) return { yes: false, reason: '非白名单群' }
-    if (scene === SCENE_MENTION) return { yes: true }
-
-    // 「明确要她干活/查事」的旁观消息必须回——这跟闲聊意愿是两码事。
-    // 真机踩过：主人在群里说「查一下示例成员C那边的天气吧」，没 @，willingness
-    // 只打 0.18（没有问号、没有食物词、长度不够加分），低于 bystanderThreshold
-    // 被当成闲聊拦掉，只点了个表情反应。但这句话命中 research 的强信号
-    // （查一下|查查|搜一下|帮我查…），是明确的指令，不是可回可不回的闲话。
-    // 所以：只要 needsResearch 判定要查，就强制回（由 research 链路去查+回答）。
-    const researchVerdict = this.decideResearch(norm.text)
-    if (researchVerdict.need) return { yes: true, reason: '明确请求（research）' }
-
-    const recentSelf = conv.history.filter((h) => h.role === 'assistant').length
-    const lastSelfSpeakMs = conv.lastSelfAt ? Date.now() - conv.lastSelfAt : Infinity
-    const w = willingness({
-      scene,
-      text: norm.text,
-      isAtMe: false,
-      recentSelfMessages: recentSelf,
-      lastSelfSpeakMs,
+    return engineDecision.shouldRespond({ scene, ev, norm, conv }, {
+      scenes: SCENES,
+      isAllowedUser: (id) => this.isAllowedUser(id),
+      isAllowedGroup: (id) => this.isAllowedGroup(id),
+      decideResearch: (t) => this.decideResearch(t),
+      willingness,
+      now: () => this.now(),
+      config: this.config,
     })
-    const threshold = this.config.bystanderThreshold ?? 0.62
-    return { yes: w >= threshold, willingness: w, threshold }
   }
 
   /**
@@ -758,20 +691,11 @@ export class ChatEngine {
    * 批过的人名单落盘在 gatekeeper.json，重启不丢。
    */
   isAllowedUser(userId) {
-    const id = String(userId)
-    const list = this.config.allowedUsers || []
-    if (list.length === 0 && !this.gatekeeper) return false
-    if (list.map(String).includes(id)) return true
-    try {
-      if (this.gatekeeper?.isApproved(id)) return true
-    } catch {}
-    return false
+    return engineDecision.isAllowedUser(userId, { config: this.config, gatekeeper: this.gatekeeper })
   }
 
   isAllowedGroup(groupId) {
-    const list = this.config.allowedGroups || []
-    if (list.length === 0) return false
-    return list.map(String).includes(String(groupId))
+    return engineDecision.isAllowedGroup(groupId, { config: this.config })
   }
 
   /**
@@ -783,10 +707,11 @@ export class ChatEngine {
    * 就能把判定结果和实际查到的内容一起吐出来。
    */
   decideResearch(text) {
-    const enabled = this.config.researchEnabled !== false
-    const available = Boolean(this.researcher?.available)
-    if (!available) return { need: false, query: '', reason: 'researcher-unavailable' }
-    return needsResearch(text, { enabled })
+    return engineDecision.decideResearch(text, {
+      config: this.config,
+      researcher: this.researcher,
+      needsResearch,
+    })
   }
 
   // ———————————————— 陌生人审批 ————————————————
@@ -850,7 +775,7 @@ export class ChatEngine {
       // 同时发给所有审批人（主主人 + approverUins），谁先回谁生效
       const sent = await this.sendToOwners(msg)
       gk.markAsked(uid)
-      this.lastAskAt = Date.now()
+      this.lastAskAt = this.now()
       this.logger('info', `陌生人 ${personLabel(entry)} 来访，已私信 ${sent} 位审批人求批`)
     } catch (err) {
       this.logger('warn', `陌生人审批通知失败：${err?.message || err}`)
@@ -882,7 +807,7 @@ export class ChatEngine {
          * 单人场景不加这个分支，否则主人随手打个「1」也会被塞一句系统话。
          */
         const v0 = parseVerdict(norm.text)
-        const inWindow0 = Date.now() - this.lastAskAt < this.ASK_WINDOW_MS
+        const inWindow0 = this.now() - this.lastAskAt < this.ASK_WINDOW_MS
         if (v0 && !v0.userId && inWindow0 && (gk.owners || []).length > 1) {
           await this.replyTo(ev.user_id, '这条已经有人处理过了，你这边不用再回了~')
           return true
@@ -890,7 +815,7 @@ export class ChatEngine {
         return false
       }
 
-      const inWindow = Date.now() - this.lastAskAt < this.ASK_WINDOW_MS
+      const inWindow = this.now() - this.lastAskAt < this.ASK_WINDOW_MS
       const v = parseVerdict(norm.text)
       if (!v) return false
 
@@ -949,7 +874,8 @@ export class ChatEngine {
           }
         }
 
-        gk.approve(target)
+        // task-43：把「谁批的」一起落盘，审计能回答「这条放行是谁点的」
+        gk.approve(target, Date.now(), String(ev.user_id || ''))
         /*
          * 批准后立刻补一句给对的人。
          *
@@ -1127,7 +1053,7 @@ export class ChatEngine {
       // 判断过期，漏了这个字段就等于 at=0，刚登记的记录在第一次 snapshot()
       // 时就被当成"7 天前的陈旧数据"删掉了 —— 真机上表现为审批提示发了、
       // 主人回「1」却完全没反应（因为 pending 已经空）。
-      const now = Date.now()
+      const now = this.now()
       gk.pending.set(target, {
         userId: target,
         kind: flag,
@@ -1150,7 +1076,7 @@ export class ChatEngine {
       const bodyText = body.filter((x) => x !== '').join('\n')
       const sent = await this.sendToOwners((uin) => `${this.titleFor(uin)}${bodyText}`)
       gk.markAsked(target)
-      this.lastAskAt = Date.now()
+      this.lastAskAt = this.now()
       this.logger('info', `收到${flag === 'friend' ? '加好友' : '拉群'}申请 ${target}，已问 ${sent} 位审批人`)
     } catch (err) {
       this.logger('warn', `处理申请失败：${err?.message || err}`)
@@ -1194,9 +1120,11 @@ export class ChatEngine {
    * 别人收到的是原文，不带称呼。
    */
   titleFor(uin) {
-    const owners = (this.gatekeeper?.owners || []).map(String)
-    const u = String(uin || '')
-    return owners[0] && owners[0] === u ? String(this.config?.ownerTitle ?? this.ownerTitle ?? '') : ''
+    // Stage 3 Step 1：实现搬到 engine-text.js，这里只负责从 this 上取依赖
+    return engineText.titleFor(uin, {
+      owners: (this.gatekeeper?.owners || []).map(String),
+      ownerTitle: String(this.config?.ownerTitle ?? this.ownerTitle ?? ''),
+    })
   }
 
   /**
@@ -1343,7 +1271,7 @@ export class ChatEngine {
 
     const scene = this.decideScene(ev, norm)
     const conv = this.getConversation(this.conversationKey(ev))
-    const now = Date.now()
+    const now = this.now()
 
     /*
      * 审批回复优先（用户 m16260）。
@@ -1403,7 +1331,8 @@ export class ChatEngine {
     if (await this.pestMuteGate(ev, scene, norm)) return
 
     if (this.pest?.enabled && this.pest.isTarget(ev.user_id)) {
-      const probe = detectInjection(norm.text)
+      // task-53：detectInjection 随 keeper 一起由独立包注入（见 main.js makePestKeeper）
+      const probe = this.pest.detectInjection?.(norm.text) || { hit: false }
       if (probe.hit) {
         this.logger('warn', `检测到上下文塞入（${probe.why}），来自 ${ev.user_id}：${String(norm.text).slice(0, 60)}`)
         this.pest.noteInfection(ev.user_id, `${probe.why}｜${String(norm.text).slice(0, 100)}`)
@@ -1602,7 +1531,7 @@ export class ChatEngine {
       route: route.route,
       by: route.by,
       why: route.why,
-      at: Date.now(),
+      at: this.now(),
     }
     if (this.routeState.counts[route.route] !== undefined) this.routeState.counts[route.route] += 1
     return this.routeState.last
@@ -1676,8 +1605,28 @@ export class ChatEngine {
       this.routeState.counts.chat += 1
       return { handled: false, route }
     }
+    /*
+     * task-43：命令入口的角色门（实际生效的是这条路径：#work/#code 覆盖
+     * 或「命令 」前缀都会走到这里）。只有 owner 独占的关键词命中、且当前
+     * 角色不够时，直接回固定一句话并停手——绝不把活派给 agent 让它自由发挥。
+     */
+    const roleGate = ex.gateCommand?.(route.text || text, ev)
+    if (roleGate && !roleGate.ok) {
+      await this.sendTextTo(ev, roleGate.message).catch((err) =>
+        this.logger('warn', `越权回复发送失败：${err?.message || err}`),
+      )
+      if (this.routeState.last) {
+        this.routeState.last.refused = true
+        this.routeState.last.refusedCap = roleGate.cap
+        this.routeState.last.refusedRole = roleGate.role
+      }
+      this.logger(
+        'warn',
+        `路由=${route.route} 被角色门拒绝：uin=${ev.user_id} role=${roleGate.role} cap=${roleGate.cap}`,
+      )
+      return { handled: true, refused: true, route }
+    }
     this.tapEmoji(ev.message_id, this.config.commandConfirmEmoji ?? 424).catch(() => {})
-    this.logger('info', `${userName} 下指令[${route.route}]（${route.why}）：${route.text}`)
     this.runCommand({
       ev,
       conv,
@@ -1726,6 +1675,22 @@ export class ChatEngine {
     const verdict = await ex.classify(text)
     if (verdict.kind !== 'command' || !verdict.task) return { handled: false }
 
+    /*
+     * task-43：命令入口的角色门。
+     *
+     * adm（333333333）原来和 owner 完全等价——「命令 重启 DSH」「命令 打开
+     * 骂人模式」都照做。这里在**真正执行之前**问一句 executor.gateCommand：
+     * 只有 owner 独占的关键词命中、且当前角色不够，就直接回固定一句话，
+     * 不进干活会话（绝不让模型自己判断该不该做）。
+     */
+    const gate = ex.gateCommand?.(verdict.task, ev)
+    if (gate && !gate.ok) {
+      await this.sendTextTo(ev, gate.message).catch((err) =>
+        this.logger('warn', `越权回复发送失败：${err?.message || err}`),
+      )
+      return { handled: true, refused: true, cap: gate.cap, reason: gate.message }
+    }
+
     this.logger('info', `${userName} 下指令：${verdict.task}`)
     // 先确认收到（点个 👌），免得主人以为没听见
     this.tapEmoji(ev.message_id, this.config.commandConfirmEmoji ?? 424).catch(() => {})
@@ -1754,6 +1719,73 @@ export class ChatEngine {
    * （lib/qqtools.js 组 params 只放 user_id/group_id + message）。
    * 锚点是 client 对象上的标记，重连换 client 后会自然重新包一次。
    */
+  /**
+   * 打开一条命令的「自发汇报」捕获句柄。
+   *
+   * 为什么要有句柄（task-53 并发修复）：以前是单个 `this.reportCapture` 字段，
+   * 两条命令并发时后一条会把字段覆盖掉——
+   *   ① 前一条的 finally 一看 `this.reportCapture !== capture` 就不敢清空，
+   *      后一条收尾时清的是自己的，前一条的 notes 永远没人投递；
+   *   ② agent 自发汇报按 target 命中"当前那个"capture，于是前一条的汇报
+   *      被并进后一条的结果里，用户看到的就是「答了一半就没了」。
+   * 现在每条命令拿自己的 handle，close() 只关自己，并按 target 反查归属。
+   */
+  openCapture(target) {
+    if (!Array.isArray(this._captures)) this._captures = []
+    const handle = {
+      active: true,
+      target: String(target),
+      notes: [],
+      openedAt: this.now(),
+      close: () => this.closeCapture(handle),
+    }
+    this._captures.push(handle)
+    // 兼容老字段：reportCapture 始终指向"最新打开且仍活跃"的那个
+    this.reportCapture = handle
+    return handle
+  }
+
+  /** 关掉自己那一份捕获；不动别人的。 */
+  closeCapture(handle) {
+    if (!handle) return
+    handle.active = false
+    if (Array.isArray(this._captures)) {
+      const i = this._captures.indexOf(handle)
+      if (i >= 0) this._captures.splice(i, 1)
+      this.reportCapture = this._captures.length ? this._captures[this._captures.length - 1] : null
+    } else if (this.reportCapture === handle) {
+      this.reportCapture = null
+    }
+  }
+
+  /**
+   * 这条出站消息该计入谁的 notes。
+   *
+   * 只认同 target 且仍活跃的句柄，多个时取**最后打开**的那个（和旧行为一致：
+   * 最近开始执行的那条命令最可能是这条汇报的发出者）。
+   * 真正的归属歧义没法在这里消除——工具式发送不带命令 id，引擎无法把一次
+   * agent 汇报关联到具体某条命令；能做的是：不吞引擎自己的收尾、不跨 target 串。
+   */
+  pickCaptureFor(action, params) {
+    if (!Array.isArray(this._captures) || this._captures.length === 0) {
+      /*
+       * 兼容老字段（task-53 之前是单个 this.reportCapture）：老调用方/老测试
+       * 只设置 reportCapture 时也要能捕获。新代码一律走 _captures。
+       */
+      const legacy = this.reportCapture
+      return legacy && legacy.active ? legacy : null
+    }
+    const isPrivate = action === 'send_private_msg'
+    const isGroup = action === 'send_group_msg'
+    if (!isPrivate && !isGroup) return null
+    const target = String(isPrivate ? params.user_id : params.group_id)
+    for (let i = this._captures.length - 1; i >= 0; i--) {
+      const cap = this._captures[i]
+      if (cap.active && String(cap.target) === target) return cap
+    }
+    return null
+  }
+
   installReportCapture() {
     const client = this.client
     if (!client || typeof client.call !== 'function' || client.__qqWhaleReportTap) return
@@ -1774,7 +1806,7 @@ export class ChatEngine {
          * _selfSendDepth 只在 runCommand 自己的 send() 里 +1，深度 >0 时放行。
          */
         if ((engine._selfSendDepth || 0) > 0) return originalCall(action, params, timeoutMs)
-        const cap = engine.reportCapture
+        const cap = engine.pickCaptureFor?.(action, params) || null
         if (cap && cap.active && params && typeof params === 'object') {
           const isPrivate = action === 'send_private_msg'
           const isGroup = action === 'send_group_msg'
@@ -1859,8 +1891,8 @@ export class ChatEngine {
      * 收尾时跟最终结果合并成一条。target 就是本次命令所在的会话。
      */
     this.installReportCapture()
-    const capture = { active: true, target: key, notes: [] }
-    this.reportCapture = capture
+    // 每条命令一个句柄：并发时各关各的，不再互相覆盖（见 openCapture 注释）
+    const capture = this.openCapture(key)
 
     // 先拿到（或建出）干活会话，这样后面能盯它的 todos 投影
     let watchId = null
@@ -1914,7 +1946,7 @@ export class ChatEngine {
         await sleep(800 + Math.random() * 1500)
         const o = openings[Math.floor(Math.random() * openings.length)]
         await sendText(o)
-        this.pushHistory(conv, { role: 'assistant', text: o, at: Date.now(), messageId: `self-${Date.now()}` })
+        this.pushHistory(conv, { role: 'assistant', text: o, at: this.now(), messageId: `self-${this.now()}` })
       } catch (err) {
         this.logger('warn', `开工反馈发送失败: ${err?.message || err}`)
       }
@@ -1922,7 +1954,13 @@ export class ChatEngine {
 
     try {
       if (!preBlocked) {
-        result = await ex.run(task, watchId ? { onProgress: sendText } : {})
+        // task-43：把发起人身份一并透传（工具层仍拿不到，这是留痕 + 排查口径）
+      const cmdMeta = {
+        uin: String(ev.user_id || ''),
+        role: ex.roleOf?.(ev.user_id) || 'guest',
+        route,
+      }
+      result = await ex.run(task, watchId ? { onProgress: sendText, meta: cmdMeta } : { meta: cmdMeta })
       }
     } catch (err) {
       /*
@@ -1940,8 +1978,7 @@ export class ChatEngine {
        * 顺序不能反：下面 endWatch() 和结果投递本身也走 client.call，
        * 捕获还开着的话，自己的气泡会被自己吞掉。
        */
-      capture.active = false
-      if (this.reportCapture === capture) this.reportCapture = null
+      capture.close()
 
       // 收尾：停止盯，避免下一次聊天的 todo 变化被误播
       if (watchId) {
@@ -1996,19 +2033,19 @@ export class ChatEngine {
         { ...this.config, reactionMinSeconds: 0.5, reactionMaxSeconds: 1.5 },
         Math.random,
       )
-      const startedAt = Date.now()
+      const startedAt = this.now()
       for (const step of plan) {
-        const wait = step.at - (Date.now() - startedAt)
+        const wait = step.at - (this.now() - startedAt)
         if (wait > 0) await sleep(wait)
         try {
           await send(buildMessage([{ type: 'text', text: step.part.text }]))
           this.pushHistory(conv, {
             role: 'assistant',
             text: step.part.text,
-            at: Date.now(),
-            messageId: `self-${Date.now()}`,
+            at: this.now(),
+            messageId: `self-${this.now()}`,
           })
-          conv.lastSelfAt = Date.now()
+          conv.lastSelfAt = this.now()
           delivered = true
         } catch (err) {
           this.logger('warn', `结果发送失败: ${err?.message || err}`)
@@ -2024,8 +2061,8 @@ export class ChatEngine {
         this.pushHistory(conv, {
           role: 'assistant',
           text: '这边出了点岔子，结果没发出去。',
-          at: Date.now(),
-          messageId: `self-${Date.now()}`,
+          at: this.now(),
+          messageId: `self-${this.now()}`,
         })
       } catch (err) {
         this.logger('error', `兜底提示也发不出去：${err?.message || err}`)
@@ -2126,20 +2163,16 @@ export class ChatEngine {
    */
   noteTopic({ ev, text }) {
     if (!this.stall) this.stall = new Map()
-    const key = this.conversationKey(ev)
-    const core = coreText(String(text || ''))
-    const prev = this.stall.get(key)
-    let misses = 0
-    if (prev && prev.core && core) {
-      const sim = Math.max(similarity(prev.core, core), containment(prev.core, core))
-      if (sim >= STALL_SIMILARITY) misses = prev.misses || 0
-    }
-    if (!core) {
-      // 纯图片/表情消息不参与话题判定，沿用上一次的话题状态
-      return { key, core: prev?.core || '', misses, hardStop: misses >= STALL_LIMIT }
-    }
-    this.stall.set(key, { core, misses, at: Date.now() })
-    return { key, core, misses, hardStop: misses >= STALL_LIMIT }
+    return engineDecision.noteTopic({ ev, text }, {
+      stall: this.stall,
+      conversationKey: (e) => this.conversationKey(e),
+      now: () => this.now(),
+      coreText,
+      similarity,
+      containment,
+      similarityThreshold: STALL_SIMILARITY,
+      limit: STALL_LIMIT,
+    })
   }
 
   /**
@@ -2151,22 +2184,17 @@ export class ChatEngine {
    */
   noteOutcome({ key, core, replyText, researchFound }) {
     if (!this.stall) this.stall = new Map()
-    const noEvidence = !researchFound && STALL_NO_EVIDENCE_RE.test(String(replyText || ''))
-    const prev = this.stall.get(key) || { core: core || '', misses: 0 }
-    const misses = noEvidence ? (prev.misses || 0) + 1 : 0
-    this.stall.set(key, { core: core || prev.core || '', misses, at: Date.now() })
-    return { misses, hardStop: misses >= STALL_LIMIT, noEvidence }
+    return engineDecision.noteOutcome({ key, core, replyText, researchFound }, {
+      stall: this.stall,
+      now: () => this.now(),
+      noEvidenceRe: STALL_NO_EVIDENCE_RE,
+      limit: STALL_LIMIT,
+    })
   }
 
   /** P2：命中硬停止时往 system 里追加的那段（只讲这一轮怎么收口，不讲人格）。 */
   stallStopSection(misses) {
-    return [
-      '# 这一轮别再问了',
-      `同一个问题你已经连着问了 ${misses} 回，还是没拿到新东西。`,
-      '这轮不许再查、不许再换关键词、不许再让对方「发一下 / 说清楚 / 截图给我」。',
-      '直接收口：明说翻不到了，然后给出你现在能给的、最接近的说法。',
-      '要对方补信息最多一句话，说完立刻给结论，不要连环追问。',
-    ].join('\n')
+    return engineDecision.stallStopSection(misses)
   }
 
   /**
@@ -2236,8 +2264,8 @@ export class ChatEngine {
           this.pushHistory(conv, {
             role: 'system',
             text: `（我刚在网上查到：${research.summary}）`,
-            at: Date.now(),
-            messageId: `research-${Date.now()}`,
+            at: this.now(),
+            messageId: `research-${this.now()}`,
           })
         }
       }
@@ -2251,7 +2279,7 @@ export class ChatEngine {
      */
     if (this.researcher?.available && !budgetOut) {
       this.lastResearch = {
-        at: Date.now(),
+        at: this.now(),
         need: Boolean(researchVerdict?.need),
         reason: String(researchVerdict?.reason || ''),
         found: Boolean(research?.ok && research?.summary),
@@ -2308,7 +2336,7 @@ export class ChatEngine {
       this.logger('warn', `P2 收口兜底：模型仍在追问，换成固定收口文案（累计无新证据 ${outcome.misses} 轮）`)
       replyText = STALL_FALLBACK_REPLY
       // 已经收过口了，计数归零：别让后面每一轮都被这条闸按住
-      this.stall.set(stall.key, { core: stall.core, misses: 0, at: Date.now() })
+      this.stall.set(stall.key, { core: stall.core, misses: 0, at: this.now() })
     }
 
     const parts = this.persona.splitReply(replyText, {
@@ -2339,7 +2367,7 @@ export class ChatEngine {
     const text = lines[Math.floor(Math.random() * lines.length)]
     this.logger('warn', `今日免费积分已用完（${used}/${cap}），通知主人并切 trae`)
     await this.sendTextTo(ev, text)
-    this.pushHistory(conv, { role: 'assistant', text, at: Date.now(), messageId: `self-${Date.now()}` })
+    this.pushHistory(conv, { role: 'assistant', text, at: this.now(), messageId: `self-${this.now()}` })
   }
 
   /**
@@ -2412,7 +2440,7 @@ export class ChatEngine {
     const text = lines[Math.floor(Math.random() * lines.length)]
     this.logger('warn', `备用脑积分已用完（${used}/${cap}），后面只能走 trae`)
     await this.sendTextTo(ev, text)
-    this.pushHistory(conv, { role: 'assistant', text, at: Date.now(), messageId: `self-${Date.now()}` })
+    this.pushHistory(conv, { role: 'assistant', text, at: this.now(), messageId: `self-${this.now()}` })
   }
 
   /**
@@ -2634,7 +2662,7 @@ export class ChatEngine {
    */
   enterSlowMode(flavor) {
     this.slowMode = true
-    this.slowSince = Date.now()
+    this.slowSince = this.now()
     this.limitPressure = (this.limitPressure || 0) + 2
     this.logger('info', `进入省着用模式：回复间隔拉长、重试更耐心、暂停主动找人（当前 ${flavor} 版）`)
   }
@@ -2658,7 +2686,7 @@ export class ChatEngine {
   maybeExitSlowMode() {
     if (!this.slowMode) return
     const holdMs = this.config.slowModeHoldMs ?? 30 * 60 * 1000
-    if (Date.now() - (this.slowSince || 0) < holdMs) return
+    if (this.now() - (this.slowSince || 0) < holdMs) return
     if ((this.limitPressure || 0) > 0) return
     this.slowMode = false
     this.slowSince = 0
@@ -2730,12 +2758,8 @@ export class ChatEngine {
 
   /** 限流兜底：用鱼的口气说一句，比沉默强 */
   rateLimitLine() {
-    const pool = [
-      '等下……我这边嘴被堵住了，缓一会儿再跟你说',
-      '白饭不够了，脑子转不动，容我歇一下',
-      '唔，这会儿轮不上我说话，等会再讲',
-    ]
-    return pool[Math.floor(Math.random() * pool.length)]
+    // Stage 3 Step 1：话术池搬到 engine-text.js（随机源保持 Math.random）
+    return engineText.rateLimitLine()
   }
 
   /**
@@ -2748,156 +2772,13 @@ export class ChatEngine {
    * 抽出来以后两个入口共用同一段话，不会再漂。
    */
   withDegradedNote(system) {
-    const s = String(system || '')
-    if (s.includes('脑子转得比平时慢')) return s
-    return (
-      s +
-      '\n\n# 现在的情况\n' +
-      '你今天的白饭额度用完了，现在靠一点余粮撑着，脑子转得比平时慢。\n' +
-      '所以：**说短一点，一句话能说完就别铺垫**。省着力气。'
-    )
+    // Stage 3 Step 1：文案搬到 engine-text.js（幂等语义不变）
+    return engineText.withDegradedNote(system)
   }
 
   /** 拼 system prompt：人设内核 + 场景 + 记忆 + 图库 + 刚查到的东西 */
-  buildSystemPrompt({ scene, userName, qq = '', groupName, mood, conv, degraded = false, research = '' }) {
-    let sp = this.persona.systemPrompt({
-      scene,
-      selfNickname: this.client?.self?.nickname || 'Molly',
-      userName,
-      groupName,
-      mood,
-      // 「骂人模式」总闸（task-37）：关掉时 persona 不会拼 pest-mode.md 那节，
-      // 她对被骂对象就跟普通群友一样，不再有任何主动攻击的指令来源。
-      pestMode: this.pest?.enabled === true,
-    })
-
-    /*
-     * 刚查到的事实，塞进 system prompt。
-     *
-     * 措辞上刻意把它写成"你刚查到的"而不是"参考信息"——她要当成自己的
-     * 知识用会自己的话说出来，而不是像念检索结果。同时还给了"查不准就
-     * 别硬说"的退路：检索结果经常是过期或者答非所问，硬圆比承认不知道
-     * 更难看。
-     */
-    if (research) {
-      sp +=
-        '\n\n# 你刚刚查到的\n' +
-        research +
-        '\n\n（这是你刚才自己上网查来的。用你自己的话讲，别原样复述，别提"搜索""资料"这些词。' +
-        '如果这跟人家问的对不上、或者内容含糊，就说"这个我没查到"——' +
-        '**注意：是这一个问题没查到，不是你不能查。别说"我上不了网""我没那功能"这种话。**）'
-    }
-
-    /*
-     * 降智模式（超了免费额度，走 trae）。
-     *
-     * 用户原话（m02427-2）：「trae 的模型量和速度都很小，你需要在使用 trae
-     * 的时候降智」。所以这里不只是换模型，还要她自己知道"现在脑子不够用"——
-     * 否则模型会按完整思路铺开长回复，然后被 maxTokens=512 从中间截断，
-     * 发出去就是半句话，比不回复更难看。
-     *
-     * 明确让她**先说重点、砍长度**，是让截断发生在自然结束处而不是句子中间
-     * 的唯一办法。
-     */
-    if (degraded) {
-      sp = this.withDegradedNote(sp)
-    }
-
-    // 记忆：这个人的 + 跟他相关关键词的
-    // limit 走 MEMORY_WINDOW（24/8，降智档 8/4），别在这里再写死数字——
-    // 写死会让 memory.js 里的窗口调优完全失效（P5「记忆查询太短」就是这么来的）。
-    const lastUserText = [...conv.history].reverse().find((h) => h.role === 'user')?.text || ''
-    const memText = this.memory.contextFor({
-      who: userName,
-      // qq 是唯一身份：群里有同名的人时，光靠名字会把别人的记忆读成他的
-      qq,
-      limit: degraded ? MEMORY_WINDOW.degradedContextLimit : MEMORY_WINDOW.contextLimit,
-    })
-    if (memText) {
-      sp += `\n\n# 你记得的事\n${memText}`
-    }
-    // 关键词召回：最近说的话里有关键词，去记忆里捞相关的
-    if (lastUserText) {
-      const related = this.memory
-        .recall({
-          qq,
-          query: lastUserText.slice(0, 40),
-          limit: degraded ? MEMORY_WINDOW.degradedQueryLimit : MEMORY_WINDOW.queryLimit,
-        })
-        .filter((e) => e.who !== userName && !(qq && String(e.qq || '') === String(qq)))
-      if (related.length) {
-        sp += `\n\n# 其他相关记忆\n${related.map((e) => `- ${e.text}`).join('\n')}`
-      }
-    }
-
-    // 关系：你跟这人处到哪一步了。每轮都带上，它是语气的底噪。
-    if (conv?.relationKey) {
-      const relText = this.relations.contextFor(conv.relationKey)
-      if (relText) sp += `\n\n# 你俩的关系\n${relText}`
-    }
-
-    /*
-     * 名册：谁是谁。
-     *
-     * 用户原话（m03865）：「让他根据 QQ 号识别成员，别把群聊当成私聊」。
-     * 之前她只看到每句话前面挂个名字，名字一改就认不出来，于是说出
-     * 「你们头像名字换来换去我眼花」「那我认错人了」这种话。
-     * 现在把 QQ 号明明白白列出来，让她有的是硬身份可用。
-     */
-    const roster = this.memberRoster(conv)
-    if (roster) {
-      sp +=
-        '\n\n# 这里都有谁\n' +
-        `${roster}\n` +
-        '认人请认 QQ 号：名字（群名片/昵称）是随时会改的，QQ 号不会变。\n' +
-        '有人换了名字，你可以顺口一提"你改名了？"，但别认错人。\n' +
-        '同一个人在不同群可能挂不同名字，认号就行。\n' +
-        /*
-         * 说话人标签 + 定向回复（主人 m01935）。
-         *
-         * 事故形态：群里甲说了话，她回的时候把话安到乙头上，并且 @ 也落到乙身上。
-         * 原因有两个——历史只标名字不标号，以及自动 @ 永远只 @ 最后一条消息的发
-         * 送者。这两句就是给模型的用法说明：标签怎么读、要回别人时怎么指。
-         */
-        '下面群聊记录里，每句话前面写着「说话人（QQ 号）：」——那只是标明谁说的，' +
-        '不是正文，你回话时别把这个前缀抄进去。\n' +
-        '看记录时把话和 QQ 号对着记：谁说了什么就记在谁头上，别把甲说的话安到乙头上。\n' +
-        '要回的人如果不是最后说话的那位，就在回复开头写 <at>他的QQ号</at>，代码会把它' +
-        '换成真正的 @；回的就是最后说话那位时不用写，@ 会自动加上。'
-    }
-
-    // 表情包目录
-    const cat = this.stickers.catalogText({ maxTags: 60 })
-    if (cat) {
-      /*
-       * 这里不再写「别每句都发图」——那句话的副作用是让她基本不发图。
-       * 现在图库有几十张，用户明确要求「学会用表情包代替回文字」（m03900），
-       * 所以改成给一个**可执行的配额**：一轮 0~2 张，情绪到了就发。
-       * 配额上限跟 splitReply 里的 maxStickersPerReply 保持一致，否则
-       * 模型写了三张、代码只发两张，第三张的对白就断了。
-       */
-      const maxN = this.config.maxStickersPerReply ?? 2
-      sp +=
-        `\n\n# 你的表情包库\n${cat}\n` +
-        `发图用 <sticker>关键词</sticker>，关键词写画面内容。一轮最多 ${maxN} 张。\n` +
-        /*
-         * 「只能从标签里挑词」这句是实测加上的，不是啰嗦。
-         *
-         * tools/test-sticker-habit.mjs 第一次跑的时候，她写了 <sticker>抱抱</sticker>，
-         * 而图库里那张图叫"撒娇_求抱_贴贴"——"抱抱"一个字都对不上，
-         * 图发不出去，最后退化成一句"找图找了半天"。模型不知道自己
-         * 造词和图库标签是两套词表，不提醒它就会一直造。
-         */
-        '关键词尽量从上面对应的标签里挑（比如要"抱抱"就用"贴贴"），别自己造词，造了可能找不到图。\n' +
-        '该发的时候：要表达的情绪说不清、想吐槽、想撒娇、接梗、斗图。\n' +
-        '不该发的时候：对方在问你正经问题，或者你正要给答案。'
-    } else {
-      sp += `\n\n# 表情包\n你的图库现在是空的，所以别用 <sticker> 标记。`
-    }
-
-    // 当前活动（给主动消息和"在干嘛"一个由头）
-    sp += `\n\n# 刚刚你在\n${pickActivity()}`
-    return sp
+  buildSystemPrompt(input) {
+    return engineContext.buildSystemPrompt(input, this.contextDeps())
   }
 
   /**
@@ -2914,85 +2795,21 @@ export class ChatEngine {
    * 「这条到底是谁说的」的歧义，而歧义是这次要消灭的东西。
    */
   speakerLabel(h) {
-    const who = String(h?.who || '').trim()
-    const uid = String(h?.userId || '').trim()
-    if (!who && !uid) return ''
-    if (who && uid) return `${who}（QQ ${uid}）：`
-    if (who) return `${who}：`
-    return `QQ ${uid}：`
+    // Stage 3 Step 1：实现搬到 engine-text.js
+    return engineText.speakerLabel(h)
   }
 
   /** 拼对话历史 */
-  async buildMessages(conv, norm, userName, { degraded = false } = {}) {
-    const msgs = []
-    /*
-     * 降智模式只喂最近若干条。
-     *
-     * 这不只是省钱：trae 那档模型上下文小、速度慢，喂满 40 条历史会让它
-     * 想很久还答偏。砍到 12 条反而更像"刚聊到哪儿接得上"。
-     */
-    const start = degraded ? Math.max(0, conv.history.length - this.degradedContextLimit) : 0
-
-    /*
-     * 哪几条历史带图？
-     *
-     * 旧实现是「只看最后一条」，且图来自 `norm`（本轮那条消息的参数）。
-     * 这在真实使用里会丢图：群聊中 debounce 期间又来一条新消息时，
-     * scheduleReply 会 abort 旧 job 用新的 norm 重来，新 norm 没有图 ——
-     * 用户精心发的图就这么没了。现在改成从 history 条目自带的 images 取。
-     *
-     * 但也不能全带上：每张图都是真金白银的视觉 token，历史 40 条全塞图
-     * 会让请求又慢又贵。折中方案：
-     *   - 只取**最近 3 条**带图的历史；
-     *   - 再往前的一律折成 [图片] 文字。
-     * 这样一个图上连发几张、或者连着几轮都有图的场景都覆盖到了。
-     */
-    const MAX_IMAGE_ENTRIES = 3
-    const imageIdx = []
-    for (let i = conv.history.length - 1; i >= start && imageIdx.length < MAX_IMAGE_ENTRIES; i--) {
-      const h = conv.history[i]
-      if (h.role === 'user' && Array.isArray(h.images) && h.images.length > 0) imageIdx.push(i)
-    }
-    const wantImages = new Set(imageIdx)
-
-    for (let i = start; i < conv.history.length; i++) {
-      const h = conv.history[i]
-      if (h.role === 'user') {
-        // 说话人标签带上 QQ 号（见 speakerLabel 的注释）
-        const label = this.speakerLabel(h)
-        const imgs = wantImages.has(i) ? await this.loadImages(h.images) : []
-        if (imgs.length > 0) {
-          const parts = []
-          // 图在前、文字在后：上游对「先看图再看问题」的识别率明显更高
-          for (const url of imgs) parts.push({ type: 'image_url', image_url: { url } })
-          // 纯图片消息也得带上标签，否则模型不知道这张图是谁发的
-          parts.push({ type: 'text', text: label + (h.text || '[图片]') })
-          msgs.push({ role: 'user', content: parts })
-        } else {
-          msgs.push({ role: 'user', content: label + (h.text || '[图片]') })
-        }
-      } else {
-        msgs.push({ role: 'assistant', content: h.text })
-      }
-    }
-    return msgs
+  async buildMessages(conv, norm, userName, opts) {
+    return engineContext.buildMessages(conv, norm, userName, opts, this.contextDeps())
   }
 
   /**
    * 不带图的历史消息（给主动联系、指令分类这类不需要视觉的调用用）。
    * 只保留纯文本，图一律折成 [图片]，避免白烧视觉 token。
    */
-  buildHistoryMessages(conv, userName = '') {
-    const msgs = []
-    for (const h of conv.history || []) {
-      if (h.role === 'user') {
-        const label = this.speakerLabel(h)
-        msgs.push({ role: 'user', content: label + (h.text || '[图片]') })
-      } else {
-        msgs.push({ role: 'assistant', content: h.text })
-      }
-    }
-    return msgs
+  buildHistoryMessages(conv, userName) {
+    return engineContext.buildHistoryMessages(conv, userName, this.contextDeps())
   }
 
   /**
@@ -3003,30 +2820,34 @@ export class ChatEngine {
    * 限制：单张 8MB 以内，最多 4 张，失败就跳过（不让一张坏图毁掉整轮对话）。
    */
   async loadImages(images) {
-    const out = []
-    for (const img of images.slice(0, 4)) {
-      const url = img?.url || img?.file
-      if (!url) continue
-      try {
-        const ctrl = new AbortController()
-        const timer = setTimeout(() => ctrl.abort(), 15000)
-        const resp = await fetch(url, { signal: ctrl.signal })
-        clearTimeout(timer)
-        if (!resp.ok) continue
-        const buf = Buffer.from(await resp.arrayBuffer())
-        if (buf.length === 0 || buf.length > 8 * 1024 * 1024) {
-          this.logger('debug', `图片过大或为空，跳过（${buf.length}B）`)
-          continue
-        }
-        // 从 content-type 推 mime；QQ 有时不返回，用魔数兜底
-        let mime = resp.headers.get('content-type')?.split(';')[0] || ''
-        if (!mime.startsWith('image/')) mime = sniffMime(buf)
-        out.push(`data:${mime};base64,${buf.toString('base64')}`)
-      } catch (e) {
-        this.logger('debug', `图片下载失败，跳过：${e?.message || e}`)
-      }
+    return engineContext.loadImages(images, this.contextDeps())
+  }
+
+  /*
+   * 上下文层的依赖清单（Stage 3 Step 3）。
+   *
+   * 为什么集中成一个方法而不是每个转发各传各的：以后加依赖只改这里一处，
+   * 也方便测试直接对 deps 做断言。模块内部零 this，是「没有隐藏状态」的
+   * 可验证形式。
+   */
+  contextDeps() {
+    return {
+      persona: this.persona,
+      memory: this.memory,
+      relations: this.relations,
+      stickers: this.stickers,
+      config: this.config,
+      logger: this.logger,
+      client: this.client,
+      pestMode: this.pest?.enabled === true,
+      memberRoster: (conv) => this.memberRoster(conv),
+      withDegradedNote: (sp) => this.withDegradedNote(sp),
+      speakerLabel: (h) => this.speakerLabel(h),
+      pickActivity,
+      memoryWindow: MEMORY_WINDOW,
+      degradedContextLimit: this.degradedContextLimit,
+      sniffMime,
     }
-    return out
   }
 
   /** 按活人节奏把回复发出去 */
@@ -3035,7 +2856,7 @@ export class ChatEngine {
     const isGroup = ev.message_type === 'group'
 
     const plan = planDelivery(reply.parts, scene, this.config, Math.random)
-    const startedAt = Date.now()
+    const startedAt = this.now()
 
     /*
      * 定向回复：模型自己在回复开头写了 <at>QQ号</at>（主人 m01935）。
@@ -3052,7 +2873,7 @@ export class ChatEngine {
 
     for (const step of plan) {
       if (signal?.aborted) break
-      const wait = step.at - (Date.now() - startedAt)
+      const wait = step.at - (this.now() - startedAt)
       if (wait > 0) await sleep(wait)
       if (signal?.aborted) break
 
@@ -3122,7 +2943,7 @@ export class ChatEngine {
         } else {
           await this.client.sendPrivateMsg(key, payload)
         }
-        conv.lastSelfAt = Date.now()
+        conv.lastSelfAt = this.now()
         /*
          * 历史里记「我发了一张图」要用**人话**，不能用协议标记。
          *
@@ -3136,7 +2957,7 @@ export class ChatEngine {
          * 语义一样，但不会被当成可复制的模板。
          */
         const sentText = part.type === 'sticker' ? `（我发了张表情包：${part.query}）` : part.text
-        this.pushHistory(conv, { role: 'assistant', text: sentText, at: Date.now(), messageId: `self-${Date.now()}` })
+        this.pushHistory(conv, { role: 'assistant', text: sentText, at: this.now(), messageId: `self-${this.now()}` })
       } catch (err) {
         this.logger('warn', `发送失败: ${err?.message || err}`)
         break
@@ -3168,14 +2989,8 @@ export class ChatEngine {
   }
 
   stickerFallback() {
-    const lines = [
-      '（找图找了半天，没找到合适的）',
-      '表情包找不到了，气死',
-      '算了不发图了',
-      '图库里没这张，我先记下来',
-      '嗯…（翻遍图库）',
-    ]
-    return lines[Math.floor(Math.random() * lines.length)]
+    // Stage 3 Step 1：话术池搬到 engine-text.js（随机源保持 Math.random）
+    return engineText.stickerFallback()
   }
 
   // ———————————————— 辅助 ————————————————
@@ -3232,15 +3047,13 @@ export class ChatEngine {
    * 返回 true 表示这条消息已经处理完，调用方直接 return。
    */
   async pestMuteGate(ev, scene, norm) {
-    if (!this.pest?.enabled || !this.pest.isMuted() || !this.pest.isTarget(ev.user_id)) return false
-    const direct = scene === SCENE_PRIVATE || norm?.isAtMe === true
-    this.logger('info', `骂街静音中，跳过对 ${ev.user_id} 的被动回复（${direct ? '回一句中性收场' : '只贴表情'}）`)
-    if (direct) {
-      await this.sayQuick(ev, scene, '……行吧，今天不骂了。').catch(() => {})
-    } else {
-      await this.tapEmoji(ev.message_id).catch(() => {})
-    }
-    return true
+    return engineDecision.pestMuteGate(ev, scene, norm, {
+      scenes: SCENES,
+      pest: this.pest,
+      logger: this.logger,
+      sayQuick: (...a) => this.sayQuick(...a),
+      tapEmoji: (...a) => this.tapEmoji(...a),
+    })
   }
 
   /**
@@ -3338,18 +3151,18 @@ export class ChatEngine {
       who: name,
       userId: who,
       messageId: String(ev.message_id),
-      at: Date.now(),
+      at: this.now(),
       scene,
     })
     this.pushHistory(conv, {
       role: 'assistant',
       text,
-      at: Date.now(),
-      messageId: `self-${Date.now()}`,
+      at: this.now(),
+      messageId: `self-${this.now()}`,
     })
-    conv.lastSelfAt = Date.now()
+    conv.lastSelfAt = this.now()
     // onReplied 收的是「耗时毫秒」，不是「现在几点」。
-    // 早先这里传的是 Date.now()，导致挂件「上次说话」被写成 2026-10-18T01:59:39
+    // 早先这里传的是 this.now()，导致挂件「上次说话」被写成 2026-10-18T01:59:39
     // 这种"2 毫秒回复"的假数据。注入回击不计耗时就别传。
     try { this.metrics?.onReplied?.() } catch {}
   }
@@ -3390,7 +3203,7 @@ export class ChatEngine {
       name,
       // 记下他用过的所有名字，方便她理解"这人改过名"
       aka: new Set([...(prev?.aka || []), name]),
-      lastAt: Date.now(),
+      lastAt: this.now(),
       groupId: ev.message_type === 'group' ? String(ev.group_id) : '',
       private: ev.message_type !== 'group',
     })
@@ -3437,21 +3250,8 @@ export class ChatEngine {
    * @returns {string} 干净的基础名
    */
   stripGroupCardSuffix(card) {
-    const suffixes = [String(this.config.groupCardThinkingSuffix ?? '（在想…）'), '（在想…）']
-    let out = String(card ?? '')
-    let guard = 0
-    let changed = true
-    while (changed && guard < 10) {
-      changed = false
-      guard += 1
-      for (const s of suffixes) {
-        if (s && out.endsWith(s)) {
-          out = out.slice(0, -s.length)
-          changed = true
-        }
-      }
-    }
-    return out.trim()
+    // Stage 3 Step 1：剥后缀逻辑搬到 engine-text.js，自定义后缀仍从 config 取
+    return engineText.stripGroupCardSuffix(card, { thinkingSuffix: this.config.groupCardThinkingSuffix })
   }
 
   /**
@@ -3491,7 +3291,7 @@ export class ChatEngine {
   async setGroupCardThinking(groupId) {
     if (this.config.groupCardStatusEnabled === false) return
     const gid = String(groupId)
-    const now = Date.now()
+    const now = this.now()
     const last = this.groupCardLastChange.get(gid) || 0
     const cooldown = this.config.groupCardCooldownMs ?? 45000
     if (now - last < cooldown) return
@@ -3529,7 +3329,7 @@ export class ChatEngine {
     if (!wasBusy) return
     const base = this.stripGroupCardSuffix(this.groupCardBase.get(gid) || '')
     if (!base) return
-    this.groupCardLastChange.set(gid, Date.now())
+    this.groupCardLastChange.set(gid, this.now())
     try {
       await this.client.setGroupCard(gid, this.selfId, base)
     } catch (err) {
@@ -3600,7 +3400,7 @@ export class ChatEngine {
   async maybeProactive() {
     if (this.config.blindMode) return
     if (!this.config.proactiveEnabled) return
-    const now = Date.now()
+    const now = this.now()
 
     // 闸门 0：省着用模式下不许主动找人。
     // 主动消息是纯消耗——没人催还自己往上贴，额度紧张时最该砍的就是它。
@@ -3698,9 +3498,9 @@ export class ChatEngine {
 
     // 主动联系最多两条，别一下子甩一大段
     const plan = planDelivery(parts.slice(0, 2), SCENE_PRIVATE, this.config, Math.random)
-    const startedAt = Date.now()
+    const startedAt = this.now()
     for (const step of plan) {
-      const wait = step.at - (Date.now() - startedAt)
+      const wait = step.at - (this.now() - startedAt)
       if (wait > 0) await sleep(wait)
       try {
         if (step.part.type === 'sticker') {
@@ -3708,16 +3508,16 @@ export class ChatEngine {
           if (payload) await this.client.sendPrivateMsg(userId, payload)
         } else {
           await this.client.sendPrivateMsg(userId, buildMessage([{ type: 'text', text: step.part.text }]))
-          this.pushHistory(conv, { role: 'assistant', text: step.part.text, at: Date.now() })
+          this.pushHistory(conv, { role: 'assistant', text: step.part.text, at: this.now() })
         }
-        conv.lastSelfAt = Date.now()
+        conv.lastSelfAt = this.now()
       } catch (err) {
         this.logger('warn', `主动联系发送失败：${err?.message || err}`)
         break
       }
     }
 
-    this.lastProactiveAt = Date.now()
+    this.lastProactiveAt = this.now()
 
     // 记账：今天撩过这个人一次了
     const b = this.proactiveBudget.get(conv.key)
@@ -3751,7 +3551,7 @@ export class ChatEngine {
 
     const uid = this.pest.targetId
     if (!uid) return
-    const now = Date.now()
+    const now = this.now()
 
     const gate = this.pest.canPick(uid, now)
     if (!gate.ok) {
@@ -3844,8 +3644,8 @@ export class ChatEngine {
       return
     }
 
-    target.conv.lastSelfAt = Date.now()
-    this.pushHistory(target.conv, { role: 'assistant', text, at: Date.now(), messageId: `self-${Date.now()}` })
+    target.conv.lastSelfAt = this.now()
+    this.pushHistory(target.conv, { role: 'assistant', text, at: this.now(), messageId: `self-${this.now()}` })
     this.pest.notePicked(uid)
     this.logger('info', `主动挑了 ${target.name} 的茬（今天第 ${this.pest.snapshot().used} 次，剩 ${this.pest.remaining(uid)}）`)
   }
@@ -3886,32 +3686,12 @@ export class ChatEngine {
 
   /** 按"最近聊过的更可能被想起"加权随机挑人 */
   pickProactiveTarget(convList, now) {
-    if (convList.length === 0) return null
-    // 权重 = 1 / (1 + 小时数)，最近聊过的权重大，但不是必然
-    const weighted = convList.map((c) => {
-      const hours = Math.max(0.5, (now - c.lastUserAt) / 3600000)
-      return { conv: c, w: 1 / (1 + hours / 24) }
-    })
-    const total = weighted.reduce((s, x) => s + x.w, 0)
-    let r = Math.random() * total
-    for (const x of weighted) {
-      r -= x.w
-      if (r <= 0) return x.conv
-    }
-    return weighted[weighted.length - 1].conv
+    return engineDecision.pickProactiveTarget(convList, now, { rand: () => Math.random() })
   }
 
   /** 从历史里捞最近一个"像话题"的句子 */
   lastTopicOf(conv) {
-    const arr = conv.history || []
-    for (let i = arr.length - 1; i >= 0; i--) {
-      const e = arr[i]
-      if (e.role !== 'user') continue
-      const t = String(e.text || '').replace(/\s+/g, ' ').trim()
-      if (t.length >= 4 && t.length <= 40) return t
-      if (t.length > 40) return t.slice(0, 40) + '…'
-    }
-    return ''
+    return engineDecision.lastTopicOf(conv)
   }
 
   /**
@@ -4080,7 +3860,7 @@ export class ChatEngine {
 
     const minLines = cfg.memoryExtractMinLines ?? 4
     const minGapMs = (cfg.memoryExtractMinGapMinutes ?? 20) * 60000
-    const now = Date.now()
+    const now = this.now()
     if (buf.lines.length < minLines) return
     if (now - (buf.lastAt || 0) < minGapMs) return
 

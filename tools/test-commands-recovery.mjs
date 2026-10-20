@@ -77,19 +77,19 @@ await checkAsync('写锁被占 → 重试后换新 id 重开（不抛死）', as
   }
   const { cmds } = makeExecutor(agents)
   const handle = await cmds.ensureHandle()
-  assert.equal(handle.sessionId, 'qq-whale-work-1-b', '应落到 -b 号会话')
+  assert.equal(handle.sessionId, 'qq-whale-work-v2-1-b', '应落到 -b 号会话')
   assert.ok(
-    calls.filter((c) => c[0] === 'resume' && c[1] === 'qq-whale-work-1').length >= 2,
+    calls.filter((c) => c[0] === 'resume' && c[1] === 'qq-whale-work-v2-1').length >= 2,
     '基础 id 至少重试过两轮',
   )
 })
 
 // ── 2. 活表里已有同名 agent：直接接上，不再 create/resume ────────────
 await checkAsync('活表里有同名 agent → 借用，不再抢写锁', async () => {
-  const liveAgent = { id: 'qq-whale-work-1', marker: 'live' }
+  const liveAgent = { id: 'qq-whale-work-v2-1', marker: 'live' }
   let created = 0
   const agents = {
-    get: (id) => (id === 'qq-whale-work-1' ? liveAgent : undefined),
+    get: (id) => (id === 'qq-whale-work-v2-1' ? liveAgent : undefined),
     create: async () => {
       created += 1
       throw new Error('不该走到这里')
@@ -112,7 +112,7 @@ await checkAsync('活表里有同名 agent → 借用，不再抢写锁', async 
 await checkAsync('死句柄 → 报「干活会话已失效」并清空 handle', async () => {
   const idle = Promise.resolve('old')
   const liveAgent = {
-    id: 'qq-whale-work-1',
+    id: 'qq-whale-work-v2-1',
     status: 'idle',
     activityDone: idle,
     followup: () => {},
@@ -146,7 +146,7 @@ await checkAsync('死句柄 → 报「干活会话已失效」并清空 handle',
 //   于是把「误把忙判成死」这个真 bug 盖住了（dsh-agent-loop/lib/index.js:790）。
 await checkAsync('agent 忙时投递 → 不误报，等 whenIdle 后正常返回', async () => {
   const liveAgent = {
-    id: 'qq-whale-work-1',
+    id: 'qq-whale-work-v2-1',
     status: 'running', // 正跑着 ⇒ followup 只排队、activityDone 不变
     activityDone: Promise.resolve('idle'),
     followup: () => {},
@@ -178,7 +178,7 @@ await checkAsync('agent 忙时投递 → 不误报，等 whenIdle 后正常返�
 await checkAsync('并发两条命令 → 串行执行，文本不串台', async () => {
   const state = { status: 'idle', activityDone: Promise.resolve(), turns: 0, msgs: [] }
   const liveAgent = {
-    id: 'qq-whale-work-1',
+    id: 'qq-whale-work-v2-1',
     get status() {
       return state.status
     },

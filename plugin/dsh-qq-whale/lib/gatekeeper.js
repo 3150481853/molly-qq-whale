@@ -171,14 +171,22 @@ export class Gatekeeper {
    *   - group：批的是「可以进这个群」→ **不能**写进 approved，
    *     否则群号会被当成 QQ 号塞进私聊白名单，等于放行了群里所有人。
    *     群聊可见性本来就由 config.allowedGroups 管，这里只负责把申请销掉。
+   *
+   * task-43：落盘记 `by`（是谁批的）。审计要能回答「这条放行是谁点的」，
+   * 只写时间是不够的。旧记录没有 by 时读出来当空串（见 state()），不崩。
    */
-  approve(userId, now = Date.now()) {
+  approve(userId, now = Date.now(), approverUin = '') {
     const id = String(userId)
     const e = this.pending.get(id) || {}
     this.pending.delete(id)
     this.denied.delete(id)
     if (e.kind !== 'group') {
-      this.approved.set(id, { name: e.name || '', at: now, kind: e.kind || 'chat' })
+      this.approved.set(id, {
+        name: e.name || '',
+        at: now,
+        kind: e.kind || 'chat',
+        by: String(approverUin || ''),
+      })
     }
     this.save()
     return e
@@ -232,7 +240,13 @@ export class Gatekeeper {
         count: e.count || 0,
         asked: Boolean(e.askedAt),
       })),
-      approved: [...this.approved.entries()].map(([userId, v]) => ({ userId, name: v.name || '', at: v.at })),
+      approved: [...this.approved.entries()].map(([userId, v]) => ({
+      userId,
+      name: v.name || '',
+      at: v.at,
+      // task-43：旧记录没 by，读出来给空串（不编造批准人，也不崩）
+      by: typeof v.by === 'string' ? v.by : '',
+    })),
       denied: [...this.denied.entries()].map(([userId, v]) => ({ userId, name: v.name || '', at: v.at })),
     }
   }

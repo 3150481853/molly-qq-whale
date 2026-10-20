@@ -27,10 +27,12 @@ import { Readable } from 'node:stream'
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PROJ = path.resolve(HERE, '..')
 const LIB_DIR = process.env.PEST_LIB_DIR || path.join(PROJ, 'plugin', 'dsh-qq-whale', 'lib')
+// task-53：pest 实现已搬到独立包，主包不再有 pest.js
+const PEST_DIR = process.env.PEST_PKG_DIR || path.join(PROJ, 'plugin', 'dsh-qq-pest', 'lib')
 const TMP = path.join(PROJ, 'out', 'test-pest-data')
 
 const { PestKeeper, PEST_SETTINGS_FILE } = await import(
-  pathToFileURL(path.join(LIB_DIR, 'pest.js')).href
+  pathToFileURL(path.join(PEST_DIR, 'pest.js')).href
 )
 const { WebWidget } = await import(pathToFileURL(path.join(LIB_DIR, 'web.js')).href)
 

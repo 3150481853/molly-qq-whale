@@ -1,0 +1,12 @@
+# dsh-qq-pest 的挂载入口。
+#
+# 和主包 dsh-qq-whale 的写法一致：往宿主组合里 insert 一个条目，name 用包名，
+# 宿主按 node_modules 解析到本包的 package.json → main → lib/boot.js。
+#
+# 顺序有讲究：主包在 profile 的 cordis.patch.yml 里是 605 行那个条目，
+# 这里放在它后面 insert —— 主包先 apply（会 ctx.set('qqWhale')），
+# pest 包后 apply（就能立刻 ctx.get('qqWhale').attachPest()）。
+# 万一顺序反了也不会坏：pest 包会先把 qqPest 服务挂上、等主包来取。
+- insert:
+    - id: dsh-qq-pest
+      name: dsh-qq-pest

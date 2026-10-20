@@ -72,6 +72,73 @@ function materialize(rev) {
   return genDir
 }
 
+/** 落盘失败时退回的数据目录（部署到别的机器用 MOLLY_DATA_DIR / config.dataDir 覆盖）。 */
+const BOOT_HEALTH_FALLBACK_DIR = 'G:\\Molly\\data\\qq-whale'
+
+/**
+ * boot-health.json 的路径（task-51 追加）。
+ *
+ * 为什么落盘：main.js 挂了的时候 web.js 也不在，`/state` 根本打不开，
+ * `root.set('qqWhaleHealth')` 又只在进程内存里——桌面版还没有常规日志，
+ * 「为什么这次启动是半死」就没有任何证据。写到磁盘上，看门狗/计划任务/人
+ * 都能直接读。
+ *
+ * 覆盖顺序：环境变量 `MOLLY_BOOT_HEALTH`（整路径） > `config.dataDir` >
+ * `MOLLY_DATA_DIR` > 默认数据目录。**不许硬编码 C 盘**。
+ */
+export function bootHealthPath(rawConfig = {}) {
+  const envFile = String(process.env.MOLLY_BOOT_HEALTH || '').trim()
+  if (envFile) return envFile
+  const dataDir =
+    String(rawConfig?.dataDir || process.env.MOLLY_DATA_DIR || '').trim() || BOOT_HEALTH_FALLBACK_DIR
+  return path.join(dataDir, 'boot-health.json')
+}
+
+/**
+ * 写一次启动健康记录（tmp + rename 原子替换，UTF-8 无 BOM）。
+ *
+ * 永不抛：写盘失败只 warn——自检文件不该影响启动。
+ * fsImpl 可注入，测试用它模拟「写盘直接抛错」。
+ */
+export function writeBootHealth(payload = {}, { fsImpl = fs, logger } = {}) {
+  const file = String(payload.file || '').trim()
+  if (!file) return false
+  const record = {
+    at: new Date().toISOString(),
+    ok: Boolean(payload.ok),
+    reason: String(payload.reason || ''),
+    gen: String(payload.gen || ''),
+  }
+  if (payload.error) record.error = String(payload.error)
+  const body = JSON.stringify(record, null, 2)
+  const tmp = `${file}.tmp-${process.pid}`
+  try {
+    fsImpl.mkdirSync(path.dirname(file), { recursive: true })
+    fsImpl.writeFileSync(tmp, body, { encoding: 'utf8' })
+    fsImpl.renameSync(tmp, file)
+    return true
+  } catch (err) {
+    try {
+      fsImpl.unlinkSync(tmp)
+    } catch {}
+    logger?.('warn', `boot-health.json 写盘失败（不影响启动）：${err?.message || err}`)
+    return false
+  }
+}
+
+/** boot 阶段的日志：优先宿主 logger，退回 console。 */
+function bootLog(root, level, msg) {
+  try {
+    const lg = root?.logger?.('qq-whale')
+    if (lg && typeof lg[level] === 'function') return lg[level](msg)
+    if (typeof lg === 'function') return lg(level, msg)
+  } catch {}
+  const fn = level === 'error' ? console.error : console.warn
+  try {
+    fn?.(`[qq-whale] ${msg}`)
+  } catch {}
+}
+
 export async function apply(root, rawConfig = {}) {
   const rev = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
 
@@ -89,9 +156,45 @@ export async function apply(root, rawConfig = {}) {
   try {
     mod = await import(url)
   } catch (err) {
-    // 必须显式抛：宿主会把 apply 抛出的错误记进 fiber._error。
-    // 模块级错误只会静默跳过，排查起来极其痛苦。
-    throw new Error(`dsh-qq-whale: 加载实现层失败（${url}）：${err?.stack || err}`)
+    /*
+     * task-51：装配点容错。
+     *
+     * 这里是「实现层整体加载失败」——一个模块的错误都不许让宿主把整个插件
+     * 静默跳过。做法：把失败登记进这一代的 module-health（materialize 已经
+     * 把 module-health.js 一起复制过来了），写死一条错误日志，然后把状态挂到
+     * root 上供同进程排查，**不再往外抛**（抛了宿主会记 fiber._error，
+     * 但整个插件也不激活，连 /state 都看不到）。
+     *
+     * 代价要说清：main.js 挂了的话，插件会「挂载但什么也不做」。这仍然比
+     * 「静默跳过 + 没有任何登记」可查——root.get('qqWhaleHealth') 能看到
+     * failed 里的完整堆栈。要拆分阶段真正的固定做法是把 main 的装配拆成
+     * 多个独立模块，届时这里只剩下薄薄一层。
+     */
+    let health = null
+    try {
+      health = await import(new URL(`file://${path.join(genDir, 'module-health.js').replace(/\\/g, '/')}`).href)
+    } catch {
+      health = null
+    }
+    try {
+      health?.registerFailed?.({ name: 'main', error: String(err?.stack || err) })
+      const snap = health?.snapshot?.() || { expected: ['main'], loaded: [], missing: ['main'], failed: [{ name: 'main', error: String(err?.stack || err) }], reloadAt: Date.now(), build: null }
+      root?.set?.('qqWhaleHealth', snap)
+      root?.logger?.('qq-whale')?.error?.(`dsh-qq-whale 实现层加载失败（${url}）：${err?.stack || err}`)
+    } catch {}
+    // 落盘：web.js 都没加载上时 /state 打不开，磁盘上的这份就是唯一证据
+    writeBootHealth(
+      {
+        file: bootHealthPath(rawConfig),
+        ok: false,
+        reason: 'main-load-failed',
+        error: String(err?.stack || err),
+        gen: path.basename(genDir),
+      },
+      { logger: (level, msg) => bootLog(root, level, msg) },
+    )
+    console.error(`[qq-whale] 实现层加载失败（${url}），已登记到 /state.plugins 并继续挂载`, err?.message || err)
+    return { degraded: true, reason: 'main-load-failed' }
   }
 
   if (typeof mod.apply !== 'function') {
@@ -101,6 +204,12 @@ export async function apply(root, rawConfig = {}) {
   // 不返回 state：cordis 会把 apply 的返回值当 effect 校验，普通对象会触发
   // `Invalid effect`。state 已经通过 root.set('qqWhale', state) 暴露出去了。
   await mod.apply(root, rawConfig)
+
+  // 成功启动也写一次：把上次的失败记录覆盖掉，否则磁盘上永远是脏状态
+  writeBootHealth(
+    { file: bootHealthPath(rawConfig), ok: true, reason: '', gen: path.basename(genDir) },
+    { logger: (level, msg) => bootLog(root, level, msg) },
+  )
 }
 
 export default { name, apply }

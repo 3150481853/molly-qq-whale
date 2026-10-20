@@ -117,6 +117,8 @@ function makeFakeEngine({ client, executor }) {
     },
     progress: { beginWatch() {}, endWatch: async () => {} },
     logger: (level, msg) => logs.push(`${level}: ${msg}`),
+    // Stage 3 Step 1 把 Date.now() 换成了 this.now()（快照机可注入时钟），假引擎要跟上
+    now: () => Date.now(),
     pushHistory() {},
     memory: { add() {} },
     /* runCommand 收尾会调 this.remember()（work 类记忆）。这是假引擎，不需要真落库。 */
@@ -125,6 +127,10 @@ function makeFakeEngine({ client, executor }) {
   }
   engine.installReportCapture = ChatEngine.prototype.installReportCapture
   engine.runCommand = ChatEngine.prototype.runCommand
+  // task-53 并发修复：capture 变成句柄，这三个方法必须一起挂
+  engine.openCapture = ChatEngine.prototype.openCapture
+  engine.closeCapture = ChatEngine.prototype.closeCapture
+  engine.pickCaptureFor = ChatEngine.prototype.pickCaptureFor
   return engine
 }
 
@@ -390,6 +396,65 @@ await check('P6 命令结果：markdown 表格/标题洗掉再投递', async () 
   assert.ok(!text.includes('#'), `不能有井号：\n${text}`)
   assert.match(text, /白名单.*已加/s, `内容要留下：\n${text}`)
   console.log(`    （投出去的样子：${JSON.stringify(text)}）`)
+})
+
+// ── 5. 并发两条命令：捕获句柄互不覆盖（task-53 reportCapture 修复）──
+await check('并发两条命令：各自 notes 独立、各自收尾都投递，不串到对方', async () => {
+  const client = makeFakeClient()
+  const gates = {}
+  const executor = {
+    ensureHandle: async () => ({}),
+    workSessionId: () => 'work-sid',
+    async run(task) {
+      const first = String(task).includes('第一')
+      const group = first ? '1001' : '2002'
+      await client.call('send_group_msg', { group_id: group, message: `汇报：${task}` })
+      // 两条都卡住，制造"真并发"
+      await new Promise((r) => (gates[first ? 'first' : 'second'] = r))
+      return { ok: true, text: `结果：${task}` }
+    },
+  }
+  const engine = makeFakeEngine({ client, executor })
+  const args = (group, task, mid) => ({
+    ev: { message_type: 'group', group_id: group, user_id: PEER, message_id: mid },
+    conv: {},
+    task,
+    userName: '主人',
+    scene: 'group_mention',
+  })
+  const a = engine.runCommand(args('1001', '命令 第一件事', 1))
+  await new Promise((r) => setTimeout(r, 30))
+  const b = engine.runCommand(args('2002', '命令 第二件事', 2))
+  await new Promise((r) => setTimeout(r, 80))
+  assert.equal(
+    engine._captures.length,
+    2,
+    `并发期间应有两份捕获，实际 ${engine._captures.length}：${JSON.stringify(engine._captures.map((c) => ({ t: c.target, a: c.active })))}`,
+  )
+  assert.deepEqual(engine._captures.map((c) => c.target).sort(), ['1001', '2002'])
+
+  // 先放第二条：它关闭自己的句柄，不能把第一条的也关掉
+  gates.second()
+  await b
+  assert.equal(engine._captures.length, 1, '关掉第二条后，第一条的捕获必须还在')
+  assert.equal(engine._captures[0].target, '1001')
+
+  gates.first()
+  await a
+  assert.equal(engine._captures.length, 0, '收尾后捕获必须全部关闭')
+  assert.equal(engine.reportCapture, null, 'reportCapture 应回到 null')
+
+  const bubbles = client.sent
+    .filter((s) => Array.isArray(s.params.message))
+    .map((s) => s.params.message.map((p) => p.data?.text || '').join(''))
+  const joined = bubbles.join('\n')
+  assert.match(joined, /汇报：命令 第一件事/, `第一条的汇报要投出去：\n${joined}`)
+  assert.match(joined, /结果：命令 第一件事/, `第一条的结果要投出去：\n${joined}`)
+  assert.match(joined, /汇报：命令 第二件事/, `第二条的汇报要投出去：\n${joined}`)
+  assert.match(joined, /结果：命令 第二件事/, `第二条的结果要投出去：\n${joined}`)
+  const aText = bubbles.find((t) => t.includes('第一件事')) || ''
+  assert.ok(!aText.includes('第二件事'), `第一条的气泡里不能混进第二条：\n${aText}`)
+  console.log(`    （两条命令各自的投递：${JSON.stringify(bubbles)}）`)
 })
 
 console.log(`\n${pass} 通过 / ${fail} 失败`)

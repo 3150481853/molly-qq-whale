@@ -25,15 +25,106 @@ const sub = (spec) => {
   return u.href
 }
 
-const { OneBotClient } = await import(sub('./onebot.js'))
-const { ChatEngine } = await import(sub('./engine.js'))
-const { WebWidget, Metrics } = await import(sub('./web.js'))
-const { registerQqTool, registerWorkshopTool } = await import(sub('./qqtools.js'))
-const { Workshop } = await import(sub('./workshop.js'))
+/*
+ * ── 模块健康登记 + 容错装配（task-51，拆包前置）────────────────────────
+ *
+ * 宿主对插件加载失败是**静默跳过**的。拆包之后一旦某个包没加载上，表现会是
+ * 「半个 Molly 悄悄消失」。这里把所有子模块的 import 逐个 try/catch：
+ * 失败就登记进 module-health 并继续装配其余模块（部分可用 > 整体不可用），
+ * 绝不让一个模块的加载失败把整个插件带下去。
+ *
+ * 登记由**装配点统一做**（不散在各个文件里自己调），否则一定会漏。
+ */
+const health = await (async () => {
+  try {
+    return await import(sub('./module-health.js'))
+  } catch (err) {
+    // 连登记表都没了也不许抛：退化成 no-op，插件照常装配
+    console.warn?.('[qq-whale] module-health 加载失败，自检降级为 no-op：', err?.message || err)
+    return {
+      MODULE_MANIFEST: [],
+      registerModule() {},
+      registerFailed() {},
+      snapshot: () => null,
+      setBuild() {},
+      gapAlertText: () => '',
+      notifyGaps: async () => false,
+    }
+  }
+})()
+
+/*
+ * task-53：出气筒（pest）已拆成独立包 dsh-qq-pest，自检清单里多一项 qqPest。
+ * 用 setExpected 追加而不是改 module-health.js 的 MODULE_MANIFEST：
+ *   ① 拆包试点要能一键回滚 —— 期望清单跟着 main.js 走，回退 main.js 就一起回退；
+ *   ② expected 里多这一项后，pest 包没加载上会在 /state.plugins 的 missing 里点名，
+ *      而不是像以前那样「悄悄少一块」。
+ *
+ * 但「期望」必须跟着「包在不在」走：回滚时把 node_modules/dsh-qq-pest 删掉后，
+ * 还硬把 qqPest 写进 expected 就会永久 missing，还会让 owner 收到一条假告警。
+ */
+try {
+  const base = (health.MODULE_MANIFEST || []).map((m) => m.name)
+  const selfRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+  const pestPkgPresent = fs.existsSync(path.join(path.dirname(selfRoot), 'dsh-qq-pest'))
+  if (pestPkgPresent && !base.includes('qqPest') && typeof health.setExpected === 'function') {
+    health.setExpected([...base, 'qqPest'])
+  }
+} catch {
+  /* 自检清单加不上不影响聊天主链路 */
+}
+
+/** 加载一个子模块；失败只登记，不抛。 */
+async function loadModule(name, spec, { optional = false } = {}) {
+  const url = sub(spec)
+  try {
+    const mod = await import(url)
+    health.registerModule({ name, exports: Object.keys(mod || {}), optional })
+    return mod
+  } catch (err) {
+    health.registerFailed({ name, error: String(err?.stack || err) })
+    console.warn?.(`[qq-whale] 模块 ${name} 加载失败（继续装配其余模块）：`, err?.message || err)
+    return null
+  }
+}
+
+const onebotMod = await loadModule('onebot', './onebot.js')
+const OneBotClient = onebotMod?.OneBotClient || null
+
+const engineMod = await loadModule('engine', './engine.js')
+const ChatEngine = engineMod?.ChatEngine || null
+
+const webMod = await loadModule('web', './web.js')
+const WebWidget = webMod?.WebWidget || null
+const Metrics = webMod?.Metrics || MetricsFallback()
+
+const qqtoolsMod = await loadModule('qqtools', './qqtools.js', { optional: true })
+const registerQqTool = qqtoolsMod?.registerQqTool || null
+const registerWorkshopTool = qqtoolsMod?.registerWorkshopTool || null
+
+const workshopMod = await loadModule('workshop', './workshop.js', { optional: true })
+const Workshop = workshopMod?.Workshop || null
+
 // 三级角色（owner / adm / guest）。用户 m25316 给 333333333 一个「管理员」位，
 // 权限低于主人。解析与判定全在 roles.js 里，main.js 只负责把配置喂进去、
 // 把算好的映射挂到 config 上，判定本身不在这里。
-const { roleConfig } = await import(sub('./roles.js'))
+const rolesMod = await loadModule('roles', './roles.js', { optional: true })
+const roleConfig = rolesMod?.roleConfig || null
+
+/** Metrics 是纯计数的落盘小工具；web.js 没加载上时用它兜底，别让整条链路断。 */
+function MetricsFallback() {
+  return class Metrics {
+    constructor(opts = {}) {
+      this.opts = opts
+      this.data = {}
+    }
+    snapshot() {
+      return this.data
+    }
+    bump() {}
+    save() {}
+  }
+}
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const DSH_HOME = process.env.DSH_HOME || path.join(os.homedir(), '.dsh')
@@ -377,7 +468,15 @@ function resolveDirs(config) {
   // 运行期谁都不许改 roles —— 改了等于运行中给人提权，属于事故。
   // roleConfig 内部会再做一遍解析与去重（并且同样保证 owner 优先于 adm），
   // 这里不重复实现，只把结果铺进 config。
-  const roleInfo = roleConfig({ ...config, ownerUin })
+  // task-51：roles.js 没加载上时退化成「只有主人」，绝不让权限模块缺失
+  // 变成「谁都不是主人」（那会连锁关掉所有指令/审批能力，比不加载更难查）。
+  const roleInfo = roleConfig
+    ? roleConfig({ ...config, ownerUin })
+    : {
+        owners: ownerUin ? [ownerUin] : [],
+        admUins: [],
+        roles: ownerUin ? { [ownerUin]: 'owner' } : {},
+      }
 
   return {
     ...config,
@@ -548,6 +647,14 @@ function _configShapeReference(Schema) {
 }
 
 export function apply(root, rawConfig = {}) {
+  // 临时诊断（task-53 拆包排查）：证明「这次 apply 跑的是哪份模块、写盘是否可行」。
+  try {
+    fs.writeFileSync(
+      'G:\\Molly\\qq-whale\\out\\main-apply-beat.txt',
+      `${new Date().toISOString()} pid=${process.pid} url=${import.meta.url}\n`,
+      'utf8',
+    )
+  } catch {}
   const config = resolveDirs({ ...DEFAULTS, ...rawConfig })
 
   // logger：优先用 DSH 的 logger 服务，退回 console
@@ -564,6 +671,14 @@ export function apply(root, rawConfig = {}) {
   // 「已关闭」日志只打一次：pestTick 每 15 分钟一轮，关掉之后每轮都记就成刷屏了
   let pestDisabledLogged = false
   let disposers = []
+  /*
+   * task-53 收口：pest 只有**一份实现**（独立包 dsh-qq-pest），主包不再保留内置副本。
+   *   pestSource      —— 'package' = 独立包在供货；'missing' = 包没加载，功能整体关闭。
+   *   pendingPestApi  —— 独立包若比主包先 apply，会先递接口过来；这时引擎还没建，
+   *                      先攥着，等 boot() 建完 engine 再接（不丢、也不盲目 new）。
+   */
+  let pestSource = 'missing'
+  let pendingPestApi = null
   // 落盘到 dataDir：重载插件后「上次说话」「已聊几条」不该归零
   const metrics = new Metrics({ dir: config.dataDir || config.memoryDir })
 
@@ -583,6 +698,113 @@ export function apply(root, rawConfig = {}) {
     get client() {
       return client
     },
+    /*
+     * task-53：独立包 dsh-qq-pest 在 apply 时会调 state.attachPest(api) 请求接管。
+     * 返回 true = 这次真的把 engine.pest 换成了它造的实例；false = 没接管（继续内置）。
+     * 主包不 import 该包的任何文件，双向只认这两个宿主服务名。
+     */
+    attachPest: (api) => attachPest(api),
+    get pestSource() {
+      return pestSource
+    },
+  }
+
+  /**
+   * 把独立包 dsh-qq-pest 的 keeper 接到活引擎上（task-53 拆包接线的核心）。
+   *
+   * 单实现原则：主包**不再**内置 PestKeeper，也没有「退回内置实现」这条路。
+   * 拿不到包 → engine.pest = null（功能关闭）+ state.pest 给出 available:false，
+   * 缺口由 /state.plugins 的 missing 点名。宁可功能不可用，也不静默跑一份旧副本。
+   *
+   * 参数与 engine.js 原来的内置构造一一对应（拆包前后行为必须一致），
+   * 唯一新增的是给 snapshot 打一个 source:'package' 标记，验收时一眼看出谁在供货。
+   */
+  function attachPest(api) {
+    if (!api || typeof api.createKeeper !== 'function') {
+      health.registerFailed?.({ name: 'qqPest', error: '接口不完整：缺 createKeeper' })
+      logger('warn', 'pest 独立包接口不完整（缺 createKeeper），出气筒功能保持关闭')
+      return false
+    }
+    if (pestSource === 'package') return true
+    if (!engine) {
+      pendingPestApi = api
+      logger('info', 'pest 独立包先到了：等引擎建好再接')
+      return false
+    }
+    try {
+      const keeper = makePestKeeper(api, {
+        dir: config.memoryDir,
+        logger,
+        targets: (Array.isArray(config.pestTargets) ? config.pestTargets : [])
+          .map((x) => String(x || '').trim())
+          .filter((x) => /^\d{5,12}$/.test(x)),
+        dailyCap: Number(config.pestDailyCap ?? 8),
+        intervalMinutes: Number(config.pestIntervalMinutes ?? 45),
+        restWindows: config.restWindows || [],
+        isKnown: (uid) => engine?.isAllowedUser?.(uid) === true,
+        // 落盘位置和历史一致：同一个 pest-settings.json，拆包不该换文件
+        settingsFile: path.join(config.dataDir || config.memoryDir || dataDir, 'pest-settings.json'),
+        autoPick: config.pestAutoPick !== false,
+      })
+
+      engine.pest = keeper
+      pestSource = 'package'
+      state.pest = keeper.snapshot()
+      health.registerModule?.({
+        name: 'qqPest',
+        version: api.version || '',
+        exports: Object.keys(api),
+        optional: true,
+      })
+      logger(
+        'info',
+        `出气筒已由独立包接管（${keeper.enabled ? '开' : '关'}｜对象 ${keeper.targets.join(',') || '（空）'}｜日额度 ${keeper.dailyCap}｜状态存 pest-settings.json）`,
+      )
+      return true
+    } catch (err) {
+      health.registerFailed?.({ name: 'qqPest', error: String(err?.stack || err) })
+      logger('warn', `pest 独立包接管失败（出气筒功能关闭）：${err?.message || err}`)
+      return false
+    }
+  }
+
+  /**
+   * 包没加载时的「空壳」：让 /pest 仍能 200 并说清原因，而不是 503/500。
+   *
+   * 空壳里所有开关都是 false，engine 侧那些 `this.pest?.enabled` 守卫会直接跳过，
+   * 所以聊天链路完全不受影响；写操作的桩会抛一句人话，避免「改了但没生效」的错觉。
+   */
+  function installMissingPest(reason = 'qqPest 包未加载') {
+    const snap = Object.freeze({
+      available: false,
+      source: 'missing',
+      reason,
+      enabled: false,
+      disabled: true,
+      targets: [],
+      stopWord: '',
+      dailyCap: 0,
+      intervalMinutes: 0,
+      todayUsed: 0,
+    })
+    const unavailable = () => {
+      throw new Error(`出气筒不可用：${reason}`)
+    }
+    const shell = {
+      ...snap,
+      settingsFile: '',
+      snapshot: () => ({ ...snap }),
+      loadSettings: () => false,
+      saveSettings: () => {},
+      setTargets: unavailable,
+      setDailyCap: unavailable,
+      setIntervalMinutes: unavailable,
+      setEnabled: unavailable,
+    }
+    if (engine) engine.pest = shell
+    state.pest = { ...snap }
+    logger('warn', `出气筒不可用：${reason}（/state.plugins 的 missing 里能看到 qqPest）`)
+    return false
   }
 
   /**
@@ -649,16 +871,23 @@ export function apply(root, rawConfig = {}) {
 
   // Web 状态挂件。**必须在 apply 阶段就建好并挂注入行**：
   // 桌面端的 index 注入表是宿主启动时一次性收集的，晚一步就永远不进表。
-  const widget = new WebWidget({
-    logger,
-    config,
-    state,
-    engineRef: () => engine,
-    recheck: recheckModel,
-    refreshLogin: refreshLoginInfo,
-  })
-  widget.registerIndexInjectRow(root)
-  disposers.push(() => widget.dispose())
+  // task-51：web.js 没加载上时这里为 null，下面的装配全部跳过，但插件仍能挂载。
+  const widget = WebWidget
+    ? new WebWidget({
+        logger,
+        config,
+        state,
+        engineRef: () => engine,
+        recheck: recheckModel,
+        refreshLogin: refreshLoginInfo,
+      })
+    : null
+  if (widget) {
+    widget.registerIndexInjectRow(root)
+    disposers.push(() => widget.dispose())
+  } else {
+    logger('error', 'web.js 没加载上：Web 挂件/HTTP 路由这次不可用（状态见 /state.plugins）')
+  }
 
   /*
    * 给 agent 会话注册 `qq_onebot` 工具。
@@ -672,13 +901,16 @@ export function apply(root, rawConfig = {}) {
    * 否则「命令」链路建立得比 OneBot 连接早，那一轮就又看不到工具了。
    * 工具内部自己判 `client.state !== 'online'` 并给出人话。
    */
-  const qqTool = registerQqTool({
-    ctx: root,
-    getClient: () => client,
-    logger,
-  })
-  state.qqTool = qqTool.status
-  if (qqTool.dispose) disposers.push(qqTool.dispose)
+  // task-51：qqtools.js 是可选的（少了就只是没有 qq_onebot 工具）
+  const qqTool = registerQqTool
+    ? registerQqTool({
+        ctx: root,
+        getClient: () => client,
+        logger,
+      })
+    : null
+  state.qqTool = qqTool ? qqTool.status : { registered: false, error: 'qqtools.js 没加载上' }
+  if (qqTool?.dispose) disposers.push(qqTool.dispose)
 
   /*
    * 插件工坊（用户 333333333：「写个插件……然后不挂载」）。
@@ -689,13 +921,18 @@ export function apply(root, rawConfig = {}) {
    */
   let workshop = null
   try {
-    workshop = new Workshop({ dir: config.workshopDir, logger })
+    workshop = Workshop ? new Workshop({ dir: config.workshopDir, logger }) : null
+    if (!Workshop) logger('warn', 'workshop.js 没加载上：插件工坊这次不可用')
   } catch (err) {
     logger('warn', `插件工坊初始化失败：${err?.message || err}`)
   }
-  const wsTool = registerWorkshopTool({ ctx: root, getWorkshop: () => workshop, logger })
-  state.workshopTool = wsTool.status
-  if (wsTool.dispose) disposers.push(wsTool.dispose)
+  // task-51：工坊工具依赖 workshop.js 和 qqtools.js，缺一个就跳过
+  const wsTool =
+    registerWorkshopTool && Workshop
+      ? registerWorkshopTool({ ctx: root, getWorkshop: () => workshop, logger })
+      : null
+  state.workshopTool = wsTool ? wsTool.status : { registered: false, error: 'workshop 模块缺失' }
+  if (wsTool?.dispose) disposers.push(wsTool.dispose)
 
   /**
    * 启动真正的连接。
@@ -704,6 +941,11 @@ export function apply(root, rawConfig = {}) {
    * 用户会看到"在线但不回话"这种最难查的故障。
    */
   const boot = async (ctx) => {
+    // task-51：engine.js 是核心；没加载上就只记日志、不抛，插件仍挂载
+    if (!ChatEngine) {
+      logger('error', 'engine.js 没加载上：聊天/命令全部不可用（状态见 /state.plugins）')
+      return
+    }
     engine = new ChatEngine({ ctx, llm: ctx.llm, logger, config, client: null })
     // 指标挂在 engine 上：web.js 的 snapshot() 是从 engineRef() 拿的，
     // 早先 metrics 只存在于 apply 的局部变量里，挂件上那两行永远是 null。
@@ -711,30 +953,25 @@ export function apply(root, rawConfig = {}) {
     await engine.init()
 
     /*
-     * 出气筒「骂人模式」总开关（用户 2026-10-19 23:34）。
+     * task-53：引擎建好之后立刻做出气筒接线。
      *
-     * 用户要的是"控制台点一下就生效、不用重启"，而 pestTargets 是配置项——
-     * 改 yml 必须重启插件，所以开关单独落在 dataDir 的 pest-settings.json。
-     * 这里把文件路径挂到活对象上，然后用文件里的值覆盖 config 默认值：
-     * 控制台关掉过的话，重载/重启之后也仍然是关的（人的决定不该被重启冲掉）。
+     * 三种顺序都要能活：
+     *   ① pest 包先 apply → 接口已存在 pendingPestApi → 现在接管；
+     *   ② 主包先 apply → 这里主动 root.get('qqPest') 取一次；
+     *   ③ 包根本没装 → installMissingPest()，功能关闭但 /pest 仍 200 且说明原因。
+     * 「人类决定」的开关（enabled/targets/额度）由 makePestKeeper 里的 loadSettings()
+     * 从 dataDir 的 pest-settings.json 载回，重载不会把人的选择冲掉。
      */
     try {
-      if (engine?.pest) {
-        engine.pest.settingsFile = path.join(
-          config.dataDir || config.memoryDir || dataDir,
-          'pest-settings.json',
-        )
-        engine.pest.autoPick = config.pestAutoPick !== false
-        if (engine.pest.loadSettings()) {
-          logger(
-            'info',
-            `出气筒设置已从 pest-settings.json 载入：${engine.pest.enabled ? '开启' : '关闭'}｜对象 ${engine.pest.targets.join(',') || '（空）'}｜日额度 ${engine.pest.dailyCap}`,
-          )
-        }
-        state.pest = engine.pest.snapshot()
-      }
+      const earlyApi = pendingPestApi || root.get?.('qqPest') || null
+      pendingPestApi = null
+      if (earlyApi && pestSource !== 'package') attachPest(earlyApi)
+      if (pestSource !== 'package') installMissingPest()
     } catch (err) {
-      logger('warn', `出气筒开关设置载入失败（不影响聊天）：${err?.message || err}`)
+      logger('warn', `出气筒接线异常（功能保持关闭）：${err?.message || err}`)
+      try {
+        installMissingPest()
+      } catch {}
     }
 
     // 挂进度播报：监听 DSH 的 todos 投影，干活时实时把清单推到 QQ。
@@ -751,6 +988,11 @@ export function apply(root, rawConfig = {}) {
     // 开起来之后点一下挂件上的「重新检查」就能恢复。
     await recheckModel()
 
+    // task-51：onebot.js 没加载上就只保留 engine（离线可用），不建连接
+    if (!OneBotClient) {
+      logger('error', 'onebot.js 没加载上：这次不连 QQ（状态见 /state.plugins）')
+      return
+    }
     client = new OneBotClient({
       url: config.onebotUrl,
       token: config.onebotToken,
@@ -1080,12 +1322,102 @@ export function apply(root, rawConfig = {}) {
     disposers = []
   })
 
-  // 暴露给同一进程内的其他插件 / console 命令使用
+  /*
+   * task-53：独立 pest 包可能比主包先 apply（宿主对同层插件不保证顺序）。
+   * 这种时候它已经把 qqPest 服务挂好了，主包主动取一次即可，谁先谁后都不会坏。
+   * 必须放在下面的「模块缺口告警」之前 —— 接管成功会把 qqPest 从 missing 里划掉，
+   * 否则会给主人发一条假的「pest 没加载上」私信。
+   */
   try {
-    root.set?.('qqWhale', state)
+    const early = pendingPestApi || root.get?.('qqPest') || null
+    pendingPestApi = null
+    if (early && pestSource !== 'package') attachPest(early)
+    // 包没来（或来了但接口坏）：留一个空壳，保证 /pest 200 且说得清为什么不可用
+    if (pestSource !== 'package') installMissingPest()
+  } catch (err) {
+    logger('warn', `取 pest 独立包接口失败（出气筒功能关闭）：${err?.message || err}`)
+  }
+
+  /*
+   * task-51：apply 结束时报一次模块缺口。
+   * **只在真缺东西时发**——正常启动一句都不发（用户要求别来烦）。
+   * 走数组消息 + auto_escape=true，跟 reportCapture 的工具式发送区分开，
+   * 不会被当成「agent 的自发汇报」吞掉。
+   */
+  try {
+    const snap = health.snapshot?.() || null
+    const gapText = snap ? health.gapAlertText?.(snap) : ''
+    if (gapText) {
+      logger('warn', gapText)
+      const owner = String(config.ownerUin || (config.commanderUsers || [])[0] || '')
+      if (client && owner && typeof client.sendPrivateMsg === 'function') {
+        client
+          .sendPrivateMsg(owner, [{ type: 'text', data: { text: gapText } }], true)
+          .catch((err) => logger('warn', `模块缺失告警发送失败：${err?.message || err}`))
+      } else {
+        logger('warn', '模块缺失告警没发出去：还没有可用连接或没配置主人号（状态已进 /state.plugins）')
+      }
+    }
+  } catch (err) {
+    logger('warn', `模块缺口检查异常（不影响运行）：${err?.message || err}`)
+  }
+
+  // 暴露给同一进程内的其他插件 / console 命令使用
+  // 用 provide（不是 set）：只有 provide 注册的服务才跨插件可见，
+  // dsh-qq-pest 正是靠 ctx.get('qqWhale') 反向拿到 attachPest。
+  try {
+    if (typeof root.provide === 'function') root.provide('qqWhale', state)
+    else root.set?.('qqWhale', state)
   } catch {}
 
   return state
+}
+
+/**
+ * task-53：用独立包给的 `qqPest` 接口造一个 keeper 实例（导出给测试直接调）。
+ *
+ * 与 engine.js 原来的内置构造的唯一差别：① 参数由调用方显式传齐（不再读 config），
+ * 方便测试；② snapshot() 多一个 `source:'package'` 标记，用来在控制台区分
+ * 「现在是谁在供货」。
+ *
+ * 失败一律抛 —— 由 attachPest 捕获并把功能整体关掉（主包不再有内置副本可退），
+ * 绝不让包级问题冒到聊天链路。
+ */
+export function makePestKeeper(
+  api,
+  { dir, logger, targets, dailyCap, intervalMinutes, restWindows, isKnown, settingsFile, autoPick = true } = {},
+) {
+  if (!api || typeof api.createKeeper !== 'function') {
+    throw new Error('qqPest 接口不完整：缺 createKeeper')
+  }
+  const keeper = api.createKeeper({
+    dir,
+    logger,
+    targets,
+    dailyCap,
+    intervalMinutes,
+    restWindows,
+    isKnown,
+    settingsFile,
+  })
+  if (!keeper || typeof keeper.snapshot !== 'function') {
+    throw new Error('createKeeper 没返回可用的 keeper（缺 snapshot）')
+  }
+  keeper.autoPick = autoPick
+  // 把盘上「人关过」的决定载回来，否则独立包一接管就自己开了
+  if (typeof keeper.loadSettings === 'function') keeper.loadSettings()
+  // engine 的反击判定走 `this.pest.detectInjection?.(text)`，检测函数也由包提供
+  keeper.detectInjection = typeof api.detectInjection === 'function'
+    ? api.detectInjection
+    : () => ({ hit: false })
+  const snapshotOf = keeper.snapshot.bind(keeper)
+  /*
+   * 快照字段口径统一（lead 验收要求）：
+   * 「包在供货」和「包没加载」两种状态都必须带 `available`，否则前端/文档两头
+   * 一个有一个没有。package 态 available:true，missing 态 available:false。
+   */
+  keeper.snapshot = () => ({ ...snapshotOf(), available: true, source: 'package' })
+  return keeper
 }
 
 /** 日志：优先用 DSH logger，否则用 console 并按级别过滤 */

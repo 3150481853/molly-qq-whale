@@ -1,0 +1,18 @@
+{
+  "name": "dsh-qq-pest",
+  "version": "0.1.0",
+  "description": "QQ 出气筒（骂人模式）独立插件包 —— 阶段 2 拆包试点，从 dsh-qq-whale 里搬出来",
+  "type": "module",
+  "main": "lib/boot.js",
+  "files": [
+    "lib"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {},
+  "license": "MIT",
+  "private": true
+}

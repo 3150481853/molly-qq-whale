@@ -28,11 +28,22 @@ const OUT = path.join(PARENT, 'publish', 'molly-qq-whale')
 const DIRS = [
   ['plugin/dsh-qq-whale/lib', 'plugin/dsh-qq-whale/lib'],
   ['plugin/dsh-qq-whale/assets', 'plugin/dsh-qq-whale/assets'],
+  /*
+   * 2026-10-20 pest 拆包：pest 已从主包搬进独立包 dsh-qq-pest。
+   * 主包拿不到 qqPest 时会自动降级（pest 功能整体关闭，聊天/记忆照常），
+   * 但**发布版必须把两个包一起发**，否则部署者装完只有主包、骂人模式永远不可用。
+   * 这条是补的缺口：第一次 build 时忘了加，publish 副本里没有 dsh-qq-pest/。
+   */
+  ['plugin/dsh-qq-pest/lib', 'plugin/dsh-qq-pest/lib'],
 ]
 
 /** 单文件复制（源 → 目标） */
 const FILES = [
   ['plugin/dsh-qq-whale/package.json', 'plugin/dsh-qq-whale/package.json'],
+  // pest 独立包的三份清单（lib/ 由 DIRS 递归带走）
+  ['plugin/dsh-qq-pest/package.json', 'plugin/dsh-qq-pest/package.json'],
+  ['plugin/dsh-qq-pest/cordis.patch.yml', 'plugin/dsh-qq-pest/cordis.patch.yml'],
+  ['plugin/dsh-qq-pest/README.md', 'plugin/dsh-qq-pest/README.md'],
   ['console/index.html', 'console/index.html'],
   ['console/console.js', 'console/console.js'],
   ['console/console.css', 'console/console.css'],

@@ -257,3 +257,122 @@ export function checkRole(role, need) {
     message: n === ROLE_OWNER ? '这个只有主人能改，我替你拦下了。' : GUEST_SAY,
   }
 }
+
+// ── 命令文本 → owner 独占能力（task-43）────────────────────────────────
+//
+// 命令是自由文本（「命令 重启 DSH」），没有结构化的动作名，所以这里用关键词
+// 把文本映射到 CAP 里的 8 条 owner 独占能力。规则与边界：
+//   1. **匹配不上就放行**（返回空串）——匹配不上说明它不是 owner 独占操作；
+//      默认拒绝会把「查天气」「发消息」这类正常命令一起挡死。
+//   2. **角色认不出来由 checkCapability 拒绝**（normalizeRole → guest < owner），
+//      不在这一层另写一套角色判断。
+//   3. 关键词表放在 roles.js 并**导出**，测试/审计脚本直接 import，不许埋闭包。
+//   4. 宁可多挡：真机上主人被 adm 越权烦过三次，误挡的代价是主人自己再说一遍。
+
+/** 越权时对外的固定话术（task-43 指定；不解释机制、不说「权限不足」）。 */
+export const OWNER_ONLY_SAY = '这条得主人自己说，我替他做不了。'
+
+/**
+ * 8 条 owner 独占能力各自的关键词。
+ *
+ * 每条至少有一个能命中真机说法的词；`test-role-gate.mjs` 逐条断言。
+ * 顺序即优先级：先命中先算（例如「打开骂人模式」应先命中 persona 而不是别的）。
+ */
+export const OWNER_ONLY_COMMAND_KEYWORDS = Object.freeze([
+  Object.freeze({
+    cap: CAP.ALLOWLIST_MANAGE,
+    keywords: Object.freeze(['白名单', '审批人', '允许名单', '谁能跟她说话', 'allowlist', 'approver']),
+  }),
+  Object.freeze({
+    cap: CAP.MEMORY_OWNER_WRITE,
+    // 只挡「改主人记忆」；「查一下你的记忆」不该挡，所以词里都带动作或对象
+    keywords: Object.freeze(['主人的记忆', '改记忆', '修改记忆', '删记忆', '清空记忆', '记忆库', 'memory.json']),
+  }),
+  Object.freeze({
+    cap: CAP.BUDGET_MANAGE,
+    keywords: Object.freeze(['预算', '额度', '积分上限', '每日上限', 'dailycap', '花钱上限']),
+  }),
+  Object.freeze({
+    cap: CAP.PERSONA_MANAGE,
+    keywords: Object.freeze(['人设', '人格', '提示词', 'persona', '骂人模式', '出气筒', 'pest']),
+  }),
+  Object.freeze({
+    cap: CAP.PLUGIN_INSTALL,
+    keywords: Object.freeze(['装插件', '安装插件', '卸载插件', '重载插件', '挂载插件', 'set_plugin', 'set_bundle']),
+  }),
+  Object.freeze({
+    cap: CAP.PROCESS_KILL,
+    keywords: Object.freeze(['杀进程', '结束进程', '关掉 qq', '关 qq', '停 napcat', '关闭 napcat', 'taskkill']),
+  }),
+  Object.freeze({
+    cap: CAP.DSH_RESTART,
+    keywords: Object.freeze(['重启 dsh', '重启dsh', '重启宿主', '重启 molly', '重启molly', 'restart dsh']),
+  }),
+  Object.freeze({
+    cap: CAP.CONFIG_YML,
+    keywords: Object.freeze(['改配置', '配置文件', 'cordis.patch.yml', 'config.yml', 'yml', 'yaml']),
+  }),
+])
+
+/**
+ * 把一条命令文本（已剥掉「命令 」前缀）映射到 owner 独占能力。
+ *
+ * @param {string} text
+ * @returns {string} CAP 的 cap id；不是 owner 独占操作时返回 ''
+ */
+export function classifyCommandCapability(text) {
+  const s = String(text ?? '').toLowerCase()
+  if (!s.trim()) return ''
+  for (const row of OWNER_ONLY_COMMAND_KEYWORDS) {
+    for (const k of row.keywords) {
+      if (s.includes(String(k).toLowerCase())) return row.cap
+    }
+  }
+  return ''
+}
+
+// ── 只读 vs 变更（task-43 补丁，2026-10-20）────────────────────────────
+//
+// 为什么需要这一层：adm 问「查一下今天预算还剩多少」被回「这条得主人自己说」，
+// 他只会以为机器人坏了（主人反复骂过「怎么变成敏感肌了」）。同一个关键词
+// 「预算」既可能是只读查询，也可能是改额度，**必须看动词**。
+//
+// 判定顺序（故意简单、可测，不做启发式猜）：
+//   1. cap 为空 → 放行（不是 owner 独占操作）
+//   2. 命中 MUTATE_VERBS → 拦（哪怕同时有「查」：「查一下然后改成 800」必须拦）
+//   3. 没有变更词、但有 READ_VERBS → 放行（纯只读）
+//   4. 两者都没有（例如只有「命令 预算」）→ 拦（含糊时错向严格）
+//
+// 宁可让 adm 多问一句「我要改预算」被拦，也不能让他查个数字都被挡。
+
+/** 只读意图（出现其一即认为是「问/看」，不是动作）。 */
+export const READ_VERBS = Object.freeze([
+  '查','看','念','列','问','显示','多少','是什么','还剩','有没有','现状','状态','几个','几条',
+])
+
+/** 变更意图（任何一个出现就压过只读）。 */
+export const MUTATE_VERBS = Object.freeze([
+  '改','设','换','加','删','清空','重启','装','卸','杀','关','停','打开','开启','关闭','调','重置',
+])
+
+/**
+ * 命令意图判定：cap + 只读/变更。
+ *
+ * @returns {{cap:string, intent:'none'|'read'|'mutate'|'ambiguous', allow:boolean}}
+ *          allow=true 表示「按角色门不该拦」（真正放不放行仍由 checkCapability 再判）
+ */
+export function commandIntentOf(text) {
+  /*
+   * 先把含「动词字」的复合名词换掉再判意图：
+   *   - 「人设」里的「设」不是 set 动作（否则「现在人设是什么」会被当成变更）
+   * 词表本身不动：classifyCommandCapability 仍能靠「人设/人格」命中 persona。
+   */
+  const s = String(text ?? '')
+    .toLowerCase()
+    .replace(/人设/g, '人格')
+  const cap = classifyCommandCapability(s)
+  if (!cap) return { cap: '', intent: 'none', allow: true }
+  if (MUTATE_VERBS.some((v) => s.includes(v))) return { cap, intent: 'mutate', allow: false }
+  if (READ_VERBS.some((v) => s.includes(v))) return { cap, intent: 'read', allow: true }
+  return { cap, intent: 'ambiguous', allow: false }
+}

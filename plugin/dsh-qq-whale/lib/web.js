@@ -31,6 +31,8 @@ import { isValidQq } from './memory.js'
 // QQ 投递路径早就有 cleanForQQ(sanitizeOutbound())，这几条 HTTP 路由漏了，
 // 真机上 /work/run 的 text 开头直接是 `<acp tokens="65" …>m00085</acp>`。
 import { sanitizeOutbound } from './persona-sanitize.js'
+// task-51：/state.plugins 的模块健康快照（main.js 装配时登记同一份 registry）
+import { snapshot as moduleSnapshot } from './module-health.js'
 
 const ROUTE_PREFIX = '/dsh-qq-whale'
 
@@ -182,6 +184,8 @@ export class WebWidget {
     this.engineRef = engineRef
     this.recheck = recheck
     this.refreshLogin = refreshLogin
+    // task-51：模块健康快照函数。单独存成属性，测试里可以置 null 模拟「取不到」。
+    this.moduleSnapshot = moduleSnapshot
     this.widgetJs = ''
     this.disposers = []
   }
@@ -224,6 +228,17 @@ export class WebWidget {
       memory: null,
       budget: null,
       stickers: null,
+      plugins: null,
+    }
+    /*
+     * task-51：模块健康快照（哪个子模块没加载上）。取不到就整块 null，不编造。
+     * 这份 registry 是进程内单例，和 main.js 装配时登记的是同一份（同一个
+     * gen-<rev> 目录里的同一个 URL，ESM 只求值一次）。
+     */
+    try {
+      out.plugins = typeof this.moduleSnapshot === 'function' ? this.moduleSnapshot() : null
+    } catch {
+      out.plugins = null
     }
     // 这些统计都包在 try 里：任何一项挂掉都不该让整个挂件变空白
     try {

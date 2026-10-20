@@ -26,7 +26,10 @@ import {
   CAP,
   checkCapability,
   checkRole,
+  commandIntentOf,
   createRoleGate,
+  OWNER_ONLY_SAY,
+  ROLE_ADM,
 } from './roles.js'
 
 /**
@@ -381,6 +384,83 @@ export class CommandExecutor {
       )
     }
     return res
+  }
+
+  /**
+   * 命令角色门（task-43）：这条命令文本是不是只有主人能做的事。
+   *
+   * 为什么要它：`requireCapability` 写好了但**命令路径从没调用过**，于是
+   * adm（333333333）和 owner 在命令权限上完全等价——他能让 Molly「重启 DSH」
+   * 「打开骂人模式」。现在把关键词表（roles.js 的
+   * `OWNER_ONLY_COMMAND_KEYWORDS`）接到命令入口。
+   *
+   * 判定顺序（错向权限最小）：
+   *   1. 关键词匹配不上 → 放行（说明不是 owner 独占操作，不能一刀切拒绝）
+   *   2. 匹配上 → `checkCapability(role, cap)`；角色认不出来（guest）时它必拒
+   *   3. 拒绝时用固定一句人话，并把这次越权留痕到 denied-commands.json
+   *
+   * @returns {{ok:boolean, role:string, cap:string, message:string}}
+   */
+  gateCommand(text, ev) {
+    const role = this.roleOf(ev?.user_id ?? ev?.userId)
+    /*
+     * 先分意图（task-43 补丁）：
+     *   - cap 匹配不上 → 放行
+     *   - 只读（查/看/念…且没有变更词）→ adm 及以上放行只读查询
+     *   - 变更 / 含糊 → 走角色判定
+     * 只读放行必须过「至少 adm」这道：guest 即使在命令群里，也不能因为
+     * 「查预算还剩多少」被放进来（入口层通常已经拦了，这里是纵深）。
+     */
+    const intent = commandIntentOf(text)
+    const cap = intent.cap
+    if (!cap) return { ok: true, role, cap: '', message: '', intent: intent.intent }
+    if (intent.allow && checkRole(role, ROLE_ADM).ok) {
+      return { ok: true, role, cap, message: '', intent: intent.intent, readOnly: true }
+    }
+    const res = checkCapability(role, cap)
+    if (res.ok) return { ok: true, role, cap, message: '', intent: intent.intent }
+    this.recordDeniedCommand({ uin: String(ev?.user_id ?? ''), role, text, cap })
+    this.logger?.(
+      'warn',
+      `越权命令被拒：uin=${ev?.user_id ?? '(未知)'} 角色=${role} 能力=${cap} 意图=${intent.intent} 命令=${String(text || '').slice(0, 80)}`,
+    )
+    return { ok: false, role, cap, message: OWNER_ONLY_SAY, intent: intent.intent }
+  }
+
+  /**
+   * 越权留痕：追加一行到 `<dataDir>/denied-commands.json`（最多 50 条）。
+   * 只是证据，写失败只 warn——留痕坏了不该影响拒人。
+   */
+  recordDeniedCommand({ uin, role, text, cap }) {
+    try {
+      const dir = String(this.config?.dataDir || this.config?.memoryDir || '').trim()
+      if (!dir) {
+        this.logger?.('warn', '越权记录没落盘：没配置 dataDir')
+        return false
+      }
+      const file = path.join(dir, 'denied-commands.json')
+      let arr = []
+      try {
+        const parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
+        if (Array.isArray(parsed)) arr = parsed
+      } catch {
+        /* 文件不存在/坏了都从空数组开始 */
+      }
+      arr.push({
+        at: Date.now(),
+        uin: String(uin || ''),
+        role: String(role || ''),
+        text: String(text || '').slice(0, 200),
+        cap: String(cap || ''),
+      })
+      while (arr.length > 50) arr.shift()
+      fs.mkdirSync(dir, { recursive: true })
+      fs.writeFileSync(file, JSON.stringify(arr, null, 2), 'utf8')
+      return true
+    } catch (err) {
+      this.logger?.('warn', `越权记录写盘失败（不影响拒绝）：${err?.message || err}`)
+      return false
+    }
   }
 
   /**
@@ -1118,7 +1198,9 @@ export class CommandExecutor {
     return next
   }
 
-  async _runOnce(task, { onProgress } = {}) {
+  async _runOnce(task, { onProgress, meta = null } = {}) {
+    // task-43：本次请求来自谁（工具层拿不到身份，这里只留痕 + 供人设/排查用）
+    this.lastCommandMeta = meta && typeof meta === 'object' ? { ...meta } : null
     const id = randomUUID()
     const started = Date.now()
     /*

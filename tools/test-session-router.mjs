@@ -8,7 +8,7 @@
  *   3. chat 的工具面不含 write/edit/pwsh/apply_patch/ask_user_question
  *   4. code 会话里写受保护路径 → work-guard DENY
  *   5. 路由计数与 #override 生效
- *   6. 离线 e2e：「命令 今天气温」进 work（kimi-k2.6），
+ *   6. 离线 e2e：「命令 今天气温」进 work（deepseek-v4.1-flash），
  *      「帮我把 engine.js 改一下」进 code（flash）且写盘被 guard 拦
  *
  * 用法：node tools/test-session-router.mjs
@@ -91,7 +91,7 @@ const config = {
   commandEnabled: true,
   workTurnTimeoutMs: 60 * 1000,
   chatModel: { provider: 'wb-proxy', model: 'deepseek-v4.1-flash' },
-  workModel: { provider: 'wb-proxy', model: 'kimi-k2.6' },
+  workModel: { provider: 'wb-proxy', model: 'deepseek-v4.1-flash' },
   codeModel: { provider: 'wb-proxy', model: 'deepseek-v4.1-flash' },
   provider: 'wb-proxy',
   model: 'deepseek-v4.1-flash',
@@ -147,9 +147,9 @@ function makeContext() {
   const work = new CommandExecutor({ ctx, logger, config, engine: null, role: 'work' })
   await work.ensureHandle()
   const w = created[0]
-  eq('work sessionId 沿用现有 id', w.sessionId, 'qq-whale-work-111111111')
+  eq('work sessionId 沿用现有 id', w.sessionId, 'qq-whale-work-v2-111111111')
   eq('work 模型 provider', w.agentOptions.provider, 'wb-proxy')
-  eq('work 模型 model=kimi-k2.6', w.agentOptions.model, 'kimi-k2.6')
+  eq('work 模型 model=deepseek-v4.1-flash', w.agentOptions.model, 'deepseek-v4.1-flash')
   ok('work cwd=沙箱', String(w.meta?.cwd || '').replace(/\//g, '\\').toLowerCase() === 'g:\\molly\\sandbox\\qq-work', String(w.meta?.cwd))
   const denied = restricts.flatMap((s) => s.deny || [])
   ok('work 屏蔽 write', denied.includes('write'))
@@ -164,7 +164,7 @@ function makeContext() {
   const code = new CommandExecutor({ ctx: c.ctx, logger, config, engine: null, role: 'code' })
   await code.ensureHandle()
   const cd = c.created[0]
-  eq('code sessionId', cd.sessionId, 'qq-whale-code-111111111')
+  eq('code sessionId', cd.sessionId, 'qq-whale-code-v2-111111111')
   eq('code 模型=flash', cd.agentOptions.model, 'deepseek-v4.1-flash')
   ok('code cwd=沙箱', String(cd.meta?.cwd || '').replace(/\//g, '\\').toLowerCase() === 'g:\\molly\\sandbox\\qq-work')
   const codeDenied = c.restricts.flatMap((s) => s.deny || [])
@@ -174,7 +174,7 @@ function makeContext() {
   const denial = c.guards[0]({
     name: 'write',
     arguments: { path: 'G:\\Molly\\qq-whale\\plugin\\dsh-qq-whale\\lib\\engine.js', content: 'x' },
-    agent: { session: { id: 'qq-whale-code-111111111' } },
+    agent: { session: { id: 'qq-whale-code-v2-111111111' } },
   })
   ok('code 写受保护路径 → DENY', typeof denial === 'string' && denial.length > 0, String(denial))
   ok('DENY 文案包含「需要人工审核」或「审核」', /审核/.test(String(denial)), String(denial))
@@ -182,7 +182,7 @@ function makeContext() {
   const allowSandbox = c.guards[0]({
     name: 'write',
     arguments: { path: 'G:\\Molly\\sandbox\\qq-work\\a.txt', content: 'x' },
-    agent: { session: { id: 'qq-whale-code-111111111' } },
+    agent: { session: { id: 'qq-whale-code-v2-111111111' } },
   })
   ok('code 写沙箱 → 放行', allowSandbox === undefined || allowSandbox === null, String(allowSandbox))
 
@@ -232,8 +232,8 @@ console.log('\n[5] 路由计数 + 离线 e2e（命令→work，改代码→code�
   eq('命令 route=work', r.route.route, 'work')
   // runCommand 里没有 progress 时先发一句随机开工语（0.8~2.3s），再建会话
   await sleep(3200)
-  eq('建了 work 会话', ctxEnv.created[0].sessionId, 'qq-whale-work-111111111')
-  eq('work 用 kimi-k2.6', ctxEnv.created[0].agentOptions.model, 'kimi-k2.6')
+  eq('建了 work 会话', ctxEnv.created[0].sessionId, 'qq-whale-work-v2-111111111')
+  eq('work 用 deepseek-v4.1-flash', ctxEnv.created[0].agentOptions.model, 'deepseek-v4.1-flash')
 
   /*
    * 改代码意图但**没有**「命令 」前缀、也没有 #code → 只是建议，不进命令链路。
@@ -245,14 +245,14 @@ console.log('\n[5] 路由计数 + 离线 e2e（命令→work，改代码→code�
   eq('无前缀改代码 handled=false（不进命令链路）', r.handled, false)
   ok('  标记 downgradeWhy=no-explicit-prefix', engine.routeState.last.downgradeWhy === 'no-explicit-prefix')
   await sleep(800)
-  ok('  没有建 code 会话', !ctxEnv.created.some((c) => c.sessionId === 'qq-whale-code-111111111'))
+  ok('  没有建 code 会话', !ctxEnv.created.some((c) => c.sessionId === 'qq-whale-code-v2-111111111'))
 
   // 显式 #code 才真跑，并建 code 会话
   r = await engine.routeAndDispatch({ ev, conv, norm: { text: '#code 帮我把 engine.js 改一下' }, userName: '群主', scene: 'group_mention' })
   eq('#code 覆盖 → code', r.route.route, 'code')
   eq('#code handled=true', r.handled, true)
   await sleep(3600)
-  const codeCreate = ctxEnv.created.find((c) => c.sessionId === 'qq-whale-code-111111111')
+  const codeCreate = ctxEnv.created.find((c) => c.sessionId === 'qq-whale-code-v2-111111111')
   ok('建了 code 会话', Boolean(codeCreate))
   eq('code 用 flash', codeCreate?.agentOptions.model, 'deepseek-v4.1-flash')
 

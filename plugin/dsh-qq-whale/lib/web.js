@@ -27,6 +27,10 @@ import { addLearnedHash, removeLearnedHash } from './sticker-learn.js'
 // qq 是记忆的唯一身份（2026-10-19）：校验规则只写在 memory.js 一处，
 // 免得控制台和引擎两边各写一套正则、慢慢就跑偏了。
 import { isValidQq } from './memory.js'
+// task-50：HTTP 出口也要过一遍出站清洗（ACP 标记 / markdown / 内部 id）。
+// QQ 投递路径早就有 cleanForQQ(sanitizeOutbound())，这几条 HTTP 路由漏了，
+// 真机上 /work/run 的 text 开头直接是 `<acp tokens="65" …>m00085</acp>`。
+import { sanitizeOutbound } from './persona-sanitize.js'
 
 const ROUTE_PREFIX = '/dsh-qq-whale'
 
@@ -1163,9 +1167,10 @@ export class WebWidget {
                   shape.derivedTail = msgs.slice(-3).map((m) => ({
                     role: m?.role,
                     blocks: (Array.isArray(m?.content) ? m.content : []).map((b) => b?.type).join(','),
+                    // task-50：探针吐的是模型原文，出口前先洗掉 <acp>/mNNNNN 等标记
                     text: (Array.isArray(m?.content) ? m.content : [])
                       .filter((b) => b?.type === 'text')
-                      .map((b) => String(b.text || '').slice(0, 200))
+                      .map((b) => sanitizeOutbound(String(b.text || '')).slice(0, 200))
                       .join(' | '),
                   }))
                 } catch (err3) {
@@ -1304,7 +1309,8 @@ export class WebWidget {
               reason: verdict.reason,
             })
             out.found = Boolean(r?.ok)
-            out.summary = r?.summary || ''
+            // task-50：research 摘要是模型/网页原文，出口前先清洗（去 markdown、去内部标记）
+            out.summary = sanitizeOutbound(r?.summary || '')
             out.error = r?.error || ''
             out.researchMs = r?.elapsed || 0
           }
@@ -1377,6 +1383,12 @@ export class WebWidget {
           }
 
           const result = await ex.run(task, {})
+          /*
+           * task-50：HTTP 出口统一清洗。真机实测这里直接吐出了
+           * `<acp tokens="65" type="text">m00085</acp>\n沙箱自检通过…`
+           * ——QQ 投递路径有 cleanForQQ(sanitizeOutbound())，这条口子漏了。
+           */
+          const cleanText = sanitizeOutbound(String(result?.text || ''))
           let sent = 0
           if (body?.send === true && e?.sendTextTo) {
             /*
@@ -1385,7 +1397,7 @@ export class WebWidget {
              */
             const to = String(body?.to || this.config.commanderUsers?.[0] || '').trim()
             if (to) {
-              const lines = String(result?.text || '').split('\n').filter(Boolean).slice(0, 6)
+              const lines = cleanText.split('\n').filter(Boolean).slice(0, 6)
               for (const line of lines) {
                 await e.sendTextTo({ user_id: to, message_type: 'private' }, line)
                 sent += 1
@@ -1394,10 +1406,10 @@ export class WebWidget {
           }
           sendJson(res, 200, {
             ok: Boolean(result?.ok),
-            text: String(result?.text || ''),
+            text: cleanText,
             elapsedMs: Date.now() - started,
             sentLines: sent,
-            error: result?.ok ? '' : String(result?.text || ''),
+            error: result?.ok ? '' : cleanText,
             events,
           })
         } catch (err) {

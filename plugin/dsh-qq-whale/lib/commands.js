@@ -58,6 +58,34 @@ export const WORK_STUCK_MS = 270 * 1000
 export const WORK_STALL_REPLY = '这活我卡住了，先放下。你换个说法或者拆小一点再让我试。'
 
 /**
+ * 工具死循环闸门（task-50）。
+ *
+ * 真机 2026-10-20 16:09：用户让 work 会话建目录，模型连续 5+ 次调
+ * `working_directory · ${MOLLY_ROOT}\sandbox`，中间还自己道歉「抱歉我又重复了」，
+ * 然后把同一调用继续下去，把一轮预算烧光。
+ *
+ * 判定：同一个 `工具名 + 参数 JSON` 在一次命令执行里出现次数。
+ *   - 第 3 次：拦掉（工具层返回一段纠偏人话，模型能看到）
+ *   - 第 4 次：再拦一次并**收口**：取消这一轮，向用户回 LOOP_ABORT_REPLY
+ * **绝不伪造成功返回值**——那会让模型以为目录建好了，骗到的是用户。
+ */
+export const LOOP_WARN_AT = 3
+export const LOOP_ABORT_AT = 4
+
+/** 第 3/4 次重复调用时返回给模型的纠偏文案（作为工具错误结果进上下文）。 */
+export function loopCorrective(tool, count) {
+  return (
+    `你已经用完全相同的参数调用 ${tool} ${count} 次了，它不会给你任何新信息。` +
+    '这一轮已经被闸门拦下：不要再调它（也不要换个说法调同一个工具）。' +
+    '要么换一条完全不同的办法，要么直接告诉用户这条路走不通。'
+  )
+}
+
+/** 死循环收口时发给用户的原话。 */
+export const LOOP_ABORT_REPLY =
+  '这条路我走不通：同一个工具我反复试了几次都没拿到新结果，先停下了。你换个说法，或者把这件事拆小一点再让我做。'
+
+/**
  * 三会话工具面（task-46）。
  *
  * chat 是最小权限面：**任何**能碰到文件、shell、网络、交互的工具都不给。
@@ -196,9 +224,80 @@ export class CommandExecutor {
     this.currentCommand = null
     /** 工具护栏的注销函数（换会话时先注销旧的，避免一个 agent 挂两道）。 */
     this._workGuardDispose = null
+    /** task-50：本轮「工具名+参数」调用计数（每次 _runOnce 清零） */
+    this._loopCounts = new Map()
+    /** task-50：本轮是否已经触发了死循环收口 */
+    this._loopTripped = false
   }
 
   // ———————————————— 权限 ————————————————
+
+  /** 每次命令开始前清零死循环计数（task-50）。 */
+  resetLoopGuard() {
+    this._loopCounts = new Map()
+    this._loopStreak = { key: '', n: 0 }
+    this._loopTripped = false
+  }
+
+  /** 参数稳定序列化：同样的对象不管键顺序都算同一个 key。 */
+  stableArgsKey(args) {
+    const canon = (v, depth = 0) => {
+      if (depth > 4) return '…'
+      if (v === null || typeof v !== 'object') return v
+      if (Array.isArray(v)) return v.map((x) => canon(x, depth + 1))
+      const out = {}
+      for (const k of Object.keys(v).sort()) out[k] = canon(v[k], depth + 1)
+      return out
+    }
+    try {
+      return JSON.stringify(canon(args ?? {}))
+    } catch {
+      return String(args)
+    }
+  }
+
+  /**
+   * 工具死循环闸门（task-50）：同工具同参数**连续** ≥3 次就拦，≥4 次收口。
+   *
+   * 只认「连续」：中间夹了别的工具/参数就重新计数——模型在正常推进
+   * （A→B→A→B 是两条路交替试，不是原地打转）；原地打转的定义是
+   * 「同一个调用一遍又一遍，中间什么都没有」。
+   *
+   * 返回 null 表示放行；返回字符串表示拒绝理由（DSH 的 tools.guard 约定：
+   * 返回非空字符串即 deny，该字符串会作为工具错误结果回到模型上下文）。
+   */
+  checkToolLoop(exec) {
+    const tool = String(exec?.name || exec?.tool || '')
+    const args = exec?.arguments ?? exec?.args ?? {}
+    const key = `${tool}|${this.stableArgsKey(args)}`
+    if (!this._loopStreak || this._loopStreak.key !== key) {
+      this._loopStreak = { key, n: 0 }
+    }
+    this._loopStreak.n += 1
+    const count = this._loopStreak.n
+    this._loopCounts.set(key, (this._loopCounts.get(key) || 0) + 1)
+    if (count < LOOP_WARN_AT) return null
+    if (count === LOOP_WARN_AT) {
+      this.logger('warn', `工具死循环闸门：${tool} 相同参数连续第 ${count} 次，已拦下并纠偏`)
+      return loopCorrective(tool, count)
+    }
+    /*
+     * 纠偏后还在原地打转 → 这一轮没救了，直接收口。
+     * agent.cancel 是异步副作用，guard 必须同步返回，所以用 setTimeout(0) 甩出去；
+     * 这里绝不伪造工具返回值（不能让模型以为成功了）。
+     */
+    this._loopTripped = true
+    this.logger('warn', `工具死循环收口：${tool} 相同参数连续第 ${count} 次，取消本轮`)
+    const agent = exec?.agent
+    setTimeout(() => {
+      try {
+        agent?.cancel?.({ kind: 'user', reason: '工具死循环（同一调用反复出现）' })
+      } catch (err) {
+        this.logger('warn', `取消死循环轮次失败：${err?.message || err}`)
+      }
+    }, 0)
+    return loopCorrective(tool, count)
+  }
 
   /**
    * 这个角色的会话该屏蔽哪些工具（task-46）。
@@ -487,6 +586,40 @@ export class CommandExecutor {
             '所以：永远不要调用 ask_user_question（以及任何需要人点确认的工具）。',
             '遇到歧义就按你认为最合理的理解直接干，干完在结果里用一句话说明你的假设，',
             '比如「我按 A 方案做的，因为 B 需要你确认」。宁可做错一个可回滚的小步，也不要停下来等人。',
+            /*
+             * task-50（2026-10-20 真机）：用户在控制台对 work 会话说「在
+             * ${MOLLY_ROOT}\sandbox 下建一个文件夹 test1」，模型连续调了 5+ 次
+             * working_directory ${MOLLY_ROOT}\sandbox，一边道歉一边继续调同一个。
+             * 根因不是它不想换，是它不知道「这条会话没有写工具」。
+             */
+            '',
+            isCode
+              ? '## 写文件是本会话的本职'
+              : '## 这条会话没有写工具——要写文件请让用户走改代码那条',
+            ...(isCode
+              ? [
+                  '沙箱里的文件你可以直接写；`G:\\Molly\\qq-whale` 等项目源码受审核保护，',
+                  '被拦下时把工具给的审核话术原样回给用户，不要换个工具再试。',
+                ]
+              : [
+                  '你**没有** write / edit / apply_patch，也就没有任何办法建目录、写文件、改文件。',
+                  '遇到「建文件夹 / 建文件 / 改文件 / 写脚本 / 装依赖」这类请求，**不要试探工具**',
+                  '（working_directory、read、glob、pwsh 都不是写工具，试多少次都不会成功），',
+                  '直接用一句话告诉用户：',
+                  '「这个得走改代码那条——把消息写成 `#code 在 G:\\Molly\\sandbox 下建一个 test1 文件夹`，',
+                  '那条会话才有写权限。」',
+                  '说过就停，不要反复解释，也不要假装已经建好了。',
+                ]),
+            '',
+            '## 工具用法：不许死循环',
+            '同一个工具、同样的参数，**最多试两次**。第二次没给你新信息就换办法。',
+            '第三次开始系统会直接拦你；被拦后不要换个说法再试同一个工具，要么换一条完全不同的路，',
+            '要么直接告诉用户「这条路我走不通」。',
+            '',
+            '## 正文里不许出现宿主标记',
+            '`<acp tokens="…" type="text">m00085</acp>`、裸的 `m00085` 这类是宿主内部的事件引用，',
+            '不是给人看的内容。你的回复正文里出现它们＝格式错误，会被系统剥掉。',
+            '只输出自然语言。工具回执里的 id（message_id 等）也不要往正文里抄。',
           ].join('\n'),
         })
       } catch (err) {
@@ -780,6 +913,9 @@ export class CommandExecutor {
           const sid = String(ag?.session?.id || ag?.sessionId || ag?.id || '')
           if (sid && !sid.startsWith(workId)) return undefined
         }
+        // task-50：先查死循环（同一工具同参数反复出现），再查受保护路径
+        const loop = this.checkToolLoop(exec)
+        if (loop) return loop
         const hit = scanToolCall(exec)
         if (!hit.deny) return undefined
         const cmd = this.currentCommand || {}
@@ -991,6 +1127,8 @@ export class CommandExecutor {
      * 永远不会 settle，后面每条命令都会排在它后面一路超时。
      */
     await this.releaseStuckRun()
+    // task-50：每条命令一个干净的死循环账本
+    this.resetLoopGuard()
     this.running = { id, task, startedAt: started }
 
     /*
@@ -1155,6 +1293,18 @@ export class CommandExecutor {
         return this.lastResult
       }
 
+      /*
+       * task-50：本轮触发过工具死循环收口（同调用连续第 4 次）→ 不再读模型
+       * 那些「抱歉我又重复了」的废话，直接回一句人话。
+       */
+      if (this._loopTripped) {
+        const elapsed = Date.now() - started
+        this._loopTripped = false
+        this.lastResult = { id, task, text: LOOP_ABORT_REPLY, elapsed, ok: false, loopAborted: true }
+        this.logger('warn', `工具死循环收口（${(elapsed / 1000).toFixed(1)}s），已回「走不通」`)
+        return this.lastResult
+      }
+
       let text = this.readLastAssistant(agent, task)
       /*
        * 定位到自己的 followup、但它那一轮还没产出时，再给一点时间，
@@ -1242,6 +1392,38 @@ export class CommandExecutor {
   }
 
   /**
+   * 这条 user 消息是不是「宿主自己塞进来的元信息」，而不是一个真实轮次。
+   *
+   * 真机 2026-10-20（qq-whale-work-v2-111111111）：followup 之后宿主立刻插了
+   * 一条 runtime-context 快照 user 消息（source.kind='runtime-context'，
+   * form='snapshot'），assistant 的实际回复落在它后面。旧边界把它当成
+   * 「下一条 user」，区间 (mine, nextUser) 里没有 assistant → 返回 '' →
+   * 上层报「会话没有产出任何内容」。
+   *
+   * **不能**把所有 source 非 'user' 的都当元信息：定时提醒（scheduled
+   * reminder）的 user 消息根本没有 source 字段，它是货真价实的另一个轮次，
+   * 必须继续当边界（否则 2026-10-20 09:26 的「答非所问」会复发）。
+   * 只认明确的白名单 + 宿主固定抬头。
+   */
+  isMetaUserMessage(msg) {
+    if (msg?.role !== 'user') return false
+    const src = msg.source && typeof msg.source === 'object' ? msg.source : {}
+    const kind = String(src.kind || '')
+    if (kind === 'runtime-context' || kind === 'dsh-session-title-llm') return true
+    if (String(src.form || '') === 'snapshot') return true
+    const blocks = Array.isArray(msg.content) ? msg.content : []
+    const head = blocks
+      .filter((b) => b?.type === 'text' && typeof b.text === 'string')
+      .map((b) => b.text)
+      .join('\n')
+      .trim()
+      .slice(0, 80)
+    if (/^Current runtime context\./.test(head)) return true
+    if (/^Generate the session title from this JSON array/.test(head)) return true
+    return false
+  }
+
+  /**
    * 从会话日志里捞最后一条 assistant 文本。
    *
    * 为什么不用流式回调拼：agent 的流是进程本地事件，形状随版本变。
@@ -1269,6 +1451,7 @@ export class CommandExecutor {
         for (let i = msgs.length - 1; i >= 0; i--) {
           const m = msgs[i]
           if (m?.role !== 'user') continue
+          if (this.isMetaUserMessage(m)) continue
           const t = (Array.isArray(m.content) ? m.content : [])
             .filter((b) => b?.type === 'text' && typeof b.text === 'string')
             .map((b) => b.text)
@@ -1281,13 +1464,16 @@ export class CommandExecutor {
         }
         if (mine >= 0) {
           /*
-           * 自己那一轮的范围是 (mine, 下一条 user 消息)：turn 的边界就是
-           * 「下一个 user 进来」。后面别的轮次（scheduled reminder、聊天链路的
-           * research 包装任务）都在这条边界之外，绝不能拿来当本次结果。
+           * 自己那一轮的范围是 (mine, 下一条**真实轮次**的 user 消息)。
+           *
+           * 2026-10-20 修正：跳过宿主塞进来的元信息 user 消息（运行时上下文
+           * 快照、标题生成请求）——它们不是轮次边界。真实轮次（用户命令、
+           * 定时提醒、聊天链路的 research 包装任务）仍然截断，保证不会把
+           * 别人那轮的回答当成本次结果。
            */
           let nextUser = msgs.length
           for (let i = mine + 1; i < msgs.length; i++) {
-            if (msgs[i]?.role === 'user') {
+            if (msgs[i]?.role === 'user' && !this.isMetaUserMessage(msgs[i])) {
               nextUser = i
               break
             }
@@ -1327,9 +1513,21 @@ export class CommandExecutor {
     }
   }
 
-  /** 本执行器负责的 sessionId（task-46：work 沿用原 id，绝不改名/重建） */
+  /**
+   * 本执行器负责的 sessionId。
+   *
+   * task-46：work 沿用原 id、绝不改名/重建（改名会让宿主持老路径 → ENOENT）。
+   * 2026-10-20 修正：会话 header 里的 `cwd` 在**创建时写死**，之后 resume 只是
+   * 克隆旧 header，`meta.cwd` 不再生效 —— 老的 `qq-whale-work-111111111` 建于
+   * 沙箱改造之前，cwd 一直是 `${HOME}\.dsh\profiles\desktop`，于是
+   * 「在控制台里直接对这条会话打字」会往 profile 目录写文件（用户报的「越权」）。
+   * 解法：id 带版本戳（config.workSessionTag，默认 v2），换一条新会话，让
+   * pickWorkCwd() 的沙箱 cwd 真正落到 header 上；旧会话留在盘上不删不改名。
+   */
   workSessionId() {
-    return `qq-whale-${this.role === 'code' ? 'code' : 'work'}-${this.config.selfId || 'bot'}`
+    const role = this.role === 'code' ? 'code' : 'work'
+    const tag = String(this.config?.workSessionTag || 'v2').trim() || 'v2'
+    return `qq-whale-${role}-${tag}-${this.config.selfId || 'bot'}`
   }
 
   /** 干活会话的 session 对象（投影读取要它） */

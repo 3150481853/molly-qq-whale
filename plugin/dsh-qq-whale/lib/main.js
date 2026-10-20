@@ -313,7 +313,7 @@ const DEFAULTS = {
    * gateway.chat 的 model。老写法 workModel:'kimi-k2.6'（字符串）仍兼容。
    */
   chatModel: { provider: 'wb-proxy', model: 'deepseek-v4.1-flash' },
-  workModel: { provider: 'wb-proxy', model: 'kimi-k2.6' },
+  workModel: { provider: 'wb-proxy', model: 'deepseek-v4.1-flash' },
   codeModel: { provider: 'wb-proxy', model: 'deepseek-v4.1-flash' },
 
   // —— 先查再说 ——

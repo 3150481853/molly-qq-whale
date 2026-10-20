@@ -458,6 +458,9 @@ if (hits.length) {
 const files = []
 ;(function walk(d) {
   for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+    // .git 是本地版本库（内含 history 与 remote），不是发布内容：
+    // 它会被整体保留下来，但绝不能计入文件数，也不该进脱敏扫描的遍历范围。
+    if (e.name === '.git' || e.name === 'node_modules') continue
     const p = path.join(d, e.name)
     if (e.isDirectory()) walk(p)
     else files.push(path.relative(OUT, p).replace(/\\/g, '/'))

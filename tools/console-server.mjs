@@ -26,7 +26,6 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { isSea } from 'node:sea';
-import { fileURLToPath } from 'node:url';
 
 /*
  * ── 配置（三条来源，优先级从低到高）────────────────────────────────────────
@@ -47,13 +46,20 @@ const IS_SEA = (() => {
   }
 })();
 const EXE_DIR = path.dirname(process.execPath);
-// 脚本自身目录（源码模式 = tools\）；SEA 下没有真实模块路径，退回 EXE_DIR
+// 脚本自身目录（源码模式 = tools\）。不能用 ESM 的 importMeta.url：SEA 打包要求本文件
+// 保持「零 importMeta 引用」才能机械转成 CJS（tools/build-exe.mjs 的 toCjs 会直接报错）。
+// node tools\console-server.mjs 启动时 argv[1] 就是脚本路径，够用；SEA 下退回 EXE_DIR。
 const HERE = (() => {
   try {
-    return path.dirname(fileURLToPath(import.meta.url));
+    const entry = process.argv?.[1];
+    if (entry) {
+      const p = path.resolve(entry);
+      if (p.endsWith('.mjs') || p.endsWith('.js') || p.endsWith('.cjs')) return path.dirname(p);
+    }
   } catch {
-    return EXE_DIR;
+    /* ignore */
   }
+  return EXE_DIR;
 })();
 
 // 配置文件位置：MOLLY_CONSOLE_CONFIG 指定优先；否则 exe 同级 / 脚本同级 console.json。
@@ -995,6 +1001,10 @@ server.on('error', async (err) => {
     console.log(`[console] 已启动 http://${HOST}:${PORT}  version=${VERSION}`);
     console.log(`[console] 前端目录 ${CONSOLE_DIR}`);
     console.log(`[console] 数据服务 ${SIDECAR}`);
+    // 把「配置从哪读的、切模型能不能用」打出来：403 排查第一步就看这行（只报路径和有没有，不报令牌值）。
+    console.log(
+      `[console] 配置文件 ${CONFIG_FILE}${fs.existsSync(CONFIG_FILE) ? '' : '（不存在，走默认值/环境变量）'}；切模型令牌 ${MODEL_SWITCH_TOKEN ? '已配置' : '未配置（写接口会 403）'}`,
+    );
   });
 })();
 

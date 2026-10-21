@@ -60,7 +60,9 @@ SEA 的入口当前**只按 CommonJS 执行**。在 `sea-config.json` 里写 `"m
 配置文件查找顺序：
 
 1. 环境变量 `MOLLY_CONSOLE_CONFIG` 指定的路径
-2. `<exe 所在目录>\console.json`
+2. exe 模式：`<exe 所在目录>\console.json`；源码模式：`tools\console-server.mjs` 同级的 `tools\console.json`
+
+（源码模式以前落在 `<node.exe 目录>`，等于没人会去那儿放配置——2026-10-21 控制台切模型 403 的根因之一，已改。）
 
 文件不存在、或 JSON 写错，都**不阻断启动**，退回默认值继续跑（会在 `--version` 里标 `(不存在，用默认值)`）。
 
@@ -71,6 +73,7 @@ SEA 的入口当前**只按 CommonJS 执行**。在 `sea-config.json` 里写 `"m
 | `host` | `MOLLY_CONSOLE_HOST` | `127.0.0.1` |
 | `port` | `MOLLY_CONSOLE_PORT` | `19392` |
 | `token` | `MOLLY_CONSOLE_TOKEN` | 空（不校验） |
+| `modelSwitchToken` | `MOLLY_MODEL_SWITCH_TOKEN` | 空（切模型写接口一律 403） |
 | `consoleDir` | `MOLLY_CONSOLE_DIR` | `<exe目录>\console` |
 | `pluginBase` | `MOLLY_PLUGIN_BASE` | 空（启动时自动探测） |
 | `sidecar` | `MOLLY_SIDECAR` | `http://127.0.0.1:19391` |
@@ -84,6 +87,7 @@ SEA 的入口当前**只按 CommonJS 执行**。在 `sea-config.json` 里写 `"m
 
 - `pluginBase` 两种写法都收：`http://127.0.0.1:7053` 或 `http://127.0.0.1:7053/dsh-qq-whale`（后者会自动剥掉后缀）。留空时会扫 7000–9000 端口找宿主，**只在本机有意义**。
 - `token` 非空时，**所有**请求必须带 `x-molly-token` 头，否则 401。本机自用留空即可；**放到服务器上必须设**。
+- `modelSwitchToken` 必须与 DSH 插件配置里的 `modelSwitchToken` 完全一致（`cordis.patch.yml` 的 `dsh-qq-whale` 段），否则控制台「切模型」会 403。令牌只在服务端，前端拿不到、也不进日志。
 
 ---
 

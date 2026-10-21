@@ -16,7 +16,8 @@
   "files": [
     "lib",
     "persona",
-    "assets"
+    "assets",
+    "cordis.patch.yml"
   ],
   "dsh": {
     "bundle": {

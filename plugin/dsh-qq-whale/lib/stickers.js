@@ -483,7 +483,13 @@ export class StickerLibrary {
     const words = new Set()
     for (const q of expanded) {
       words.add(q)
-      for (const w of q.split(/[\s,，。.!！?？、]+/).map((s) => s.trim()).filter(Boolean)) words.add(w)
+      /*
+       * 2026-10-21：分隔符补上 `_ - / ・`。
+       * 模型按提示词写出来的关键词经常是「无语_翻白眼」「猫猫-无语」这种
+       * 带分隔符的复合词，原来只按标点/空白拆，整串拿去比标签永远对不上，
+       * 于是命中率极低、只能退化到随机图。拆成单词后才有得分。
+       */
+      for (const w of q.split(/[\s,，。.!！?？、_\-/・]+/).map((s) => s.trim()).filter(Boolean)) words.add(w)
     }
 
     const scored = []
@@ -516,16 +522,33 @@ export class StickerLibrary {
           else if (w.length >= 2 && (tag.includes(w) || w.includes(tag))) score += 1
         }
       }
-      if (score > 0) scored.push({ item, score })
+      /*
+       * 2026-10-21：+1 的双向子串只是兜底噪声，单独出现时不构成"命中"。
+       * 实测「伸手要」这种短标签能靠子串把不相干的图捞上来，所以门槛
+       * 提到 ≥2：要么完整词相等(+3/+6)，要么子串叠加到两分以上。
+       */
+      if (score >= 2) scored.push({ item, score })
     }
     scored.sort((a, b) => b.score - a.score)
     return scored.slice(0, limit).map((s) => s.item)
   }
 
-  /** 随机抽一张——斗图实在接不上时用，总比文字强 */
-  random(rng = Math.random) {
+  /**
+   * 随机抽一张——斗图实在接不上时用，总比文字强。
+   *
+   * @param {function} rng
+   * @param {object} [opts]
+   * @param {Set<string>|null} [opts.exclude] 最近发过的文件名，尽量不重样
+   */
+  random(rng = Math.random, { exclude = null } = {}) {
     if (this.items.length === 0) return null
-    return this.items[Math.floor(rng() * this.items.length)]
+    let pool = this.items
+    if (exclude && typeof exclude.has === 'function' && exclude.size > 0) {
+      const fresh = this.items.filter((it) => !exclude.has(it.file))
+      // 排除光会兜回全集（图库只有一张时不该返回 null）
+      if (fresh.length > 0) pool = fresh
+    }
+    return pool[Math.floor(rng() * pool.length)]
   }
 
   /**

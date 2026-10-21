@@ -8,7 +8,8 @@
  *  - 只用 Node 内置模块，零依赖，不用 shell:true（中文路径 + 空格会炸）。
  *  - 只监听 127.0.0.1，不对外暴露。
  *  - 宿主端口（DSH 的 /dsh-qq-whale/*）**不写死 7053**：先试 7053，再从 netstat 的
- *    LISTEN 列表里挑 7000-9000 的端口，逐个 GET /dsh-qq-whale/state 探到 200 为止。
+ *    LISTEN 列表里挑 1024-65535 的端口（原先是 7000-9000，DSH 桌面端重启后
+ *    可能落到 2160 这类低位端口，故放宽），逐个 GET /dsh-qq-whale/state 探到 200 为止。
  *  - 任何上游挂掉，/api/overview 仍返回 200，对应块 reachable:false。
  *  - 所有 spawn 带超时，超时 kill（Windows 下用 taskkill /T 连子进程一起杀）。
  *  - 日志只在启动和 5xx 打，前端 4 秒轮询不会把日志撑爆；日志里不打印 token/secret。
@@ -25,16 +26,18 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { isSea } from 'node:sea';
+import { fileURLToPath } from 'node:url';
 
 /*
  * ── 配置（三条来源，优先级从低到高）────────────────────────────────────────
  *   ① 下面的内置默认值          —— 在本机从源码跑时行为与以前完全一致
- *   ② console.json 配置文件     —— SEA 打包成 exe 后放在 exe 同级即可改配置，不用重新打包
+ *   ② console.json 配置文件     —— exe 模式放 exe 同级；源码模式放 console-server.mjs 同级
+ *                                 （tools\console.json），改配置不用重新打包/改代码
  *   ③ 环境变量 MOLLY_*          —— 容器 / systemd / 临时排障时最高优先
  *
  * 为什么要这一层：molly-console.exe 要能拷到任意目录跑、也可能搬到服务器上（docs/deploy.md），
  * 不能再把工作区绝对路径写死在代码里。SEA 单文件模式下 exe 拿不到源码目录，
- * 只能用 process.execPath 的所在目录当地基。
+ * 只能用 process.execPath 的所在目录当地基；源码模式则用脚本自己的目录。
  */
 const IS_SEA = (() => {
   try {
@@ -44,11 +47,22 @@ const IS_SEA = (() => {
   }
 })();
 const EXE_DIR = path.dirname(process.execPath);
+// 脚本自身目录（源码模式 = tools\）；SEA 下没有真实模块路径，退回 EXE_DIR
+const HERE = (() => {
+  try {
+    return path.dirname(fileURLToPath(import.meta.url));
+  } catch {
+    return EXE_DIR;
+  }
+})();
 
-// 配置文件位置：MOLLY_CONSOLE_CONFIG 指定优先，否则 <exe目录>/console.json；不存在就当空对象
+// 配置文件位置：MOLLY_CONSOLE_CONFIG 指定优先；否则 exe 同级 / 脚本同级 console.json。
+// 源码模式以前落在 <node.exe 目录>（C:\...\node\bin\console.json）——没人会去那儿放配置，
+// 于是 tools\console.json 看着像生效其实没读（2026-10-21 切模型 403 的根因之一）。
 const CONFIG_FILE = (() => {
   const explicit = String(process.env.MOLLY_CONSOLE_CONFIG || '').trim();
-  return explicit ? path.resolve(explicit) : path.join(EXE_DIR, 'console.json');
+  if (explicit) return path.resolve(explicit);
+  return path.join(IS_SEA ? EXE_DIR : HERE, 'console.json');
 })();
 const FILE_CFG = (() => {
   try {
@@ -121,6 +135,18 @@ const BROWSER_PROFILE = path.join(OUT, 'edge-console-profile');
 const STICKER_DIR = path.join(DATA, 'stickers', '学来的'); // 表情包图片目录（与 panel-data.mjs 一致）
 const TASK_NAME = 'Molly-Watchdog';                       // Windows 计划任务名
 const LIVE = process.env.MOLLY_CONSOLE_LIVE === '1';      // 只有显式置 1 才真跑危险动作
+
+// ── 外部服务（task-57：集成终端里的"外部服务类"动作）──────────────────────
+// 网关是本地单进程（wb_proxy.py），面板密码默认 admin；**密码与 token 绝不进日志**。
+const GATEWAY = stripSlash(pick('MOLLY_GATEWAY', 'gateway', 'http://127.0.0.1:8788'));
+const GATEWAY_PASSWORD = pick('MOLLY_GATEWAY_PASSWORD', 'gatewayPassword', 'admin');
+// 心跳：家里 PC 往服务器推状态。两个文件都由推送器维护，控制台只读。
+const HB_STATE = path.join(OUT, 'heartbeat-state.json');
+const HB_CONFIG = path.join(OUT, 'heartbeat-config.json');
+// 切模型的 x-molly-admin 令牌（用户 m39817：「模型切换仅限控制台」）。
+// 必须与插件配置 modelSwitchToken 一致；插件侧留空时写接口一律 403，这里也不编造。
+// **绝不写日志、绝不回显** —— 前端只会看到"服务端还没配置切模型令牌"这类透传原文。
+const MODEL_SWITCH_TOKEN = pick('MOLLY_MODEL_SWITCH_TOKEN', 'modelSwitchToken', '');
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -260,7 +286,7 @@ function listListenPorts() {
       const ports = out
         .split(/\r?\n/)
         .map((s) => Number(s.trim()))
-        .filter((n) => Number.isInteger(n) && n >= 7000 && n <= 9000);
+        .filter((n) => Number.isInteger(n) && n >= 1024 && n <= 65535);
       finish([...new Set(ports)].sort((a, b) => a - b));
     });
   });
@@ -290,7 +316,7 @@ async function discoverHostBase() {
     const direct = await probeHost(7053);
     if (direct) return direct;
   }
-  // 3) 再遍历 7000-9000 的 LISTEN 端口（并发探，整体耗时≈单次超时）
+  // 3) 再遍历 1024-65535 的 LISTEN 端口（并发探，整体耗时≈单次超时）
   const ports = (await listListenPorts()).filter((p) => !tried.has(p));
   if (!ports.length) return null;
   const hits = await Promise.all(ports.map((p) => probeHost(p)));
@@ -328,7 +354,7 @@ async function buildOverview() {
   // 1) 插件（DSH 宿主 /dsh-qq-whale/state）——端口后置位，先用 7053
   const pluginBase = await resolveHostBase();
   if (!pluginBase) {
-    out.plugin = { reachable: false, error: '没探到 DSH 宿主端口（7000-9000）' };
+    out.plugin = { reachable: false, error: '没探到 DSH 宿主端口（1024-65535）' };
   } else {
     const r = await jget(`${pluginBase}/dsh-qq-whale/state`, 1500);
     if (!r.ok) {
@@ -850,17 +876,18 @@ if (ARGV.includes('--help') || ARGV.includes('-h')) {
   molly-console.exe --version  打印版本和生效路径
   molly-console.exe --help     本说明
 
-配置文件（可选）：<exe 同级>\\console.json，键名见 console.example.json
+配置文件（可选）：exe 模式 <exe 同级>\\console.json；源码模式 tools\\console.json（脚本同级）
+                  键名见 console.example.json；当前读：${CONFIG_FILE}
 环境变量（优先级最高）：
   MOLLY_CONSOLE_HOST / MOLLY_CONSOLE_PORT / MOLLY_CONSOLE_TOKEN
   MOLLY_CONSOLE_DIR  前端静态目录（默认 <exe同级>\\console）
-  MOLLY_CONSOLE_CONFIG  配置文件路径（默认 <exe同级>\\console.json）
+  MOLLY_CONSOLE_CONFIG  配置文件路径（覆盖上面两个默认位置）
   MOLLY_PLUGIN_BASE / MOLLY_SIDECAR / MOLLY_NAPCAT
   MOLLY_ROOT / MOLLY_DATA_DIR / MOLLY_OUT_DIR  本机路径覆盖
 
 当前生效：
   ${HOST}:${PORT}  前端=${CONSOLE_DIR}
-  插件=${PLUGIN_BASE || '(运行时自动探测 7000-9000)'}  数据=${SIDECAR}  NapCat=${NAPCAT}`);
+  插件=${PLUGIN_BASE || '(运行时自动探测 1024-65535)'}  数据=${SIDECAR}  NapCat=${NAPCAT}`);
   process.exit(0);
 }
 
@@ -940,14 +967,8 @@ async function handleOccupiedPort() {
   const pname = pid ? processNameOf(pid) : null;
   console.log(`端口 ${PORT} 被别的程序占了（pid=${pid ?? '未知'}，见控制台）`);
   if (pname) console.log(`[console] 占用者进程：${pname}`);
-  // 提示要能照做：exe 模式下 console.json 就在 exe 旁边；源码模式下 CONFIG_FILE 落在 node 目录里，
-  // 指过去只会误导人，所以源码模式直接给环境变量 + MOLLY_CONSOLE_CONFIG 两条路。
-  if (IS_SEA) {
-    console.log(`[console] 换个端口：改 ${CONFIG_FILE} 的 port，或设环境变量 MOLLY_CONSOLE_PORT`);
-  } else {
-    console.log('[console] 换个端口：设环境变量 MOLLY_CONSOLE_PORT，'
-      + '或用 MOLLY_CONSOLE_CONFIG 指向一个 {"port":新端口} 的 JSON 文件');
-  }
+  // 提示要能照做：两种模式现在都有明确的配置文件落点（exe 同级 / 脚本同级），直接给路径最省事。
+  console.log(`[console] 换个端口：改 ${CONFIG_FILE} 的 port，或设环境变量 MOLLY_CONSOLE_PORT`);
   return 1;
 }
 
@@ -1266,15 +1287,32 @@ async function readLogTail(source, tail) {
     console: path.join(OUT, 'console.log'),
     plugin: path.join(OUT, 'plugin.log'),
     napcat: path.join(OUT, 'napcat.log'),
+    // 心跳推送器（tools\heartbeat-push.mjs）自己的日志。刚开始推的时候文件可能还不存在。
+    heartbeat: path.join(OUT, 'heartbeat.log'),
   };
-  const file = MAP[source] || MAP.watchdog;
+  const known = Object.prototype.hasOwnProperty.call(MAP, source);
+  const file = known ? MAP[source] : MAP.watchdog;
   const txt = readTextSafe(file, 4 * 1024 * 1024);
+  // 缺文件不是错误：心跳推送器可能还没跑过、插件日志可能还没写过。
+  // 前端靠 exists 决定是显示空列表还是"这个日志还没生成"。
   if (txt === null) {
-    return { ok: true, source, path: file, lines: [], note: '该日志不存在' };
+    return { ok: true, source, path: file, exists: false, lines: [], note: '该日志不存在' };
   }
   const lines = txt.split(/\r?\n/);
   while (lines.length && lines[lines.length - 1] === '') lines.pop();
-  return { ok: true, source, path: file, lines: lines.slice(-tail) };
+  const out = {
+    ok: true,
+    source,
+    path: file,
+    exists: true,
+    lines: lines.slice(-tail),
+  };
+  if (!known) {
+    // 兼容老前端：source 写错时仍回 watchdog，但明确告诉调用方用的是哪个
+    out.note = `未知 source「${source}」，已回退到 watchdog`;
+    out.known = Object.keys(MAP);
+  }
+  return out;
 }
 
 // ── 动作表（契约 §4.2 的 14 个 + CRUD 8 个 = 22）──────────────────────────────
@@ -1287,6 +1325,8 @@ const DESTRUCTIVE = new Set([
   'stickers/delete', // 删表情包会连哈希一起删，契约 §3 要求 confirm
   'memory/pending/approve', // 转正后立刻进正式库并参与召回，等于一次写入
   'memory/pending/reject',  // 丢弃后该条彻底消失，没有回收站
+  'molly/stop',     // 停 QQ + NapCat：会直接掉线，刚扫完码的话得重扫
+  'molly/restart',  // 同上，而且中间有 3 秒空窗
 ]);
 
 const TOOLS_DIR = TOOLS;
@@ -1369,6 +1409,131 @@ function appendConsoleLog(line) {
   }
 }
 
+// ── 外部服务辅助（task-57）──────────────────────────────────────────────────
+
+/**
+ * 网关面板登录 → token。
+ *
+ * 密码来自配置（`MOLLY_GATEWAY_PASSWORD` / console.json `gatewayPassword`，默认 admin）。
+ * **token 与密码一律不进日志、不进返回值**：这个函数只在内部用，调用方只能拿到
+ * `{ok, token}` 或 `{ok:false, error}`，而 error 里已把响应正文剥掉了。
+ */
+async function gatewayPanelToken() {
+  const r = await fetchJson(
+    GATEWAY + '/panel/login',
+    { method: 'POST', body: JSON.stringify({ password: GATEWAY_PASSWORD }) },
+    8000,
+  );
+  if (!r.ok) {
+    // 只说状态码，不回显任何请求体（里面有密码）
+    return { ok: false, error: `网关面板登录失败（HTTP ${r.status || '无响应'}）` };
+  }
+  const tk = r.data?.token;
+  if (!tk || typeof tk !== 'string') {
+    return { ok: false, error: '网关面板登录返回里没有 token' };
+  }
+  return { ok: true, token: tk, usingDefaultPassword: Boolean(r.data?.using_default_password) };
+}
+
+/** 应用侧推送器写的 state 文件；读不到就当还没推过 */
+function readHeartbeatLocal() {
+  const s = readJson(HB_STATE, null);
+  if (!s) return null;
+  return {
+    lastAt: isNum(s.lastAt) ? s.lastAt : null,
+    ok: Boolean(s.ok),
+    lastStatus: isNum(s.lastStatus) ? s.lastStatus : null,
+    fails: isNum(s.fails) ? s.fails : null,
+    host: typeof s.host === 'string' ? s.host : null,
+    relay: typeof s.relay === 'string' ? s.relay : null,
+    lastLocal: typeof s.lastLocal === 'string' ? s.lastLocal : null,
+  };
+}
+
+/**
+ * 服务器侧状态。
+ *
+ * 约定：服务器 `GET <relayBase>/health` 返回 `{ok, level, stale, ageSeconds, lastReceivedAt}`。
+ * 服务器不在（家里断网、服务器重启）时**不抛**，回 `{ok:false, error}` —— 调用方据此
+ * 仍然给前端 200，让页面能显示"远端不可达"，而不是整页报错。
+ */
+async function fetchHeartbeatRemote(timeoutMs) {
+  const cfg = readJson(HB_CONFIG, null);
+  const relayBase = typeof cfg?.relayBase === 'string' ? cfg.relayBase.trim() : '';
+  if (!relayBase) return { ok: false, error: '没有配置服务器地址（out/heartbeat-config.json 缺 relayBase）' };
+  const base = relayBase.replace(/\/+$/, '');
+  const r = await fetchJson(base + '/health', {}, Math.max(1000, Math.min(timeoutMs || 8000, 20000)));
+  if (!r.ok) {
+    return {
+      ok: false,
+      error: r.status ? `服务器返回 HTTP ${r.status}` : r.error || '服务器不可达',
+      relayBase: base,
+    };
+  }
+  const d = r.data || {};
+  return {
+    ok: true,
+    relayBase: base,
+    level: typeof d.level === 'string' ? d.level : null,
+    stale: typeof d.stale === 'boolean' ? d.stale : null,
+    ageSeconds: isNum(d.ageSeconds) ? d.ageSeconds : null,
+    lastReceivedAt: isNum(d.lastReceivedAt) ? d.lastReceivedAt : null,
+  };
+}
+
+/**
+ * 列出某个进程名下的所有 pid（Windows 用 tasklist，别用 wmic —— 新版已移除）。
+ * 返回 [{pid, name}]；拿不到就返回空数组，绝不抛。
+ */
+function listPidsByName(name) {
+  const r = spawnSync('tasklist.exe', ['/FI', `IMAGENAME eq ${name}`, '/FO', 'CSV', '/NH'], {
+    encoding: 'utf8',
+    timeout: 8000,
+    windowsHide: true,
+  });
+  const out = typeof r.stdout === 'string' ? r.stdout : '';
+  const pids = [];
+  for (const line of out.split(/\r?\n/)) {
+    // 格式： "QQ.exe","1234","Console","1","120,000 K"
+    const m = line.match(/^"([^"]+)","(\d+)"/);
+    if (m && m[1].toLowerCase() === String(name).toLowerCase()) {
+      pids.push({ pid: Number(m[2]), name: m[1] });
+    }
+  }
+  return pids;
+}
+
+/** 要停的进程：只这两类。DSH 宿主、网关、控制台自己一概不碰。 */
+const MOLLY_PROCESS_NAMES = ['QQ.exe', 'NapCatWinBootMain.exe'];
+
+/**
+ * 停 Molly（QQ + NapCat）。**不碰 DSH 宿主、不碰网关**（用户原话：只停这两个）。
+ * 返回杀了哪些 pid，没找到的如实说"本来就没在跑"。
+ */
+function stopMollyProcesses() {
+  const killed = [];
+  const notRunning = [];
+  const failed = [];
+  for (const name of MOLLY_PROCESS_NAMES) {
+    const list = listPidsByName(name);
+    if (!list.length) {
+      notRunning.push(name);
+      continue;
+    }
+    for (const { pid } of list) {
+      const r = spawnSync('taskkill.exe', ['/PID', String(pid), '/F'], {
+        encoding: 'utf8',
+        timeout: 10000,
+        windowsHide: true,
+      });
+      if (r.status === 0) killed.push({ name, pid });
+      else failed.push({ name, pid, error: (r.stderr || r.stdout || '').trim().slice(0, 200) || `exit ${r.status}` });
+    }
+  }
+  return { killed, notRunning, failed };
+}
+
+// ── 动作表 ──────────────────────────────────────────────────────────────────
 const ACTIONS = {
   'plugin/toggle': async (body) => {
     if (typeof body?.enabled !== 'boolean') return { ok: false, status: 400, error: 'enabled 必须是 boolean' };
@@ -1719,6 +1884,266 @@ const ACTIONS = {
     if (bad) return { ok: false, status: 400, error: bad };
     return proxyPlugin('POST', '/memory/pending/reject', { id: String(body.id).trim(), confirm: true });
   },
+
+  // ── 运维：Molly 本体（task-57）────────────────────────────────────────────
+  // stop / restart 会踢掉 QQ 登录，属于破坏性动作（DESTRUCTIVE 里已登记，缺 confirm 一律 409）。
+  // start 不破坏任何东西（已有进程时 start-molly.ps1 自己会跳过启动），所以不用 confirm。
+
+  /** 拉起 / 检查 Molly。不带 -Restart：那个开关会先杀 QQ。 */
+  'molly/start': async () => {
+    // 不加 LIVE 闸：这个动作不破坏任何东西——start-molly.ps1 自己会跳过
+    // 已经在跑的 NapCat，结尾只做一次状态检查。真正的破坏性动作是 stop / restart。
+    const r = await runPowerShell([], 180_000);
+    const tail = String(r.stdout || '')
+      .split(/\r?\n/)
+      .filter((l) => l.trim())
+      .slice(-40);
+    return {
+      ok: Boolean(r.ok),
+      code: r.code,
+      durationMs: r.durationMs,
+      data: { tail, healthy: r.ok },
+      stdout: r.stdout ? String(r.stdout).slice(-8000) : undefined,
+      stderr: r.stderr || undefined,
+      error: r.error,
+    };
+  },
+
+  /** 只停 QQ + NapCat。DSH 宿主、网关、控制台自己都不碰。 */
+  'molly/stop': async () => {
+    const r = stopMollyProcesses();
+    const okAll = r.failed.length === 0;
+    appendConsoleLog(
+      `[molly] 控制台停 Molly：杀掉 ${r.killed.map((k) => `${k.name}#${k.pid}`).join(',') || '（无）'}` +
+        `｜本来没在跑 ${r.notRunning.join(',') || '（无）'}` +
+        (okAll ? '' : `｜失败 ${r.failed.map((f) => `${f.name}#${f.pid}`).join(',')}`),
+    );
+    return {
+      ok: okAll,
+      status: okAll ? undefined : 500,
+      data: {
+        killed: r.killed,
+        notRunning: r.notRunning,
+        failed: r.failed,
+        note: '只停了 QQ 与 NapCat；DSH 宿主、网关、控制台本身没动。',
+      },
+      error: okAll ? undefined : '有些进程没停掉：' + r.failed.map((f) => `${f.name}#${f.pid}`).join(', '),
+    };
+  },
+
+  /** 先停再起。中间留 3 秒让 NapCat 释放 6099 / 3001。 */
+  'molly/restart': async () => {
+    const stopped = stopMollyProcesses();
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    const started = await runPowerShell([], 180_000);
+    appendConsoleLog(
+      `[molly] 控制台重启 Molly：停 ${stopped.killed.map((k) => `${k.name}#${k.pid}`).join(',') || '（无）'}` +
+        `｜起 ${started.ok ? '成功' : '失败'}`,
+    );
+    return {
+      ok: Boolean(started.ok),
+      code: started.code,
+      durationMs: started.durationMs,
+      data: {
+        stopped: { killed: stopped.killed, notRunning: stopped.notRunning, failed: stopped.failed },
+        tail: String(started.stdout || '')
+          .split(/\r?\n/)
+          .filter((l) => l.trim())
+          .slice(-40),
+        healthy: Boolean(started.ok),
+      },
+      stdout: started.stdout ? String(started.stdout).slice(-8000) : undefined,
+      stderr: started.stderr || undefined,
+      error: started.error,
+    };
+  },
+
+  // ── 外部服务：网关（task-57）──────────────────────────────────────────────
+  // 密码与 token 只在内存里过一趟，**绝不写日志、绝不回显**。
+
+  'gateway/usage': async () => {
+    const lg = await gatewayPanelToken();
+    if (!lg.ok) return { ok: false, status: 502, error: lg.error };
+    const r = await fetchJson(GATEWAY + '/v1/usage', { headers: { 'x-panel-token': lg.token } }, 15000);
+    if (!r.ok) {
+      const msg = r.data?.error?.message || `网关返回 HTTP ${r.status}`;
+      return { ok: false, status: r.status || 502, error: String(msg) };
+    }
+    const d = r.data || {};
+    const byModel = {};
+    for (const [name, v] of Object.entries(d.by_model || {})) {
+      byModel[name] = {
+        requests: isNum(v?.requests) ? v.requests : null,
+        credit: isNum(v?.credit) ? v.credit : null,
+      };
+    }
+    return {
+      ok: true,
+      data: {
+        requests: isNum(d.requests) ? d.requests : null,
+        errors: isNum(d.errors) ? d.errors : null,
+        credit: isNum(d.credit) ? d.credit : null,
+        costCny: isNum(d.cost_cny) ? d.cost_cny : null,
+        totalTokens: isNum(d.total_tokens) ? d.total_tokens : null,
+        cachedTokens: isNum(d.cached_tokens) ? d.cached_tokens : null,
+        since: typeof d.since === 'string' ? d.since : null,
+        realm: typeof d.realm === 'string' ? d.realm : null,
+        byModel,
+        usingDefaultPassword: lg.usingDefaultPassword,
+        at: Date.now(),
+      },
+    };
+  },
+
+  'gateway/models': async () => {
+    const r = await fetchJson(GATEWAY + '/v1/models', {}, 15000);
+    if (!r.ok) {
+      const msg = r.data?.error?.message || `网关返回 HTTP ${r.status}`;
+      return { ok: false, status: r.status || 502, error: String(msg) };
+    }
+    const list = Array.isArray(r.data?.data) ? r.data.data : [];
+    return {
+      ok: true,
+      data: {
+        count: list.length,
+        items: list.map((m) => ({
+          id: String(m?.id ?? ''),
+          ownedBy: typeof m?.owned_by === 'string' ? m.owned_by : null,
+          supportsVision: typeof m?.supports_vision === 'boolean' ? m.supports_vision : null,
+        })),
+        at: Date.now(),
+      },
+    };
+  },
+
+  // ── 切模型（用户 m39817：仅限控制台）─────────────────────────────────────
+  // 为什么不让前端直连 7053：插件写接口要求 x-molly-admin，令牌只能待在服务端；
+  // 而且前端只认 /api/action/*，不给它第二个入口。
+  // 令牌没配时**不编造成功**：插件会回 403 并说明原因，原样透给前端。
+
+  'plugin/model-set': async (body) => {
+    const patch = {};
+    for (const role of ['chat', 'work', 'code']) {
+      const raw = body?.[role];
+      if (raw === undefined || raw === null || raw === '') continue;
+      patch[role] = String(raw).trim();
+    }
+    if (!Object.keys(patch).length) {
+      return { ok: false, status: 400, error: 'chat / work / code 至少要给一个' };
+    }
+    if (!MODEL_SWITCH_TOKEN) {
+      // 本地先拦一道，说清楚是"服务端没配"，别让前端对着 403 猜
+      return {
+        ok: false,
+        status: 403,
+        error: '服务端还没配置切模型令牌（MOLLY_MODEL_SWITCH_TOKEN / console.json 的 modelSwitchToken），切模型现在用不了。',
+        data: { needToken: true, roles: ['chat', 'work', 'code'] },
+      };
+    }
+    const base = await resolveHostBase();
+    if (!base) return { ok: false, status: 503, error: '没探到 DSH 宿主端口' };
+    const r = await fetchJson(
+      base + '/dsh-qq-whale/model',
+      {
+        method: 'POST',
+        body: JSON.stringify(patch),
+        headers: { 'x-molly-admin': MODEL_SWITCH_TOKEN },
+      },
+      15000,
+    );
+    if (!r.ok) {
+      const msg = r.data?.error || `插件返回 HTTP ${r.status}`;
+      // 403 把服务端原文透出去：前端靠它提示"服务端还没配置切模型令牌"
+      return { ok: false, status: r.status || 502, error: String(msg), data: r.data ?? null };
+    }
+    appendConsoleLog(`[model] 控制台切模型：${Object.entries(patch).map(([k, v]) => `${k}=${v}`).join(' ')}`);
+    return { ok: true, data: r.data ?? null };
+  },
+
+  // ── 外部服务：心跳（task-57）─────────────────────────────────────────────
+  // 服务器挂了不能把整页拖垮：远端不可达照样 200，前端按 remote.ok 显示。
+
+  'heartbeat/status': async () => {
+    const local = readHeartbeatLocal();
+    const cfg = readJson(HB_CONFIG, null);
+    const timeoutMs = isNum(cfg?.timeoutMs) ? cfg.timeoutMs : 8000;
+    const remote = await fetchHeartbeatRemote(timeoutMs);
+    return {
+      ok: true,
+      data: {
+        local: local
+          ? {
+              lastAt: local.lastAt,
+              ok: local.ok,
+              lastStatus: local.lastStatus,
+              fails: local.fails,
+              host: local.host,
+              relay: local.relay,
+              lastLocal: local.lastLocal,
+            }
+          : null,
+        remote,
+        at: Date.now(),
+      },
+    };
+  },
+
+  // ── 外部服务：PushPlus 推送开关（task-57）────────────────────────────────
+  // 只改 notify.enabled 一个布尔值；写盘前备份；返回值里 token **打码**。
+
+  'pushplus/status': async () => {
+    const cur = readJson(WD_CONFIG, null);
+    if (!cur) return { ok: false, status: 500, error: '读不到 watchdog-config.json' };
+    const notify = cur.notify && typeof cur.notify === 'object' ? cur.notify : {};
+    const tk = typeof notify.token === 'string' ? notify.token : '';
+    return {
+      ok: true,
+      data: {
+        enabled: notify.enabled === true,
+        token: tk ? `${tk.slice(0, 4)}****${tk.slice(-4)}` : null,
+        hasToken: Boolean(tk),
+        type: typeof notify.type === 'string' ? notify.type : null,
+      },
+    };
+  },
+
+  'pushplus/toggle': async (body) => {
+    if (typeof body?.enabled !== 'boolean') {
+      return { ok: false, status: 400, error: 'enabled 必须是 boolean（true / false）' };
+    }
+    const cur = readJson(WD_CONFIG, null);
+    if (!cur) return { ok: false, status: 500, error: '读不到 watchdog-config.json' };
+    const notify = cur.notify && typeof cur.notify === 'object' ? cur.notify : {};
+    const before = notify.enabled === true;
+    // 备份：配置写坏了 watchdog 就不推了，得能手工回滚
+    const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+    const bak = `${WD_CONFIG}.bak-${stamp}`;
+    try {
+      fs.copyFileSync(WD_CONFIG, bak);
+    } catch (err) {
+      return { ok: false, status: 500, error: '备份配置失败：' + errText(err) };
+    }
+    const next = { ...cur, notify: { ...notify, enabled: body.enabled } };
+    try {
+      fs.writeFileSync(WD_CONFIG, JSON.stringify(next, null, 2) + '\n', 'utf8');
+    } catch (err) {
+      return { ok: false, status: 500, error: '写配置失败：' + errText(err) };
+    }
+    const tk = typeof notify.token === 'string' ? notify.token : '';
+    appendConsoleLog(`[pushplus] 控制台把推送 → ${body.enabled ? '开' : '关'}（备份 ${path.basename(bak)}）`);
+    return {
+      ok: true,
+      data: {
+        enabled: body.enabled,
+        changed: before !== body.enabled,
+        // 只露首尾各 4 位，中间打码；没配 token 就照实说
+        token: tk ? `${tk.slice(0, 4)}****${tk.slice(-4)}` : null,
+        hasToken: Boolean(tk),
+        type: typeof notify.type === 'string' ? notify.type : null,
+        backup: path.basename(bak),
+      },
+    };
+  },
 };
 
 /** 跑 start-molly.ps1（可能很久，输出也大） */
@@ -1729,9 +2154,27 @@ async function runPowerShell(args, timeoutMs) {
     if (!fs.existsSync(script)) return resolve({ ok: false, error: '脚本不存在：' + script, durationMs: 0 });
     let child;
     try {
-      child = spawn(PS_EXE, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, ...args], {
-        windowsHide: true,
-      });
+      /*
+       * 为什么要在 PowerShell 里先改输出编码：
+       * start-molly.ps1 里全是中文 Write-Host，而 Windows PowerShell 5.1 默认用
+       * 系统 ANSI（这台是 cp936/GBK）往管道里写。父进程 Node 按 utf8 解就会变成
+       * 「Molly ȫ��������」这样的乱码。
+       *
+       * [Console]::OutputEncoding 只影响本进程的标准输出编码，不碰系统设置；
+       * 设成 UTF8 后，Node 端直接 toString('utf8') 就是正确的中文。
+       */
+      const pre = "$ErrorActionPreference='Continue'; try{[Console]::OutputEncoding=[Text.Encoding]::UTF8}catch{}; & ";
+      child = spawn(
+        PS_EXE,
+        [
+          '-NoProfile',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-Command',
+          `${pre}'${script.replace(/'/g, "''")}'${args.map((a) => ` '${String(a).replace(/'/g, "''")}'`).join('')}`,
+        ],
+        { windowsHide: true },
+      );
     } catch (err) {
       return resolve({ ok: false, error: errText(err), durationMs: 0 });
     }

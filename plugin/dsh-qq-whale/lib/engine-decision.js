@@ -138,17 +138,49 @@ export function shouldRespond({ scene, ev, norm, conv }, deps) {
   const researchVerdict = decideResearch(norm.text)
   if (researchVerdict.need) return { yes: true, reason: '明确请求（research）' }
 
-  const recentSelf = conv.history.filter((h) => h.role === 'assistant').length
-  const lastSelfSpeakMs = conv.lastSelfAt ? now() - conv.lastSelfAt : Infinity
+  /*
+   * 「她最近说过多少话 / 群里现在有多热」必须按**时间窗**算。
+   *
+   * 2026-10-21 修：原来 `recentSelf = conv.history.filter(assistant).length`
+   * 数的是整段历史（上限 contextLimit 60 条）。只要聊过两轮，这个数就永久 ≥2，
+   * 每句话都吃 -0.25 罚分 —— 群里普通消息的意愿上限被压到 0.5 左右，
+   * 永远够不到阈值。真机表现就是用户说的「只会点赞」。
+   *
+   * 现在：自己说过的话看最近 10 分钟，群里的热度看最近 90 秒。
+   * 窗口长度也进配置，方便以后按群调。
+   */
+  const nowMs = now()
+  const selfWindowMs = (deps.config?.willingnessSelfWindowMinutes ?? 10) * 60000
+  const heatWindowMs = (deps.config?.willingnessHeatWindowSeconds ?? 90) * 1000
+  const history = Array.isArray(conv.history) ? conv.history : []
+  let recentSelf = 0
+  let recentOthers = 0
+  for (const h of history) {
+    const at = Number(h?.at) || 0
+    if (!at) continue
+    const age = nowMs - at
+    if (age < 0 || age > selfWindowMs) continue
+    if (h.role === 'assistant') recentSelf += 1
+    else if (age <= heatWindowMs) recentOthers += 1
+  }
+
+  const lastSelfSpeakMs = conv.lastSelfAt ? nowMs - conv.lastSelfAt : Infinity
   const w = willingness({
     scene,
     text: norm.text,
     isAtMe: false,
     recentSelfMessages: recentSelf,
+    recentOthers,
     lastSelfSpeakMs,
   })
-  const threshold = deps.config?.bystanderThreshold ?? 0.62
-  return { yes: w >= threshold, willingness: w, threshold }
+  /*
+   * 阈值 0.62 → 0.42（2026-10-21）。0.62 是按旧公式配的：旧公式起手 0.18，
+   * 要三四个钩子叠加才过线。新公式起手 0.32、钩子更多，同样的 0.62 会变成
+   * 「只回 @」——用户要的是她主动吐槽，所以阈值也跟着降。
+   * 想收回去就改配置里的 bystanderThreshold，不用动代码。
+   */
+  const threshold = deps.config?.bystanderThreshold ?? 0.42
+  return { yes: w >= threshold, willingness: w, threshold, recentSelf, recentOthers }
 }
 
 /**

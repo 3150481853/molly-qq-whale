@@ -20,36 +20,66 @@ import path from 'node:path'
 import { localDateKey, localDateTime } from './budget.js'
 
 /**
- * 记忆召回窗口（P5：用户反馈「聊天记录/记忆查询有点短」）。
+ * 记忆召回窗口（P5 起点，task-55 定档）。
  *
- * 这些数字是按真实数据定的，不是拍脑袋：2026-10-19 实测
- * `${HOME}\.dsh\qq-whale\memory\memory.md` 共 60 条，单行 26~76 字，
+ * ★ 要调窗口**只改这一处**：`MEMORY_WINDOW_PROFILES` + `WINDOW_PROFILE` 两个常量。
+ *   其它文件（engine.js / engine-context.js / main.js）一律从这里取，不许再写死数字。
+ *   改完把源码 lib 与安装副本 lib 各同步一次，再跑 tools/test-window-config.mjs。
+ *
+ * 数字怎么来的（2026-10-19 真实数据）：memory.md 共 60 条，单行 26~76 字，
  * 平均 42.6 字（其中「- 2026-10-19 [fact/w3] 」这类前缀约占 28 字，
- * 正文平均只有 15 字），所以一条记忆折算到提示词里也就 40~45 字。
+ * 正文平均只有 15 字），所以一条记忆折进提示词大约 40~45 字。
  *
- *   - contextLimit 24：24 条 ≈ 1.0k 字 ≈ 700 token。原来是 16 条，
- *     在 60 条的规模下第 17~24 位的「高权重偏好」正好被切掉——
- *     用户抱怨的"记不住我说过的话"有一部分就是这个。
- *     24 条既能覆盖高权重事实，又不会把上下文撑爆（表情包目录/名册才是大头）。
- *   - queryLimit 8：关键词召回要求「两字以上词命中」，精度高、天然偏少，
- *     8 条 ≈ 350 字；把 6 提到 8 是因为同一话题常有 2 条以上相关记忆
- *     （"猫叫团子" + "猫不爱吃湿粮"），6 条在高召回时会漏边。
- *   - degradedContextLimit / degradedQueryLimit：降智档（trae）上下文小、响应慢，
- *     只做温和提高（6→8、3→4），宁可少喂也不能让它想太久。
- *   - entryChars 200：单条记忆超过 200 字通常是模型自己写长的段落，
- *     会把别的条目挤掉；截断保留主干，超长内容本来就该拆成多条记。
+ *   - contextLimit 32：32 条 ≈ 1.4k 字 ≈ 950 token。原来是 24 条，
+ *     在 60~100 条的规模下，第 25~32 位的「较早但高权重的偏好」会被切掉——
+ *     用户抱怨的"记不住我说过的话"有一部分就是这个。再往上（48+）在
+ *     当前记忆量级里重叠度高、边际收益小，先停在 32。
+ *   - queryLimit 12：关键词召回要求「两字以上词命中」，精度高、条数天然偏少；
+ *     同一话题常有 3~5 条相关（"猫叫团子" + "猫不爱吃湿粮" + "团子怕生"），
+ *     8 条在高召回时会漏边，12 条留出余量。
+ *   - degradedContextLimit 12 / degradedQueryLimit 6：降智档（trae）上下文小、
+ *     响应慢，按主档 ×1.5 温和提高（8→12、4→6），仍显著小于主档，
+ *     宁可少喂也不能让它想太久。
+ *   - entryChars 240：单条记忆超过 240 字通常是模型自己写长的段落，会把
+ *     别的条目挤掉；截断保留主干，超长内容本来就该拆成多条记
+ *     （200→240 是给「一条完整的因果」留出空间）。
  *
- * 注意：engine.js 不再自己硬编码这两个数。它在 engine.js 顶部 import 本文件的
- * MEMORY_WINDOW，再在 buildSystemPrompt 里按「是否降智档」选值传给 contextFor /
- * recall。所以**要调窗口只改上面这一处**，改完把源码 lib 与安装副本 lib 各同步一次。
+ * 三档用途：small = 省钱/小模型，balanced = 线上默认，large = 排查
+ * 「是不是喂太少」时对照用。切档只改 WINDOW_PROFILE 一个字符串，不动任何调用点。
  */
-export const MEMORY_WINDOW = Object.freeze({
-  contextLimit: 24,
-  queryLimit: 8,
-  degradedContextLimit: 8,
-  degradedQueryLimit: 4,
-  entryChars: 200,
+export const WINDOW_PROFILE = 'large'
+
+export const MEMORY_WINDOW_PROFILES = Object.freeze({
+  small: Object.freeze({
+    contextLimit: 20,
+    queryLimit: 6,
+    degradedContextLimit: 8,
+    degradedQueryLimit: 4,
+    entryChars: 200,
+  }),
+  balanced: Object.freeze({
+    contextLimit: 32,
+    queryLimit: 12,
+    degradedContextLimit: 12,
+    degradedQueryLimit: 6,
+    entryChars: 240,
+  }),
+  large: Object.freeze({
+    contextLimit: 48,
+    queryLimit: 16,
+    degradedContextLimit: 18,
+    degradedQueryLimit: 9,
+    entryChars: 320,
+  }),
 })
+
+export const MEMORY_WINDOW = MEMORY_WINDOW_PROFILES[WINDOW_PROFILE]
+
+// 配错档位名会静默变成 undefined，进而让 engine 里 limit=undefined 变成"不限"，
+// 那是灾难级 bug；这里宁可启动就炸，也不要带着错配置跑。
+if (!MEMORY_WINDOW) {
+  throw new Error(`WINDOW_PROFILE 配错了：「${WINDOW_PROFILE}」，可选 ${Object.keys(MEMORY_WINDOW_PROFILES).join('/')}`)
+}
 
 /**
  * 记忆条目：

@@ -188,6 +188,7 @@ console.log('\n=== 5. 超预算后走 trae 降智（假客户端） ===')
   conv.relationKey = 'private:222222222'
   const ev = { message_type: 'private', user_id: 222222222, message_id: 1 }
   const norm = { text: '还在吗', images: [] }
+  const beforeTrae = eng.budget.snapshot()
   const out = await eng.generate({
     ev, norm, scene: 'private', conv, userName: '鸡哥', groupName: '', mood: null, signal: null,
   })
@@ -196,7 +197,13 @@ console.log('\n=== 5. 超预算后走 trae 降智（假客户端） ===')
   ok('降智提示进了 system', String(eng.__traeSeen?.system || '').includes('脑子转得比平时慢'), '')
   const fed = eng.__traeSeen?.messages?.length || 0
   ok('降智只喂 ≤12 条历史', fed <= 12, `实际 ${fed} 条`)
-  ok('trae 的用量不记账', Math.abs(eng.budget.snapshot().used - 0.05) < 1e-9, `used=${eng.budget.snapshot().used}`)
+  // task-54：trae 这次 usage 里明确带了 credit=0.99 → 照实累加；token 拿不到记 null
+  const afterTrae = eng.budget.snapshot()
+  ok('trae 按 usage.credit 记账（0.99）', Math.abs(afterTrae.used - (beforeTrae.used + 0.99)) < 1e-9, `used=${afterTrae.used}`)
+  ok('trae 调用计入 calls', afterTrae.calls > beforeTrae.calls, `${beforeTrae.calls} → ${afterTrae.calls}`)
+  ok('trae 调用计入 degraded 桶', (afterTrae.byChannel.degraded?.calls || 0) >= 1, JSON.stringify(afterTrae.byChannel))
+  ok('degraded 桶 credit=0.99', Math.abs((afterTrae.byChannel.degraded?.credit || 0) - 0.99) < 1e-9, JSON.stringify(afterTrae.byChannel.degraded))
+  ok('trae 这次 tokens=null（拿不到 usage 不编）', afterTrae.byChannel.degraded?.tokens === null, JSON.stringify(afterTrae.byChannel.degraded))
 
   // 通知只发一次
   ok('第一次 generate 已发通知', client.sent.length >= 1, `sent=${client.sent.length}`)
@@ -239,6 +246,100 @@ console.log('\n=== 6. 关掉限制时不跳 trae ===')
   ok('仍然用免费额度', out?.raw === '一直在用免费额度。', out?.raw)
   ok('没有跳到 trae', !eng.__traeUsed)
   ok('没有发额度通知', client.sent.length === 0, `sent=${client.sent.length}`)
+}
+
+// ————————————————————————————————————————————————
+console.log('\n=== 7. 唯一记账出口：无 usage 也计 calls，有 usage 才加 token/credit ===')
+{
+  const dir = path.join(tmp, 'b7')
+  const b = new CreditBudget({ dir, logger: () => {}, enabled: true, dailyCap: 500 })
+  ok('初始 calls=0', b.snapshot().calls === 0)
+  b.record({ channel: 'chat' })
+  ok('无 usage → calls+1', b.snapshot().calls === 1, `calls=${b.snapshot().calls}`)
+  ok('无 usage → tokens=null（不编 0）', b.snapshot().tokens === null, String(b.snapshot().tokens))
+  ok('无 usage → credit 不加', b.snapshot().used === 0, `used=${b.snapshot().used}`)
+
+  b.record({ channel: 'chat', promptTokens: 100, completionTokens: 40, credit: 0.02 })
+  ok('有 usage → tokens 累加', b.snapshot().tokens === 140, `tokens=${b.snapshot().tokens}`)
+  ok('有 usage → credit 累加', Math.abs(b.snapshot().used - 0.02) < 1e-9, `used=${b.snapshot().used}`)
+  ok('chat 桶 calls=2', b.snapshot().byChannel.chat?.calls === 2, JSON.stringify(b.snapshot().byChannel))
+  ok('chat 桶 tokens=140', b.snapshot().byChannel.chat?.tokens === 140)
+
+  b.record({ channel: 'work' })
+  ok('work 桶 tokens=null（这次拿不到）', b.snapshot().byChannel.work?.tokens === null, JSON.stringify(b.snapshot().byChannel))
+  ok('全天 tokens 仍是 140', b.snapshot().tokens === 140, `tokens=${b.snapshot().tokens}`)
+  ok('旧字段 used/cap/remaining 仍在', b.snapshot().cap === 500 && typeof b.snapshot().remaining === 'number')
+  ok('snapshot 标注 scope=local', b.snapshot().scope === 'local')
+
+  // 兼容旧接口：spend() 仍只加 credit，但走 record 后 calls 也 +1
+  const callsBefore = b.snapshot().calls
+  b.spend(0.5)
+  ok('spend 兼容：used+0.5', Math.abs(b.snapshot().used - 0.52) < 1e-9, `used=${b.snapshot().used}`)
+  ok('spend 兼容：calls+1', b.snapshot().calls === callsBefore + 1)
+  ok('spend(0) 不记调用（旧语义）', (b.spend(0), b.snapshot().calls === callsBefore + 1))
+
+  // 跨天归零：手写一份「昨天」的账本，重建实例
+  const dir2 = path.join(tmp, 'b7-cross')
+  fs.mkdirSync(dir2, { recursive: true })
+  fs.writeFileSync(
+    path.join(dir2, 'budget.json'),
+    JSON.stringify({ date: '2000-01-01', used: 9.9, calls: 88, tokens: 12345, tokensKnown: 3, byChannel: { chat: { calls: 88, credit: 9.9, tokens: 12345, tokensKnown: 3 } } }),
+    'utf8',
+  )
+  const b3 = new CreditBudget({ dir: dir2, logger: () => {}, enabled: true, dailyCap: 500 })
+  ok('跨天 calls 归零', b3.snapshot().calls === 0, `calls=${b3.snapshot().calls}`)
+  ok('跨天 tokens 归零为 null', b3.snapshot().tokens === null)
+  ok('跨天 used 归零', b3.snapshot().used === 0)
+  ok('跨天 byChannel 清空', Object.keys(b3.snapshot().byChannel).length === 0)
+}
+
+// ————————————————————————————————————————————————
+console.log('\n=== 8. engine.recordUsage 解析两套 usage 字段 ===')
+{
+  const captured = []
+  const fakeBudget = { record: (p) => captured.push(p), snapshot: () => ({}) }
+  const eng = Object.create(ChatEngine.prototype)
+  eng.budget = fakeBudget
+  eng.logger = () => {}
+  const budgetBak = eng.budget
+
+  eng.recordUsage({
+    channel: 'chat',
+    usage: {
+      prompt_tokens: 10,
+      completion_tokens: 5,
+      completion_tokens_details: { reasoning_tokens: 3 },
+      prompt_tokens_details: { cached_tokens: 2 },
+      credit: 0.1,
+    },
+    provider: 'wb-proxy',
+    model: 'm',
+  })
+  const a = captured[0] || {}
+  ok('解析 prompt_tokens', a.promptTokens === 10, JSON.stringify(a))
+  ok('解析 completion_tokens', a.completionTokens === 5)
+  ok('解析 reasoning_tokens', a.reasoningTokens === 3)
+  ok('解析 cached_tokens', a.cachedTokens === 2)
+  ok('解析 credit', a.credit === 0.1)
+  ok('tokens=prompt+completion=15', a.tokens === 15, String(a.tokens))
+  ok('channel/ provider/ model 透传', a.channel === 'chat' && a.provider === 'wb-proxy' && a.model === 'm')
+
+  eng.recordUsage({ channel: 'work', usage: { promptTokens: 7, completionTokens: 3, credit: 0 } })
+  const b = captured[1] || {}
+  ok('camelCase 简写也认', b.promptTokens === 7 && b.completionTokens === 3, JSON.stringify(b))
+  ok('credit=0 保持 0（不编造）', b.credit === 0)
+
+  eng.recordUsage({ channel: 'research', usage: null })
+  const c = captured[2] || {}
+  ok('usage=null → tokens=null', c.tokens === null, JSON.stringify(c))
+  ok('usage=null 仍然记 channel', c.channel === 'research')
+
+  // 记账失败不能打断聊天
+  eng.budget = { record: () => { throw new Error('disk full') } }
+  let threw = false
+  try { eng.recordUsage({ channel: 'chat', usage: null }) } catch { threw = true }
+  ok('记账抛错被吞掉（不影响主流程）', threw === false)
+  eng.budget = budgetBak
 }
 
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===\n`)

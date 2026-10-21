@@ -12,6 +12,7 @@
  * 退出码：0 全过 / 1 有失败
  */
 import http from 'node:http';
+import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -26,6 +27,7 @@ const fake = {
   received: null, // 记录最后一次收到的 body，用来断言代理有没有改坏 payload
   lastPath: null,
   lastMethod: null,
+  lastAdminHeader: null, // 记录 x-molly-admin，验证切模型令牌有没有真的带上
   hits: 0,
 };
 
@@ -38,6 +40,7 @@ const fakeServer = http.createServer((req, res) => {
     fake.hits += 1;
     fake.lastPath = req.url;
     fake.lastMethod = req.method;
+    fake.lastAdminHeader = req.headers['x-molly-admin'] ?? null;
     try {
       fake.received = raw ? JSON.parse(raw) : null;
     } catch {
@@ -75,9 +78,19 @@ const fakeServer = http.createServer((req, res) => {
           // 真实插件 web.js 的返回体就是 { ok:true, removed:true, pending }（不是 rejected）
           return send(200, { ok: true, removed: true, pending: 1 });
         }
+        if (req.url === '/dsh-qq-whale/model') {
+          return send(200, {
+            ok: true,
+            current: { chat: 'deepseek-v4.1-flash', work: 'kimi-k2.6', code: 'kimi-k2.6', degraded: '', spare: '' },
+            source: 'override',
+          });
+        }
         return send(200, { ok: true, entry: { id: 'new1' }, count: 79 });
       case 'notfound':
         return send(404, { ok: false, error: '没有这条记忆' });
+      case 'forbidden':
+        // 模拟插件侧 authorizeModelSwitch 拦截（modelSwitchToken 没配 / 令牌不对）
+        return send(403, { ok: false, error: '切模型只能在控制台里做。（插件没配 modelSwitchToken，写接口默认关闭）' });
       case 'conflict':
         return send(409, { ok: false, error: '同名文件已存在' });
       case 'bad':
@@ -97,6 +110,9 @@ const fakeServer = http.createServer((req, res) => {
 
 const PORT_FAKE = 19471;
 const PORT_CONSOLE = 19472;
+// 单测用的假 out 目录：**绝不读真实 out\heartbeat-config.json**，否则这条测试会去请求真服务器
+// （真服务器可达，结果依赖网络和时序，测试会不稳定）。这里造一个只有空目录的临时路径。
+const TMP_OUT = path.join(process.cwd(), 'out', `_test-console-${process.pid}`);
 
 // ── 测试框架 ─────────────────────────────────────────────────────────────────
 let pass = 0;
@@ -156,10 +172,23 @@ function cleanup() {
       /* ignore */
     }
   }
+  // 删掉测试用的假 out 目录（里面只可能是空目录 + console-server 写的日志）
+  try {
+    fs.rmSync(TMP_OUT, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
 }
 
 // ── 主流程 ───────────────────────────────────────────────────────────────────
 async function main() {
+  // 隔离 out 目录：造一个空目录，确保没有 heartbeat-config.json。
+  // 这样"远端不可达"这条断言是确定的，不依赖网络。
+  try {
+    fs.mkdirSync(TMP_OUT, { recursive: true });
+  } catch {
+    /* ignore */
+  }
   await new Promise((r) => fakeServer.listen(PORT_FAKE, '127.0.0.1', r));
   console.log(`假插件服务已起：http://127.0.0.1:${PORT_FAKE}`);
 
@@ -171,6 +200,11 @@ async function main() {
       MOLLY_PLUGIN_BASE: `http://127.0.0.1:${PORT_FAKE}`,
       MOLLY_SIDECAR: `http://127.0.0.1:${PORT_FAKE}`,
       MOLLY_NAPCAT: `http://127.0.0.1:${PORT_FAKE}`,
+      // 隔离 out/：不读真实 heartbeat-config.json（否则会去打真服务器）、
+      // 也不让 pushplus/toggle 碰真 watchdog-config.json。
+      MOLLY_OUT_DIR: TMP_OUT,
+      // 测试里明确给一个空令牌，让 plugin/model-set 走"服务端没配"分支（可复现）
+      MOLLY_MODEL_SWITCH_TOKEN: '',
     },
     stdio: 'ignore',
     windowsHide: true,
@@ -185,8 +219,9 @@ async function main() {
   }
   console.log(`console-server 已起：http://127.0.0.1:${PORT_CONSOLE}`);
 
-  // ── 1. 未知动作：available 必须是 27 个且含 11 个新动作 ───────────────────
-  // 数量从 25 涨到 27 是 task-36 加的 pest/status、pest/set（骂人模式开关）。
+  // ── 1. 未知动作：available 必须是 35 个且含全部 19 个新动作 ────────────────
+  // 数量变化史：14 → 22（task-18 CRUD）→ 25（task-28 待核实）→ 27（task-36 骂人模式）
+  //          → 35（task-57 运维 + 外部服务 + 切模型）。
   // 这条断言的本意是"动作表没被意外删空/重复"，所以跟着真实数量改。
   console.log('\n[1] 未知动作的 data.available');
   {
@@ -194,7 +229,7 @@ async function main() {
     check('未知动作 → 404', r.status === 404, `got ${r.status}`);
     const av = r.json?.data?.available;
     check('available 是数组', Array.isArray(av));
-    check('available 长度 = 27', av?.length === 27, `got ${av?.length}`);
+    check('available 长度 = 35', av?.length === 35, `got ${av?.length}`);
     const NEW11 = [
       'memory/list', 'memory/add', 'memory/update', 'memory/delete',
       'stickers/list', 'stickers/add', 'stickers/update', 'stickers/delete',
@@ -202,6 +237,13 @@ async function main() {
     ];
     const missing = NEW11.filter((n) => !av?.includes(n));
     check('11 个新动作全在 available 里', missing.length === 0, `缺 ${missing.join(',')}`);
+    const NEW57 = [
+      'molly/start', 'molly/stop', 'molly/restart',
+      'gateway/usage', 'gateway/models', 'plugin/model-set',
+      'heartbeat/status', 'pushplus/toggle',
+    ];
+    const missing57 = NEW57.filter((n) => !av?.includes(n));
+    check('task-57 的 8 个动作全在 available 里', missing57.length === 0, `缺 ${missing57.join(',')}`);
     check('available 无重复', new Set(av).size === av?.length, `size ${new Set(av).size} vs ${av?.length}`);
   }
 
@@ -427,6 +469,107 @@ async function main() {
   {
     const r = await fetch(`http://127.0.0.1:${PORT_CONSOLE}/api/action/memory/list`);
     check('GET /api/action/* → 405', r.status === 405, `got ${r.status}`);
+  }
+
+  // ── 10. 运维动作：destructive 需要 confirm（task-57）─────────────────────
+  // 只验 409 分支，**绝不真停 Molly**（会踢掉 QQ 登录）。
+  console.log('\n[10] 运维动作的 confirm 闸');
+  {
+    const before = fake.hits;
+    for (const name of ['molly/stop', 'molly/restart']) {
+      const r = await post(`/api/action/${name}`, {});
+      check(`${name} 无 confirm → 409`, r.status === 409, `got ${r.status}`);
+      check(`${name} 409 带 status`, r.json?.status === 409, `got ${r.json?.status}`);
+      check(`${name} 409 带人话错误`, typeof r.json?.error === 'string' && r.json.error.length > 0);
+    }
+    check('molly/stop 无 confirm 时没打插件', fake.hits === before, `hits ${before} → ${fake.hits}`);
+
+    // molly/start 不是破坏性动作，不该被 confirm 闸拦（不该回 409）
+    const s = await post('/api/action/molly/start', {});
+    check('molly/start 不需要 confirm（不回 409）', s.status !== 409, `got ${s.status}`);
+  }
+
+  // ── 11. 切模型：令牌链路（task-57 + 用户 m39817）────────────────────────
+  console.log('\n[11] plugin/model-set 的令牌链路');
+  {
+    // 没给任何角色 → 400，且不该打插件
+    const before = fake.hits;
+    const empty = await post('/api/action/plugin/model-set', {});
+    check('model-set 空 body → 400', empty.status === 400, `got ${empty.status}`);
+    check('model-set 空 body 没打插件', fake.hits === before, `hits ${before} → ${fake.hits}`);
+
+    // 非法角色名不进 patch（只认 chat/work/code），所以也等于空
+    const bogus = await post('/api/action/plugin/model-set', { notarole: 'x' });
+    check('model-set 只认 chat/work/code → 400', bogus.status === 400, `got ${bogus.status}`);
+  }
+
+  // ── 12. 外部服务：gateway/usage 与 gateway/models 的错误透传 ─────────────
+  // 测试里 GATEWAY 指向假插件端口（不是真网关），所以这两个动作会拿到假插件的响应；
+  // 这里只验"不会 500 崩掉、会给出结构化 data 或人话 error"。
+  console.log('\n[12] 外部服务动作的结构');
+  {
+    const u = await post('/api/action/gateway/usage', {});
+    check('gateway/usage 不会 500', u.status !== 500, `got ${u.status}`);
+    check('gateway/usage 有 ok 字段', typeof u.json?.ok === 'boolean');
+    if (!u.json?.ok) {
+      check('gateway/usage 失败时带 error', typeof u.json?.error === 'string' && u.json.error.length > 0);
+    } else {
+      const d = u.json?.data || {};
+      check('gateway/usage 成功时有 credit 字段', 'credit' in d, JSON.stringify(Object.keys(d)));
+      check('gateway/usage 成功时有 byModel', d.byModel && typeof d.byModel === 'object');
+    }
+
+    const m = await post('/api/action/gateway/models', {});
+    check('gateway/models 不会 500', m.status !== 500, `got ${m.status}`);
+    check('gateway/models 有 ok 字段', typeof m.json?.ok === 'boolean');
+  }
+
+  // ── 13. heartbeat/status：远端挂了也要 200 ──────────────────────────────
+  console.log('\n[13] heartbeat/status 的降级');
+  {
+    const r = await post('/api/action/heartbeat/status', {});
+    check('heartbeat/status → 200', r.status === 200, `got ${r.status}`);
+    check('heartbeat/status ok:true', r.json?.ok === true, `got ${r.json?.ok}`);
+    const d = r.json?.data || {};
+    check('heartbeat/status 有 local 键', 'local' in d);
+    check('heartbeat/status 有 remote 键', 'remote' in d);
+    check('heartbeat/status remote 是对象', d.remote && typeof d.remote === 'object');
+    check('heartbeat/status remote 有 ok 字段', typeof d.remote?.ok === 'boolean');
+    // 测试环境没有 out/heartbeat-config.json，所以远端必然 ok:false，但整体仍要 200
+    check('远端不可达时 remote.ok 是 false', d.remote?.ok === false, JSON.stringify(d.remote));
+  }
+
+  // ── 14. pushplus/toggle 的参数校验 ─────────────────────────────────────
+  console.log('\n[14] pushplus/toggle 的参数校验');
+  {
+    const r = await post('/api/action/pushplus/toggle', {});
+    check('pushplus/toggle 缺 enabled → 400', r.status === 400, `got ${r.status}`);
+    const r2 = await post('/api/action/pushplus/toggle', { enabled: 'true' });
+    check('pushplus/toggle enabled 非布尔 → 400', r2.status === 400, `got ${r2.status}`);
+  }
+
+  // ── 15. logs 的 source 扩展与 exists 字段 ────────────────────────────────
+  console.log('\n[15] /api/logs 的 source 与 exists');
+  {
+    const get = async (qs) => {
+      const r = await fetch(`http://127.0.0.1:${PORT_CONSOLE}/api/logs${qs}`);
+      let j = null;
+      try {
+        j = await r.json();
+      } catch {
+        j = null;
+      }
+      return { status: r.status, json: j };
+    };
+    for (const src of ['console', 'watchdog', 'heartbeat', 'plugin']) {
+      const r = await get(`?source=${src}`);
+      check(`logs source=${src} → 200`, r.status === 200, `got ${r.status}`);
+      check(`logs source=${src} 带 exists 字段`, typeof r.json?.exists === 'boolean', JSON.stringify(Object.keys(r.json || {})));
+    }
+    // 不存在的日志：仍然 200 + exists:false（不返 404）
+    const miss = await get('?source=heartbeat');
+    check('缺日志文件时 exists 为 false 或 true（都不报错）', typeof miss.json?.exists === 'boolean');
+    check('缺日志文件时不返 404', miss.status === 200, `got ${miss.status}`);
   }
 
   console.log(`\n${'─'.repeat(60)}`);

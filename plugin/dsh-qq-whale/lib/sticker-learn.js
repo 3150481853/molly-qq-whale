@@ -9,8 +9,9 @@
  *   - 有人发一张正经的图表/PPT 截图 → 那不是表情包。
  *
  * 所以流程是四道闸门，宁可少学不可学错：
- *   1. **来源闸门**：只从白名单用户/白名单群里学；只认 QQ 动画表情(sub_type=1)
- *      和商城表情(mface)，普通图片一律不学（普通图片里藏着太多不该存的东西）。
+ *   1. **来源闸门**：只从白名单用户/白名单群里学；默认只认 QQ 动画表情(sub_type=1)
+ *      和商城表情(mface)。`stickerLearnAllImages` 打开后普通图片也进候选
+ *      （实测群里真正常用的表情包就是普通图片，不改永远学不到），但仍要过视觉闸门。
  *   2. **体积闸门**：超过 maxFileSizeMB 不学（QQ 表情包通常几十 KB，
  *      几 MB 的八成是原图/长图）。
  *   3. **视觉闸门**：交给多模态模型看一眼，让它回答「这是不是表情包」「这张图
@@ -34,16 +35,27 @@ import crypto from 'node:crypto'
  */
 import { localDateKey } from './budget.js'
 
-/** 判断这条消息里有没有"可学"的表情包 */
-export function findLearnableStickers(norm) {
+/**
+ * 判断这条消息里有没有"可学"的表情包。
+ *
+ * @param {object} norm OneBot 归一化后的消息
+ * @param {object} [opts]
+ * @param {boolean} [opts.allImages=false] 普通图片也当候选（用户 2026-10-21 放开学图时打开）。
+ *   打开后仍然走体积/视觉/敏感词/去重四道闸门，只是不再要求 QQ 动画表情。
+ */
+export function findLearnableStickers(norm, { allImages = false } = {}) {
   const out = []
   for (const img of norm?.images || []) {
     const url = img?.url || ''
     if (!/^https?:\/\//i.test(url)) continue
     // sub_type === 1 是 QQ 动画表情；mface 是商城表情。
-    // 普通图片（sub_type 为 0 或缺失）不学——见文件头第 1 条闸门。
+    // 普通图片（sub_type 为 0 或缺失）默认不学——见文件头第 1 条闸门。
+    // 但实测群里真正常用的"表情包"大多以普通图片形式发出来（平台侧
+    // sub_type=0），继续只认 sub_type=1 等于永远学不到东西，所以给
+    // stickerLearnAllImages 开关：打开后普通图也进候选，靠后面的视觉闸门
+    // （真人照片/证件/截图/辱骂全部拒掉）保证不学错。
     const isMarketFace = Boolean(img?.emojiId) || Boolean(img?.isMface)
-    if (Number(img?.subType) === 1 || isMarketFace) {
+    if (allImages || Number(img?.subType) === 1 || isMarketFace) {
       out.push({ url, summary: String(img?.summary || ''), kind: isMarketFace ? 'mface' : 'image' })
     }
   }
@@ -160,8 +172,9 @@ export class StickerLearner {
    * @param {number} o.maxFileSizeMB
    * @param {function} o.isAllowedFrom ({userId, groupId}) => boolean
    * @param {number} o.maxPerDay      每天最多学几张，防止被刷库
+   * @param {boolean} o.allImages     普通图片也学（默认 false，只学动画/商城表情）
    */
-  constructor({ dir, vision, library, logger, maxFileSizeMB = 2, isAllowedFrom, maxPerDay = 20 }) {
+  constructor({ dir, vision, library, logger, maxFileSizeMB = 2, isAllowedFrom, maxPerDay = 20, allImages = false }) {
     this.dir = dir
     this.vision = vision
     this.library = library
@@ -169,11 +182,26 @@ export class StickerLearner {
     this.maxBytes = Math.max(1, maxFileSizeMB) * 1024 * 1024
     this.isAllowedFrom = isAllowedFrom || (() => true)
     this.maxPerDay = Math.max(1, maxPerDay)
+    this.allImages = Boolean(allImages)
     this.learned = new Set() // 已学内容的 sha256，避免同一张图反复存
     this.hashesFile = path.join(dir || '.', '.learned.json')
     this.dayKey = ''
     this.dayCount = 0
     this.stats = { seen: 0, kept: 0, rejected: 0, dup: 0 }
+    /*
+     * 持久化统计（P0，2026-10-21）。
+     *
+     * 用户看到的"学习器一直是 0"是显示口径问题：面板原来只渲染
+     * kept/rejected/dup，而这三个是**进程内**计数，插件一重载就归零。
+     * 累计数必须落盘，否则永远读不到"到底学了多少、为什么没学"。
+     * 文件很小（几十字节/天），学图频率也低，随手写没有压力。
+     */
+    this.statsFile = path.join(dir || '.', '.learned-stats.json')
+    this.lifetime = { seen: 0, kept: 0, rejected: 0, dup: 0 }
+    this.days = {}
+    this.reasons = {}
+    this._statsTimer = null
+    this.loadStats()
     this.loadIndex()
   }
 
@@ -193,6 +221,68 @@ export class StickerLearner {
       await fsp.writeFile(this.hashesFile, JSON.stringify([...this.learned]), 'utf8')
     } catch (err) {
       this.logger('debug', `表情包索引保存失败: ${err?.message || err}`)
+    }
+  }
+
+  /**
+   * 读累计统计。结构：
+   *   { lifetime: {seen,kept,rejected,dup}, days: { 'YYYY-MM-DD': {...} }, reasons: { '为什么' : 次数 } }
+   * 损坏就当没有（学习器不能因为统计文件坏了而罢工）。
+   */
+  loadStats() {
+    try {
+      const s = JSON.parse(fs.readFileSync(this.statsFile, 'utf8'))
+      if (s && typeof s === 'object') {
+        if (s.lifetime && typeof s.lifetime === 'object') this.lifetime = { ...this.lifetime, ...s.lifetime }
+        if (s.days && typeof s.days === 'object') this.days = s.days
+        if (s.reasons && typeof s.reasons === 'object') this.reasons = s.reasons
+      }
+    } catch {
+      /* 首次运行没有统计文件，正常 */
+    }
+  }
+
+  /** 计数：内存 + 累计 + 当日 + 原因。落盘合并（1.5 秒），不阻塞学习流程。 */
+  bump(kind, why = '') {
+    const k = String(kind)
+    this.stats[k] = (this.stats[k] || 0) + 1
+    this.lifetime[k] = (this.lifetime[k] || 0) + 1
+    const today = localDateKey()
+    const day = this.days[today] || (this.days[today] = { seen: 0, kept: 0, rejected: 0, dup: 0 })
+    day[k] = (day[k] || 0) + 1
+    if (why) {
+      const key = String(why).slice(0, 60)
+      this.reasons[key] = (this.reasons[key] || 0) + 1
+    }
+    this.saveStatsSoon()
+  }
+
+  saveStatsSoon() {
+    if (this._statsTimer) return
+    this._statsTimer = setTimeout(() => {
+      this._statsTimer = null
+      try {
+        fs.mkdirSync(path.dirname(this.statsFile), { recursive: true })
+        fs.writeFileSync(
+          this.statsFile,
+          JSON.stringify({ lifetime: this.lifetime, days: this.days, reasons: this.reasons }),
+          'utf8',
+        )
+      } catch (err) {
+        this.logger('debug', `表情包统计写入失败: ${err?.message || err}`)
+      }
+    }, 1500)
+    this._statsTimer.unref?.()
+  }
+
+  /** 给 /state 的累计快照（进程重启也不丢） */
+  snapshot() {
+    const today = localDateKey()
+    return {
+      total: this.lifetime.kept,
+      lifetime: { ...this.lifetime },
+      today: { date: today, ...(this.days[today] || { seen: 0, kept: 0, rejected: 0, dup: 0 }) },
+      reasons: this.reasons,
     }
   }
 
@@ -244,56 +334,70 @@ export class StickerLearner {
    */
   async consider(norm, { userId, groupId, download }) {
     const result = { kept: [], rejected: 0, skipped: 0 }
-    const cands = findLearnableStickers(norm)
+    const cands = findLearnableStickers(norm, { allImages: this.allImages })
     if (cands.length === 0) return result
     if (!this.isAllowedFrom({ userId, groupId })) {
       this.logger('debug', '表情包学习：来源不在白名单，跳过')
       return result
     }
     for (const c of cands) {
-      this.stats.seen++
+      this.bump('seen')
       if (!this.budgetOk()) {
         result.skipped++
+        this.bump('skipped', '今日配额已满')
         continue
       }
       try {
         const buf = await download(c.url)
         if (!buf || buf.length === 0) {
           result.skipped++
+          this.bump('skipped', '下载为空')
           continue
         }
         if (buf.length > this.maxBytes) {
           this.logger('debug', `表情包学习：体积 ${(buf.length / 1024).toFixed(0)}KB 超限，跳过`)
           result.skipped++
+          this.bump('skipped', '体积超限')
           continue
         }
         const ext = sniffImageExt(buf)
         if (!ext) {
           this.logger('debug', '表情包学习：认不出图片格式，跳过')
           result.skipped++
+          this.bump('skipped', '认不出格式')
           continue
         }
         // 以内容哈希去重，同一张图被转发 N 次也只存一份
         const hash = crypto.createHash('sha256').update(buf).digest('hex')
         if (this.learned.has(hash)) {
-          this.stats.dup++
+          this.bump('dup', '同一张图已学过')
           result.skipped++
           continue
         }
 
         // 视觉闸门：让模型看一眼，顺便给出描述（描述将来当检索标签）
+        // 空回包要重试一次：flash 开 reasoning 时偶发把预算吃光、content 为空，
+        // 不重试就会白白丢掉素材（统计里表现为"视觉描述失败"偏高）。
         let desc = ''
-        try {
-          desc = await this.vision.describe(buf, `image/${ext}`)
-        } catch (err) {
-          this.logger('debug', `表情包学习：视觉描述失败，跳过（${err?.message || err}）`)
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          try {
+            desc = await this.vision.describe(buf, `image/${ext}`)
+          } catch (err) {
+            desc = ''
+            this.logger('debug', `表情包学习：视觉描述失败（第 ${attempt} 次，${err?.message || err}）`)
+          }
+          if (String(desc || '').trim()) break
+          if (attempt === 1) this.logger('debug', '表情包学习：视觉描述为空，重试一次')
+        }
+        if (!String(desc || '').trim()) {
           result.skipped++
+          this.bump('skipped', '视觉描述失败')
           continue
         }
         const verdict = descriptionOk(desc, c.summary)
         if (!verdict.ok) {
           this.logger('debug', `表情包学习：拒绝（${verdict.why}）desc="${String(desc).slice(0, 40)}"`)
-          this.stats.rejected++
+          this.bump('rejected', verdict.why)
           result.rejected++
           continue
         }
@@ -301,6 +405,7 @@ export class StickerLearner {
         const name = sanitizeDescription(desc)
         if (!name) {
           result.rejected++
+          this.bump('rejected', '清洗后描述为空')
           continue
         }
         await fsp.mkdir(this.dir, { recursive: true })
@@ -311,12 +416,13 @@ export class StickerLearner {
 
         this.learned.add(hash)
         this.dayCount++
-        this.stats.kept++
+        this.bump('kept')
         result.kept.push({ file: path.basename(target), desc: name })
         this.logger('info', `学到一张表情包：${path.basename(target)}`)
       } catch (err) {
         this.logger('debug', `表情包学习异常（忽略）: ${err?.message || err}`)
         result.skipped++
+        this.bump('skipped', '学习过程异常')
       }
     }
     if (result.kept.length > 0) {
@@ -331,6 +437,7 @@ export class StickerLearner {
 
   describe() {
     const s = this.stats
-    return `看过 ${s.seen} 张，学下 ${s.kept} 张，拒绝 ${s.rejected} 张，重复 ${s.dup} 张`
+    const l = this.lifetime
+    return `看过 ${s.seen} 张，学下 ${s.kept} 张，拒绝 ${s.rejected} 张，重复 ${s.dup} 张（累计学 ${l.kept || 0} 张）`
   }
 }

@@ -15,7 +15,9 @@ const { StickerLibrary } = await import(LIB + 'stickers.js')
 const { WorkBuddyGateway } = await import(LIB + 'wbai.js')
 
 const PACKAGE = '${MOLLY_ROOT}/qq-whale/plugin/dsh-qq-whale'
-const STICKERS = '${MOLLY_ROOT}/qq-whale/stickers'
+// 图库真身在 data 目录下（2026-10-21 修：旧路径 qq-whale/stickers 早就废了，
+// 跑出来永远是 0 张，测试结论全是假的）
+const STICKERS = '${MOLLY_ROOT}/data/qq-whale/stickers'
 
 const persona = new PersonaStore({ dir: path.join(PACKAGE, 'persona') })
 const stickers = new StickerLibrary({ dir: STICKERS })

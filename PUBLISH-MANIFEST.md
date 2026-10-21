@@ -2,9 +2,9 @@
 
 > 本副本由 `tools/build-publish.mjs` 生成，**勿手改**；要改就改源仓库再重新生成。
 
-- 生成时间：2026-10-20T12:20:18.329Z
-- 文件数：**126**
-- 总体积：**2.03 MB**
+- 生成时间：2026-10-21T11:37:31.206Z
+- 文件数：**130**
+- 总体积：**2.19 MB**
 - 脱敏复检：**命中 0**
 
 ## 顶层结构
@@ -43,6 +43,7 @@
 - docs/INSTALL-AND-ROLLBACK.md
 - docs/deploy.md
 - docs/g-migration-contract.md
+- docs/server-deploy-plan.md
 - tools/test-workshop.mjs
 （这些文件里有形似令牌/绝对路径的常量，已替换为占位符；功能不受影响，但如果你是原作者，请用真实值重新生成。）
 

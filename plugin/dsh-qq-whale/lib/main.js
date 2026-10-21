@@ -102,6 +102,15 @@ const qqtoolsMod = await loadModule('qqtools', './qqtools.js', { optional: true 
 const registerQqTool = qqtoolsMod?.registerQqTool || null
 const registerWorkshopTool = qqtoolsMod?.registerWorkshopTool || null
 
+/*
+ * task-55：上下文/记忆窗口只有一处定义（memory.js 顶部的 profiles），
+ * 这里只负责把「当前生效值」读出来放进 /state 的只读字段。
+ * 不走 loadModule：它不是可选子模块，取不到就等于窗口算不出来，直接装配失败更诚实。
+ */
+const memoryMod = await import(sub('./memory.js'))
+const MEMORY_WINDOW = memoryMod.MEMORY_WINDOW
+const WINDOW_PROFILE = memoryMod.WINDOW_PROFILE
+
 const workshopMod = await loadModule('workshop', './workshop.js', { optional: true })
 const Workshop = workshopMod?.Workshop || null
 
@@ -136,7 +145,9 @@ const WORKSPACE_QQ_WHALE =
   path.join(os.homedir(), 'Documents', 'deepseek-harness', 'default-workspace', 'qq-whale')
 
 /** 插件配置默认值。全部可被 cordis.patch.yml 覆盖。 */
-const DEFAULTS = {
+// task-55：导出出去只为一个用途——工具/测试能核对「默认档位有没有被人悄悄改小」。
+// 运行期没有任何代码从外部回写它。
+export const DEFAULTS = {
   // —— OneBot 连接 ——
   onebotUrl: 'ws://127.0.0.1:3001',
   onebotToken: '',
@@ -146,7 +157,10 @@ const DEFAULTS = {
   modelBackend: 'wbai',
   provider: 'workbuddy-ai',
   model: 'deepseek-v4.1-flash',
-  maxTokens: 1024,
+  // task-55：1024 → 1536。用户要「提高智力」但明确不动模型、不加推理强度，
+  // 那就只能让回答/推理有更多余量。1536 是「能写完整段分析、又不至于跑飞」的档位：
+  // 再往上（2048+）单条回复会明显变长，QQ 里读起来像小作文，成本也翻倍。
+  maxTokens: 1536,
   temperature: 0.85,
   reasoningEffort: '',
 
@@ -184,6 +198,8 @@ const DEFAULTS = {
    */
   spareEnabled: true,
   spareModel: 'deepseek-v4.1-flash',
+  // 控制台切模型的令牌（task-56）：留空 = POST /model 关闭（一律 403）
+  modelSwitchToken: '',
   spareLimitEnabled: true,
   spareDailyCap: 500,
 
@@ -251,8 +267,30 @@ const DEFAULTS = {
   pestAutoPick: true,
   allowedGroups: [],
   groupAutoReply: true,
-  bystanderThreshold: 0.62,
+  // 围观插话的意愿阈值。2026-10-21 从 0.62 降到 0.42：
+  //   旧阈值配旧意愿公式（起手 0.18）只有"问号+吃喝+情绪词"叠加才够，
+  //   真机上她几乎只在被 @ 时说话，其余时候只剩点赞。
+  // 想收回去就把它调高，不用改代码。
+  bystanderThreshold: 0.42,
   tapEmoji: true,
+  // 判定不回之后点一个赞的概率（2026-10-21 从硬编码搬进配置）
+  tapEmojiProbability: 0.35,
+
+  // —— 回复节流（2026-10-21）——
+  // 0 = 不限制。用户当时明确「先不设限」，留这两个开关是为了后面能按群收紧。
+  replyMinGapSeconds: 0,
+  replyMaxPer10Min: 0,
+
+  // 意愿公式的时间窗：自己说过几次话看 10 分钟，群里有多热看 90 秒
+  willingnessSelfWindowMinutes: 10,
+  willingnessHeatWindowSeconds: 90,
+
+  // —— 轻回应：不开口，甩张表情包（2026-10-21）——
+  // 判定"不回"时先试轻回应，再点赞，最后才彻底沉默。
+  stickerLightReaction: true,
+  stickerLightReactionChance: 0.25,
+  // 同一个群两次轻回应的最小间隔（秒），防刷屏
+  stickerLightReactionCooldownSeconds: 90,
 
   // —— 群名片实时状态（用户 m12520，2026-10-18 m18509 关闭）——
   // 有的 QQ bot 能在群名片上实时显示「在想事情/在回复」，用户点名要这个。
@@ -281,7 +319,10 @@ const DEFAULTS = {
   // 但真机上体感是"她回得太慢，聊着聊着我就干别的去了"。下面是整体收紧约
   // 60% 的新档位——还是慢于机器、还是有抖动，但不再让人等到走神。
   debounceMs: 600,
-  contextLimit: 40,
+  // task-55：40 → 60。用户「先修记账，再提高上下文与记忆窗口」，明确不动模型。
+  // 60 条 ≈ 一次能回看最近 50~60 句，足够把「刚才聊到哪儿、他在纠结什么」串起来；
+  // 没上 80/100 是因为真机群里消息密，喂太多会让模型抓不住重点，token 也线性涨。
+  contextLimit: 60,
   thinkingBaseDelaySeconds: 0.7,
   typingCharactersPerSecond: 7.5,
   typingMaxDelaySeconds: 8,
@@ -330,7 +371,7 @@ const DEFAULTS = {
   progressMaxItemChars: 42,
 
   // —— 记忆 ——
-  memoryLimit: 400,  // 除了规则匹配（"我叫X""我喜欢Y"），每隔一阵子让模型自己判断该记什么。
+  memoryLimit: 800,  // 除了规则匹配（"我叫X""我喜欢Y"），每隔一阵子让模型自己判断该记什么。
   // 这是"聊着聊着就忘了我"的真正解法：人能记住的从来不只是自我介绍。
   // 节流两道：攒够 MinLines 条、且距上次抽取超过 MinGapMinutes 才调一次，
   // 否则每轮多烧一次调用，额度扛不住。
@@ -340,12 +381,15 @@ const DEFAULTS = {
   // 结果 22 条记忆里只有 8 条是真的（其余全是表情包），用户的核心诉求
   // 「不要在 QQ 聊着聊着就忘了我」没兑现。现在降到 3 句 / 8 分钟。
   // 主脑走 intl 免费 flash（credit=0），多抽几次不花钱，可以放宽。
+  //
+  // 2026-10-21（P3）：用户要「多记日常」，再降到 2 句 / 3 分钟，上限 800 条。
   memoryExtract: true,
-  memoryExtractMinLines: 3,
-  memoryExtractMinGapMinutes: 8,
+  memoryExtractMinLines: 2,
+  memoryExtractMinGapMinutes: 3,
   // 抽取时的 maxTokens。**给少会静默失败**：reasoning 模型会先把预算
   // 全花在思维链上，正文一个字都出不来（实测 200 → content 为空）。
-  memoryExtractMaxTokens: 700,
+  // P3 上限放宽到 8 条 × 30 字，700 会被最后一条截断，提到 900。
+  memoryExtractMaxTokens: 900,
 
   // —— 免费额度的日预算 ——
   // 用户要求（m02357-1 / m03969）：wb 免费积分每天上限 100 分，超了就
@@ -429,10 +473,12 @@ const DEFAULTS = {
 
   // —— 偷别人表情包 ——
   // 开关 + 两道保险：单张体积上限、每天最多学几张。
-  // 只学 QQ 动画表情/商城表情，普通图片一律不学（见 sticker-learn.js 文件头）。
+  // 2026-10-21（P2）：默认放开普通图片（allImages），否则平台侧永远学不到东西
+  // （QQ 群里真正常用的"表情包"都是以普通图片发出的）；视觉闸门仍在兜底。
   stickerLearn: true,
-  stickerLearnMaxFileSizeMB: 2,
-  stickerLearnMaxPerDay: 20,
+  stickerLearnAllImages: true,
+  stickerLearnMaxFileSizeMB: 5,
+  stickerLearnMaxPerDay: 100,
 
   // —— 用表情包说话 ——
   // 用户要求（m03900）：「要让他学会用表情包代替回文字」。
@@ -440,6 +486,14 @@ const DEFAULTS = {
   // 这个数同时被 splitReply（真发几张）和 system prompt（告诉她配额）读取，
   // 必须是同一个来源，否则模型写三张、代码只发两张，最后一句就对不上了。
   maxStickersPerReply: 2,
+
+  // —— 撒图（P2，2026-10-21）——
+  // 模型这轮忘了发图、回复又是短句时，替它补一张。用户明确要"允许单独甩图"。
+  // 只补短回复：长回答通常是在讲正经事，中途甩图很怪。
+  stickerSprinkle: true,
+  stickerSprinkleChance: 0.25,
+  stickerSprinkleMaxChars: 30,
+  stickerSprinkleCooldownSeconds: 120,
 }
 
 function resolveDirs(config) {
@@ -551,6 +605,7 @@ function _configShapeReference(Schema) {
     degradedModel: s.string().default(DEFAULTS.degradedModel).description('主脑降级模型：免费车道被限流后切这个（v4-pro→cn 积分池）'),
     spareEnabled: s.boolean().default(DEFAULTS.spareEnabled).description('主脑两条车道都不通时，是否启用备用脑（cn flash）接盘'),
     spareModel: s.string().default(DEFAULTS.spareModel).description('备用脑模型 id（cn realm 的 deepseek-v4.1-flash）'),
+  modelSwitchToken: s.string().default(DEFAULTS.modelSwitchToken).description('控制台切模型的 x-molly-admin 令牌；留空 = POST /model 一律 403（仅限控制台）'),
     spareLimitEnabled: s.boolean().default(DEFAULTS.spareLimitEnabled).description('备用脑是否受日积分限制'),
     spareDailyCap: s.natural().default(DEFAULTS.spareDailyCap).description('备用脑每日积分上限（默认 500 分，不是次数）'),
     maxTokens: s.natural().default(DEFAULTS.maxTokens),
@@ -663,6 +718,34 @@ export function apply(root, rawConfig = {}) {
   // 立刻打印启动横幅：DSH 崩溃恢复会把插件行削掉，这条日志能区分"没加载"和"加载了但连不上"
   logger('info', `dsh-qq-whale 已加载 | provider=${config.provider} model=${config.model} selfId=${config.selfId || '(待探测)'}`)
 
+  /*
+   * 运行时模型覆盖（task-56）：用户在控制台切过的模型落盘在 model-override.json，
+   * 启动时盖到 config 上。**只改内存对象，不动 yml**——把文件删掉就回到 yml 的值。
+   * 这里直接用 fs 读而不是 import 模块：apply() 不是 async，用不了 await import。
+   * 读失败一律当没有（坏文件不能把机器人拖死）。
+   */
+  let modelOverride = null
+  try {
+    const ovFile = path.join(config.dataDir || path.join(DSH_HOME, 'qq-whale'), 'model-override.json')
+    if (fs.existsSync(ovFile)) {
+      const j = JSON.parse(fs.readFileSync(ovFile, 'utf8'))
+      const ov = {}
+      for (const role of ['chat', 'work', 'code']) if (j?.[role]) ov[role] = String(j[role])
+      if (Object.keys(ov).length) {
+        modelOverride = ov
+        for (const role of ['chat', 'work', 'code']) {
+          if (!ov[role]) continue
+          const field = `${role}Model`
+          const cur = config[field]
+          config[field] = typeof cur === 'object' && cur ? { ...cur, model: ov[role] } : { provider: config.provider || 'wb-proxy', model: ov[role] }
+        }
+        logger('info', `已应用模型覆盖：${Object.entries(ov).map(([k, v]) => `${k}=${v}`).join(' ')}`)
+      }
+    }
+  } catch (err) {
+    logger('warn', `模型覆盖读取失败，按 yml 走：${err?.message || err}`)
+  }
+
   let client = null
   let engine = null
   let proactiveTimer = null
@@ -706,6 +789,20 @@ export function apply(root, rawConfig = {}) {
     attachPest: (api) => attachPest(api),
     get pestSource() {
       return pestSource
+    },
+    /*
+     * task-55：只读的「现在到底用多大窗口」。
+     * 这是观察值不是配置项 —— 要调档位去 DEFAULTS（contextLimit/maxTokens）
+     * 和 memory.js 的 MEMORY_WINDOW_PROFILES；这里只负责摊开给人看，
+     * 免得每次想知道生效值都得读源码或猜。
+     */
+    get windows() {
+      return {
+        profile: WINDOW_PROFILE,
+        contextLimit: Number(config.contextLimit) || 0,
+        maxTokens: Number(config.maxTokens) || 0,
+        memory: { ...MEMORY_WINDOW },
+      }
     },
   }
 
@@ -817,7 +914,9 @@ export function apply(root, rawConfig = {}) {
    * 谁在跑"，只能显示个「可用」。
    */
   const recheckModel = async () => {
-    const modelId = config.model || ''
+    // /state.model 要反映**当前生效的聊天模型**：控制台切过模型后这里不能还显示 yml 的旧值
+    const chatSpec = config.chatModel
+    const modelId = (typeof chatSpec === 'string' ? chatSpec : chatSpec?.model) || config.model || ''
     const fb = config.fallbackModel || ''
     if (config.modelBackend === 'dsh' || !engine?.gateway) {
       state.model = { ok: true, note: 'dsh 后端（由宿主管理凭据）', model: modelId, fallback: fb }

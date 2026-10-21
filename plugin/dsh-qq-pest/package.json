@@ -5,7 +5,8 @@
   "type": "module",
   "main": "lib/boot.js",
   "files": [
-    "lib"
+    "lib",
+    "cordis.patch.yml"
   ],
   "dsh": {
     "bundle": {

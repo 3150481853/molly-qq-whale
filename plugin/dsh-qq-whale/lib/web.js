@@ -20,6 +20,7 @@
  *   - 挂件脚本自己建 <script src> 并吞掉 onerror：路由在就加载，不在就静默。
  */
 
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -27,6 +28,18 @@ import { addLearnedHash, removeLearnedHash } from './sticker-learn.js'
 // qq 是记忆的唯一身份（2026-10-19）：校验规则只写在 memory.js 一处，
 // 免得控制台和引擎两边各写一套正则、慢慢就跑偏了。
 import { isValidQq } from './memory.js'
+// 运行时切模型（task-56）：可选清单 + override 读写都在这个小模块里
+import {
+  ROLES as MODEL_ROLES,
+  SWITCH_HEADER,
+  applyToConfig as applyModelToConfig,
+  authorizeSwitch as authorizeModelSwitch,
+  currentOf,
+  mergeGatewayModels,
+  modelsUrlOf,
+  readOverride as readModelOverride,
+  writeOverride as writeModelOverride,
+} from './model-override.js'
 // task-50：HTTP 出口也要过一遍出站清洗（ACP 标记 / markdown / 内部 id）。
 // QQ 投递路径早就有 cleanForQQ(sanitizeOutbound())，这几条 HTTP 路由漏了，
 // 真机上 /work/run 的 text 开头直接是 `<acp tokens="65" …>m00085</acp>`。
@@ -35,6 +48,31 @@ import { sanitizeOutbound } from './persona-sanitize.js'
 import { snapshot as moduleSnapshot } from './module-health.js'
 
 const ROUTE_PREFIX = '/dsh-qq-whale'
+
+/*
+ * 复刻网关算消息哈希的那一行 Python（wb_proxy.py）：
+ *     def h(obj):
+ *         blob = json.dumps(obj, ensure_ascii=False, sort_keys=True).encode("utf-8")
+ *         return hashlib.sha256(blob).hexdigest()[:12]
+ *
+ * 不能直接 JSON.stringify：Python 默认分隔符是 ", " 和 ": "，且 sort_keys=True
+ * 会按键名排序，而 JS 的 JSON.stringify 用 "," / ":" 并且保持插入序。
+ * 少一个空格哈希就全不一样，所以这两个差异必须逐字对齐。
+ */
+function pyJson(obj) {
+  if (Array.isArray(obj)) return `[${obj.map(pyJson).join(', ')}]`
+  if (obj && typeof obj === 'object') {
+    const keys = Object.keys(obj).sort()
+    return `{${keys.map((k) => `${JSON.stringify(k)}: ${pyJson(obj[k])}`).join(', ')}}`
+  }
+  return JSON.stringify(obj)
+}
+
+function pyHash(obj) {
+  const blob = Buffer.from(pyJson(obj), 'utf8')
+  return crypto.createHash('sha256').update(blob).digest('hex').slice(0, 12)
+}
+
 
 /*
  * ── 控制台 CRUD 的校验常量（契约 §2，2026-10-19）────────────────────
@@ -229,6 +267,9 @@ export class WebWidget {
       budget: null,
       stickers: null,
       plugins: null,
+      // task-55：上下文/记忆窗口的生效值（contextLimit / maxTokens / 记忆条数）。
+      // 之前这几个数改完没地方核，只能靠猜「到底生效没有」。
+      windows: null,
     }
     /*
      * task-51：模块健康快照（哪个子模块没加载上）。取不到就整块 null，不编造。
@@ -240,10 +281,25 @@ export class WebWidget {
     } catch {
       out.plugins = null
     }
+    // 窗口值：state.windows 是 main.js 上的只读 getter，读它本身可能抛，所以单独兜一层
+    try {
+      out.windows = s.windows || null
+    } catch {
+      out.windows = null
+    }
     // 这些统计都包在 try 里：任何一项挂掉都不该让整个挂件变空白
     try {
       const m = e?.metrics
       if (m) out.metrics = m.snapshot()
+    } catch {}
+    /*
+     * 行为计数（P0，2026-10-21）：replies / lightReactions / likes /
+     * stickersSent / stickerFallback / unmatched / sprinkled。
+     * 进程内计数，重载归零；用来回答"她这一轮到底多说了多少"。
+     */
+    try {
+      const s = e?.stats
+      if (s) out.stats = { ...s }
     } catch {}
     /*
      * 表情包学习统计。
@@ -265,6 +321,12 @@ export class WebWidget {
     try {
       const l = e?.learner?.stats
       if (l) out.learner = { kept: l.kept || 0, rejected: l.rejected || 0, dup: l.dup || 0 }
+      // P0：累计/今日/拒绝原因来自 .learned-stats.json（learner.snapshot()），
+      // 这是唯一跨重启的口径；上面那三个数只是本次进程的增量。
+      try {
+        const snap = e?.learner?.snapshot?.()
+        if (snap) out.learner = { ...(out.learner || {}), ...snap }
+      } catch {}
       const mem = e?.memory?.entries
       const fromMem = Array.isArray(mem) ? mem.filter((x) => x?.kind === 'sticker').length : 0
       // StickerLibrary 的 items 里，"学来的"子目录下的那部分就是学来的
@@ -991,6 +1053,107 @@ export class WebWidget {
       }),
     })
 
+    /* ── 运行时切模型（task-56）─────────────────────────────────────────
+     * 用户要「自己切模型不找人」：GET 看当前、POST 换。
+     * 落盘 `<dataDir>/model-override.json`（tmp+rename），**同时立刻改内存**，
+     * 下次重载时 main.js 会把它重新盖到 config 上（yml 不动）。
+     */
+    const modelOr503 = (engine, res) => {
+      if (!engine) return null
+      if (!engine.config) {
+        sendFail(res, 503, '配置还没就绪')
+        return null
+      }
+      return engine.config
+    }
+
+    // 可切换模型清单（2026-10-21）：静态表打底，能连上网关就把 `/v1/models` 里多出来的补上。
+    // 为什么要走网关：控制台的下拉就是拿网关清单填的，两边各写一份必然漂（原来插件只认 4 个，
+    // 网关上架 kimi-k3-1 后下拉能选、一保存就 400）。
+    // 缓存 60s，请求 1.5s 超时；网关抖一下不能把切模型打死 → 取不到就退回静态表（degraded）。
+    const MODEL_CATALOG_TTL_MS = 60 * 1000
+    let modelCatalog = { at: 0, list: null, degraded: false }
+    const modelCatalogOf = async (config) => {
+      const now = Date.now()
+      if (modelCatalog.list && now - modelCatalog.at < MODEL_CATALOG_TTL_MS) return modelCatalog
+      const url = modelsUrlOf(config?.gatewayBaseUrl)
+      let rows = []
+      let degraded = !url
+      if (url) {
+        try {
+          const resp = await fetch(url, { signal: AbortSignal.timeout(1500) })
+          const json = resp.ok ? await resp.json().catch(() => null) : null
+          if (Array.isArray(json?.data)) rows = json.data
+          degraded = rows.length === 0
+        } catch {
+          degraded = true
+        }
+      }
+      modelCatalog = { at: now, list: mergeGatewayModels(rows), degraded }
+      return modelCatalog
+    }
+
+    // /model —— GET 看当前，POST 切换（一个路由两种方法，router 按 path 精确匹配）
+    add({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/model`,
+      ...wrap(async (req, res) => {
+        if (req.method !== 'GET' && req.method !== 'POST') return sendFail(res, 405, 'method not allowed')
+        const config = modelOr503(engineOr503(res), res)
+        if (!config) return
+
+        const catalog = await modelCatalogOf(config)
+
+        if (req.method === 'GET') {
+          const ov = readModelOverride(config.dataDir) || {}
+          const fromFile = Object.keys(ov).some((k) => k !== 'updatedAt')
+          return sendJson(res, 200, {
+            ok: true,
+            current: currentOf(config),
+            source: fromFile ? 'override' : 'config',
+            available: catalog.list,
+            availableDegraded: catalog.degraded,
+            override: fromFile ? ov : null,
+          })
+        }
+
+        const body = await readJson(req, res)
+        if (!body) return
+        // 「仅限控制台」：写接口必须带 x-molly-admin，且配置了 modelSwitchToken（空 = 默认关闭）
+        const gate = authorizeModelSwitch(config.modelSwitchToken, req.headers?.[SWITCH_HEADER])
+        if (!gate.ok) return sendFail(res, gate.status, gate.message)
+        const allowed = new Set(catalog.list.map((m) => m.id))
+        const listHint = catalog.list.map((m) => m.id).join(' / ')
+        const degradedHint = catalog.degraded ? '（网关 /v1/models 没取到，当前只认内置清单）' : ''
+        const patch = {}
+        for (const role of MODEL_ROLES) {
+          const raw = body[role]
+          if (raw === undefined || raw === null || raw === '') continue
+          const id = String(raw).trim()
+          if (!allowed.has(id)) {
+            return sendFail(res, 400, `模型 id 不合法：${id}；可选 ${listHint}${degradedHint}`)
+          }
+          patch[role] = id
+        }
+        if (!Object.keys(patch).length) {
+          return sendFail(res, 400, `至少给一个模型：${MODEL_ROLES.join(' / ')}（可选 ${listHint}）`)
+        }
+        let written
+        try {
+          written = writeModelOverride(config.dataDir, patch)
+        } catch (err) {
+          return sendFail(res, 500, `写入失败：${err?.message || err}`)
+        }
+        const engine = engineOr503(res)
+        const current =
+          typeof engine?.applyModelOverride === 'function'
+            ? engine.applyModelOverride(written)
+            : (applyModelToConfig(config, written), currentOf(config))
+        this.logger('info', `控制台切换模型：${Object.entries(patch).map(([k, v]) => `${k}=${v}`).join(' ')}`)
+        sendJson(res, 200, { ok: true, current, source: 'override', available: catalog.list, override: written })
+      }),
+    })
+
     // GET /stickers/list —— 只列「学来的」目录（可写目录，契约 §1）
     add({
       kind: 'exact',
@@ -1264,6 +1427,89 @@ export class WebWidget {
           running: Boolean(ex.running),
           error,
         })
+      }),
+    })
+
+    /*
+     * POST /dsh-qq-whale/chat/test —— 打一发**真实的 chat 通道调用**，给账目对账用。
+     *
+     * 为什么非要有这个口子：预算表里 chat 是按次记账的，但它到底有没有跟网关
+     * 那份 usage.jsonl 对上，一直没人验过 —— 因为 chat 只在「有人真的来搭话」
+     * 时才发生，而对账又不能靠去 QQ 里戳她。这个路由走的就是聊天链路用的同一个
+     * 入口 engine.callModel()（内部 resume：gateway.chat + recordUsage('chat')），
+     * 所以它记的是同一本账，只是消息内容是合成的。
+     *
+     * 还回传 probe.msgs_sha / probe.system_sha：wb_proxy 写 usage.jsonl 时用
+     *   h(obj) = sha256(json.dumps(obj, ensure_ascii=False, sort_keys=True))[:12]
+     * 给整段消息和系统提示各算一个哈希。我们照同一算法在本地复刻一遍（见 pyHash），
+     * 于是那一行的 msgs_sha 就是能在 JSONL 里精确认领「这一次调用」的凭证 ——
+     * 不用再靠时间窗和行数瞎猜，也不用去改网关（那是三个客户端共用的）。
+     *
+     * body: {"text":"对账探针","system"?: "自定义系统提示"}
+     */
+    add({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/chat/test`,
+      ...wrap(async (req, res) => {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          return
+        }
+        const raw = await readBody(req)
+        let body
+        try {
+          body = JSON.parse(raw || '{}')
+        } catch {
+          sendJson(res, 400, { ok: false, error: 'bad json' })
+          return
+        }
+        const text = String(body?.text || '').trim()
+        if (!text) {
+          sendJson(res, 400, { ok: false, error: 'text 不能为空' })
+          return
+        }
+        const system =
+          typeof body?.system === 'string' && body.system
+            ? body.system
+            : '这是一次自检调用，只用来核对记账。请只回两个字：收到'
+        const e = this.engineRef()
+        if (!e?.callModel) {
+          sendJson(res, 503, { ok: false, error: 'engine 还没就绪' })
+          return
+        }
+        const messages = [{ role: 'user', content: text }]
+        /*
+         * 线上消息的顺序必须和 gateway.chat() 里拼的一模一样（system 在前），
+         * 否则本地算出来的 msgs_sha 和网关落盘的那一行对不上，凭证就失效了。
+         */
+        const wire = []
+        if (system) wire.push({ role: 'system', content: system })
+        for (const m of messages) wire.push({ role: m.role, content: m.content })
+        const started = Date.now()
+        try {
+          // 96 而不是 32：主脑默认 reasoning_effort=max，32 个 token 会被思考吃光，
+          // 回包就变成空串（账照样对得上，但看着像探针坏了）。
+          const r = await e.callModel({ system, messages, maxTokens: 96 })
+          const snap = e.budget?.snapshot?.() || null
+          sendJson(res, 200, {
+            ok: Boolean(r?.ok),
+            text: String(r?.text || '').slice(0, 120),
+            error: r?.error || '',
+            code: r?.code || '',
+            model: r?.model || '',
+            usage: r?.usage || null,
+            probe: {
+              msgs_sha: pyHash(wire),
+              system_sha: wire.length ? pyHash(wire[0]) : '',
+              n_msgs: wire.length,
+            },
+            budgetChat: snap?.byChannel?.chat || null,
+            ms: Date.now() - started,
+            at: new Date().toISOString(),
+          })
+        } catch (err) {
+          sendJson(res, 500, { ok: false, error: String(err?.message || err) })
+        }
       }),
     })
 

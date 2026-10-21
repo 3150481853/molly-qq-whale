@@ -62,10 +62,67 @@ export class CreditBudget {
      */
     this.settingsFile = dir ? path.join(dir, 'budget-settings.json') : ''
 
-    /** @type {{date:string, used:number, calls:number, notified:boolean}} */
-    this.day = { date: localDateKey(), used: 0, calls: 0, notified: false }
+    /**
+     * 当天账本。
+     *
+     * task-54：原来只有 `used/calls`，而 calls 只在 credit>0 时才 +1 —— 主脑走
+     * intl 免费 flash 时 credit 恒为 0，于是「回了 1222 条消息、只记到 5 次调用」。
+     * 现在 calls/tokens 与 credit 解耦：**每次模型调用都记 calls，拿不到 usage
+     * 就把 tokens 记 null，绝不编造 credit**。
+     *
+     *   used         今日积分（= credit 总和；旧字段，控制台在用）
+     *   calls        今日模型调用次数（无论有没有 usage）
+     *   tokens       今日已知 token 总和；一次 usage 都没有时保持 null
+     *   tokensKnown  有多少次调用真的带来了 token 数（用于判断 tokens 是否可信）
+     *   byChannel    { chat: {calls,credit,tokens,tokensKnown}, work: {...}, ... }
+     *
+     * @type {{date:string, used:number, calls:number, tokens:number|null, tokensKnown:number,
+     *         notified:boolean, byChannel:object}}
+     */
+    this.day = this.emptyDay(localDateKey())
     this.load()
     this.loadSettings()
+  }
+
+  /** 一天的初始账本（跨天/首次启动共用，避免两处字段写漂）。 */
+  emptyDay(date) {
+    return {
+      date,
+      used: 0,
+      calls: 0,
+      tokens: null,
+      tokensKnown: 0,
+      notified: false,
+      byChannel: {},
+    }
+  }
+
+  /** 把落盘对象收敛成合法账本（旧文件没有新字段也不能崩）。 */
+  normalizeDay(j, date) {
+    const out = this.emptyDay(date)
+    const numOrNull = (v) => {
+      if (v === null || v === undefined || v === '') return null
+      const n = Number(v)
+      return Number.isFinite(n) ? n : null
+    }
+    if (!j || typeof j !== 'object') return out
+    out.used = Number(j.used) || 0
+    out.calls = Number(j.calls) || 0
+    out.notified = Boolean(j.notified)
+    out.tokens = numOrNull(j.tokens)
+    out.tokensKnown = Number(j.tokensKnown) || 0
+    if (j.byChannel && typeof j.byChannel === 'object') {
+      for (const [ch, v] of Object.entries(j.byChannel)) {
+        if (!v || typeof v !== 'object') continue
+        out.byChannel[ch] = {
+          calls: Number(v.calls) || 0,
+          credit: Number(v.credit) || 0,
+          tokens: numOrNull(v.tokens),
+          tokensKnown: Number(v.tokensKnown) || 0,
+        }
+      }
+    }
+    return out
   }
 
   // ———————————————— 持久化 ————————————————
@@ -78,15 +135,15 @@ export class CreditBudget {
       if (j && typeof j === 'object') {
         const today = localDateKey()
         if (j.date === today) {
-          this.day = {
-            date: today,
-            used: Number(j.used) || 0,
-            calls: Number(j.calls) || 0,
-            notified: Boolean(j.notified),
-          }
+          this.day = this.normalizeDay(j, today)
         } else {
           // 跨天了：保留历史最后一条便于看，但当天从零开始
-          this.yesterday = { date: j.date, used: Number(j.used) || 0, calls: Number(j.calls) || 0 }
+          this.yesterday = {
+            date: j.date,
+            used: Number(j.used) || 0,
+            calls: Number(j.calls) || 0,
+            tokens: Number.isFinite(Number(j.tokens)) ? Number(j.tokens) : null,
+          }
         }
       }
     } catch {
@@ -110,10 +167,15 @@ export class CreditBudget {
   rollover() {
     const today = localDateKey()
     if (this.day.date === today) return false
-    this.yesterday = { date: this.day.date, used: this.day.used, calls: this.day.calls }
-    this.day = { date: today, used: 0, calls: 0, notified: false }
+    this.yesterday = {
+      date: this.day.date,
+      used: this.day.used,
+      calls: this.day.calls,
+      tokens: this.day.tokens,
+    }
+    this.day = this.emptyDay(today)
     this.save()
-    this.logger('info', `积分预算跨天重置（昨天用了 ${(this.yesterday.used || 0).toFixed(2)} 分）`)
+    this.logger('info', `积分预算跨天重置（昨天用了 ${(this.yesterday.used || 0).toFixed(2)} 分、${this.yesterday.calls || 0} 次调用）`)
     return true
   }
 
@@ -188,17 +250,83 @@ export class CreditBudget {
     return this.day.used < this.dailyCap
   }
 
-  /** 记一笔用量。credit 来自上游 usage.credit。 */
-  spend(credit) {
-    const c = Number(credit)
-    if (!Number.isFinite(c) || c <= 0) return
+  /**
+   * 记一次模型调用（task-54：**唯一记账出口**）。
+   *
+   * 与旧 spend() 的区别：以前 credit<=0 就直接 return，连调用次数都不记；
+   * 主脑走 intl 免费 flash 时 credit 恒为 0，于是账本永远停在个位数。现在：
+   *   - **每次调用都 calls +1**（按 channel 分桶也 +1）
+   *   - credit 只在拿到有限正数时累加（不编造）
+   *   - tokens 只在真的拿到 usage 的 token 字段时累加；这次没拿到就 tokensKnown 不动，
+   *     全天一次都没拿到时 snapshot 的 tokens 是 null（宁缺勿假）
+   *
+   * @param {object} p
+   * @param {string} [p.channel='chat'] chat|degraded|spare|work|code|research
+   * @param {number|null} [p.credit] 上游 usage.credit
+   * @param {number|null} [p.promptTokens]
+   * @param {number|null} [p.completionTokens]
+   * @param {number|null} [p.reasoningTokens]
+   * @param {number|null} [p.cachedTokens]
+   * @param {number|null} [p.tokens] 已知总 token（不传就由三个分项相加）
+   * @param {string} [p.provider]
+   * @param {string} [p.model]
+   * @returns {{channel:string, credit:number|null, tokens:number|null}}
+   */
+  record({ channel = 'chat', credit = null, promptTokens = null, completionTokens = null, reasoningTokens = null, cachedTokens = null, tokens = null, provider = '', model = '' } = {}) {
     this.rollover()
-    this.day.used = Math.round((this.day.used + c) * 1000) / 1000
+    const ch = String(channel || 'chat') || 'chat'
+    if (!this.day.byChannel[ch]) {
+      this.day.byChannel[ch] = { calls: 0, credit: 0, tokens: null, tokensKnown: 0 }
+    }
+    const bucket = this.day.byChannel[ch]
     this.day.calls += 1
+    bucket.calls += 1
+
+    const num = (v) => {
+      if (v === null || v === undefined || v === '') return null
+      const n = Number(v)
+      return Number.isFinite(n) ? n : null
+    }
+    const c = num(credit)
+    if (c !== null && c > 0) {
+      this.day.used = Math.round((this.day.used + c) * 100000) / 100000
+      bucket.credit = Math.round((bucket.credit + c) * 100000) / 100000
+    }
+
+    /*
+     * token 口径：优先用调用方算好的 tokens；否则 prompt+completion(+reasoning)。
+     * 三个分项全是 null 时视为「这次拿不到 usage」，不写 tokens、不加 tokensKnown。
+     */
+    let total = num(tokens)
+    if (total === null) {
+      const parts = [num(promptTokens), num(completionTokens), num(reasoningTokens)].filter((n) => n !== null)
+      if (parts.length > 0) total = parts.reduce((a, b) => a + b, 0)
+    }
+    if (total !== null && total >= 0) {
+      this.day.tokens = (this.day.tokens || 0) + total
+      this.day.tokensKnown += 1
+      bucket.tokens = (bucket.tokens || 0) + total
+      bucket.tokensKnown += 1
+    }
+
     this.save()
     if (this.enabled && this.dailyCap > 0 && this.day.used >= this.dailyCap) {
       this.logger('warn', `今日免费积分已达上限 ${this.dailyCap}（已用 ${this.day.used.toFixed(2)}）`)
     }
+    return { channel: ch, credit: c, tokens: total }
+  }
+
+  /**
+   * 旧接口（兼容）：只记积分。
+   * 新代码请用 record()，那里才会把「没有 usage 的调用」也计入 calls。
+   */
+  spend(credit) {
+    const c = Number(credit)
+    if (!Number.isFinite(c) || c <= 0) {
+      // 老语义是「没花钱就不算调用」；新语义在 record() 里，这里保持旧行为
+      return
+    }
+    this.record({ channel: 'chat', credit: c })
   }
 
   /**
@@ -218,9 +346,18 @@ export class CreditBudget {
     return true
   }
 
-  /** 挂件/状态接口用的快照。 */
+  /** 挂件/状态接口用的快照。旧字段一个不少（控制台在用），新字段只增不改。 */
   snapshot() {
     this.rollover()
+    const byChannel = {}
+    for (const [ch, v] of Object.entries(this.day.byChannel || {})) {
+      byChannel[ch] = {
+        calls: v.calls || 0,
+        credit: Math.round((v.credit || 0) * 100) / 100,
+        // 该 channel 一次 usage 都没拿到时给 null，不拿 0 冒充
+        tokens: v.tokensKnown > 0 ? v.tokens : null,
+      }
+    }
     return {
       enabled: this.enabled,
       cap: this.dailyCap,
@@ -230,6 +367,15 @@ export class CreditBudget {
       date: this.day.date,
       exhausted: this.enabled && this.dailyCap > 0 && this.day.used >= this.dailyCap,
       notified: this.day.notified,
+      // —— task-54 新增 ——
+      // credit 与 used 同值，单独给一份是为了让控制台读「今天的积分」时不用猜口径
+      credit: Math.round(this.day.used * 100) / 100,
+      tokens: this.day.tokensKnown > 0 ? this.day.tokens : null,
+      tokensKnown: this.day.tokensKnown,
+      byChannel,
+      // 明确告诉 UI：这是**本地记账**，不含 DSH 主会话 / WorkBuddy 的全局用量
+      scope: 'local',
+      note: '本地记账，不含 DSH 主会话',
     }
   }
 }

@@ -127,19 +127,43 @@ export function planDelivery(parts, scene, cfg = {}, rng = Math.random) {
  *   - 群里被 @ 基本必回
  *   - 群聊围观要看"这话有没有钩子"：提问、情绪、叫名字、在聊吃的
  */
-export function willingness({ scene, text, isAtMe, recentSelfMessages = 0, lastSelfSpeakMs = Infinity }, rng = Math.random) {
+export function willingness(
+  { scene, text, isAtMe, recentSelfMessages = 0, recentOthers = 0, lastSelfSpeakMs = Infinity },
+  rng = Math.random,
+) {
   if (scene === 'private') return 1
   if (isAtMe) return 0.95
-  let w = 0.18
+
+  /*
+   * 2026-10-21 重写（用户：「我想让他能主动吐槽，而不是被@才会回话」）。
+   *
+   * 旧公式起手 0.18、被 @ 才 0.95，普通聊天要同时命中「问号 + 吃喝 + 情绪词」
+   * 才可能碰到 0.62 的阈值 —— 真机上她的全部反应就是点个赞。
+   * 新公式起手 0.32，钩子给得更宽（吐槽/抽象/贵/限量也算钩子），
+   * 并且把「自己刚说过话」的罚分从"整段历史条数"改成时间窗计数。
+   */
+  let w = 0.32
   const s = String(text || '')
-  if (/[?？]/.test(s)) w += 0.22
-  if (/(白饭|吃|饿|投喂|token|肥鱼|鲸鱼|鱼)/.test(s)) w += 0.3
-  if (/(哈哈|草|笑死|绷|离谱|绝了)/.test(s)) w += 0.15
-  if (s.length > 60) w += 0.08 // 有人认真说话，值得接
-  if (s.length < 6) w -= 0.1 // 太短的"嗯""哦"，接了显得傻
-  // 刚说过话就让一下，别抢麦
-  if (recentSelfMessages >= 2) w -= 0.25
-  if (lastSelfSpeakMs < 20000) w -= 0.2
+  if (/[?？]/.test(s)) w += 0.18
+  if (/(白饭|吃|饿|投喂|token|肥鱼|鲸鱼|鱼|奶茶|咖啡|晚饭|午饭|早饭)/.test(s)) w += 0.2
+  // 吐槽、情绪、梗 —— 这类话最容易让人忍不住接一句
+  if (/(哈哈|草|笑死|绷|离谱|绝了|无语|抽象|逆天|恶心|烦|破防|服了|太贵|好贵|限量|烂|崩|坑|摆烂|吐了|气死)/.test(s)) {
+    w += 0.22
+  }
+  if (s.length > 60) w += 0.06 // 有人认真说话，值得接
+  if (s.length < 6) w -= 0.05 // 太短的"嗯""哦"，接了显得傻
+
+  // 群里正聊得热（90 秒内别人说过话）→ 更容易插嘴，最多 +0.18
+  w += Math.min(0.18, (recentOthers || 0) * 0.06)
+
+  // 自己最近说过话就让一下：10 分钟内 2 次 -0.22、1 次 -0.10
+  if (recentSelfMessages >= 2) w -= 0.22
+  else if (recentSelfMessages === 1) w -= 0.1
+
+  // 刚说完没多久就闭嘴，别抢麦；超过一分钟基本不罚
+  if (lastSelfSpeakMs < 15000) w -= 0.18
+  else if (lastSelfSpeakMs < 60000) w -= 0.08
+
   w += (rng() - 0.5) * 0.12
   return Math.max(0, Math.min(1, w))
 }

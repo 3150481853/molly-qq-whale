@@ -27,6 +27,8 @@
       <a class="nav-item" href="#/budget" data-page="budget">预算</a>
       <a class="nav-item" href="#/work" data-page="work">干活</a>
       <a class="nav-item" href="#/watchdog" data-page="watchdog">守护</a>
+      <a class="nav-item" href="#/ops" data-page="ops">运维</a>
+      <a class="nav-item" href="#/external" data-page="external">外部服务</a>
       <a class="nav-item" href="#/napcat" data-page="napcat">NapCat</a>
       <a class="nav-item" href="#/login" data-page="login">登录<span class="nav-badge is-warn nav-dot" id="loginBadge" hidden aria-hidden="true"></span></a>
       <a class="nav-item" href="#/exec" data-page="exec">执行块</a>
@@ -187,6 +189,74 @@
         </div>
       </section>
 
+      <!-- 运维：进程启停、心跳中继、推送、日志。停/重启只做页内确认弹层，不要求手打 RESTART -->
+      <section class="page" data-page="ops" hidden>
+        <div class="page-head">
+          <h1>运维</h1>
+          <p class="page-sub">Molly 进程、心跳中继、PushPlus 推送与日志。日志只在页面里看和复制，不提供下载。</p>
+        </div>
+        <div class="card-grid" id="opsCards"></div>
+        <div class="card card-block">
+          <h2 class="card-title">进程操作</h2>
+          <p class="card-sub">启动会跳过已在跑的部分；停止只杀 QQ 与 NapCat，不碰 DSH 宿主、网关和控制台自己。</p>
+          <div class="row-actions">
+            <button class="btn btn-primary" id="opsStart" type="button">启动 Molly</button>
+            <button class="btn btn-danger" id="opsStop" type="button">停止 Molly</button>
+            <button class="btn btn-danger" id="opsRestart" type="button">重启 Molly</button>
+          </div>
+          <div class="action-result" id="opsOut" hidden></div>
+        </div>
+        <div class="card card-block">
+          <h2 class="card-title">日志</h2>
+          <p class="card-sub">最近 200 行。复制走剪贴板，不生成下载文件。</p>
+          <div class="toolbar">
+            <select class="input input-sm" id="opsLogSource" aria-label="日志来源">
+              <option value="watchdog">watchdog</option>
+              <option value="plugin">plugin</option>
+            </select>
+            <button class="btn btn-ghost btn-sm" id="opsLogLoad" type="button">加载</button>
+            <button class="btn btn-ghost btn-sm" id="opsLogCopy" type="button">复制</button>
+            <span class="drawer-path mono" id="opsLogPath"></span>
+          </div>
+          <pre class="log-body mono" id="opsLogBody">（尚未加载，点「加载」看最近 200 行）</pre>
+        </div>
+      </section>
+
+      <!-- 外部服务：网关用量与模型、服务器中继心跳、切模型（仅控制台） -->
+      <section class="page" data-page="external" hidden>
+        <div class="page-head page-head-row">
+          <div>
+            <h1>外部服务</h1>
+            <p class="page-sub">网关计费与模型清单、服务器中继心跳。读不到时只标红，不拖垮整页。</p>
+          </div>
+          <button class="btn btn-ghost btn-sm" id="extReload" type="button">刷新</button>
+        </div>
+        <div class="card-grid" id="extCards"></div>
+        <div class="card card-block">
+          <h2 class="card-title">切模型</h2>
+          <p class="card-sub">只在控制台可改；写进插件配置后立即生效，不需要重启。令牌只存在服务端，前端拿不到。</p>
+          <div class="ext-model-grid">
+            <label class="ext-model-cell">
+              <span class="field-label" for="extModelChat">聊天</span>
+              <select class="input input-sm" id="extModelChat"></select>
+            </label>
+            <label class="ext-model-cell">
+              <span class="field-label" for="extModelWork">干活</span>
+              <select class="input input-sm" id="extModelWork"></select>
+            </label>
+            <label class="ext-model-cell">
+              <span class="field-label" for="extModelCode">代码</span>
+              <select class="input input-sm" id="extModelCode"></select>
+            </label>
+          </div>
+          <div class="row-actions">
+            <button class="btn btn-primary" id="extModelSave" type="button">保存</button>
+            <span class="card-sub mono" id="extModelNow"></span>
+          </div>
+          <div class="action-result" id="extOut" hidden></div>
+        </div>
+      </section>
+
       <!-- NapCat -->
       <section class="page" data-page="napcat" hidden>
         <div class="page-head">
@@ -305,6 +375,18 @@
     <div class="modal-foot">
       <span class="mono modal-name" id="stkModalName"></span>
       <button class="btn btn-ghost btn-sm" id="stkModalClose" type="button">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 页内确认弹层：停/重启 Molly、切模型这类动作只在这里点一次确认，不做输入框二次保险 -->
+<div class="modal" id="confirmSheet" hidden role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+  <div class="modal-card confirm-card">
+    <h2 class="card-title" id="confirmTitle">确认</h2>
+    <div class="confirm-body" id="confirmBody"></div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" id="confirmCancel" type="button">取消</button>
+      <button class="btn btn-danger" id="confirmOk" type="button">确认执行</button>
     </div>
   </div>
 </div>

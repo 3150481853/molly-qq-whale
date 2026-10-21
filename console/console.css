@@ -910,6 +910,65 @@ select.input{ cursor: pointer; }
   white-space: nowrap;
 }
 
+/* 页内确认弹层（task-58 运维页的停 / 重启）：不做「输入 RESTART」二次保险 */
+.confirm-card{
+  max-width: min(480px, 100%);
+}
+.confirm-desc{
+  margin: 0;
+  font-size: var(--fs-sub);
+  line-height: 1.6;
+  color: var(--charcoal);
+}
+.confirm-list{
+  margin: 0;
+  padding-left: 1.1em;
+  font-size: var(--fs-sub);
+  line-height: 1.7;
+  color: var(--slate);
+}
+.confirm-list li + li{ margin-top: var(--s-1); }
+
+/* ---------- 17b. 外部服务：模型选择 / 用量表 ---------- */
+.ext-model-grid{
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--s-3);
+  margin-bottom: var(--s-3);
+}
+.ext-model-cell{
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  min-width: 0;
+}
+.ext-model-cell label{
+  font-size: var(--fs-micro);
+  color: var(--slate);
+}
+.ext-model-cell select{
+  width: 100%;
+  min-width: 0;
+}
+.ext-table{
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+}
+.ext-row{
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--s-2);
+  align-items: center;
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--fs-micro);
+  border-bottom: 1px solid var(--hairline);
+}
+.ext-row:last-child{ border-bottom: 0; }
+.ext-row:nth-child(odd){ background: var(--canvas-soft, var(--canvas)); }
+
 /* ---------- 18. toast ---------- */
 .toast{
   position: fixed;

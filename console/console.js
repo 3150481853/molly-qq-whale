@@ -16,7 +16,7 @@
   var QR_TTL_MS = (typeof window !== 'undefined' && typeof window.__QR_TTL_MS__ === 'number' && window.__QR_TTL_MS__ > 0)
     ? window.__QR_TTL_MS__
     : 120000;
-  var PAGES = ['overview', 'chats', 'memory', 'pending', 'stickers', 'budget', 'work', 'watchdog', 'napcat', 'login', 'exec', 'settings'];
+  var PAGES = ['overview', 'chats', 'memory', 'pending', 'stickers', 'budget', 'work', 'watchdog', 'ops', 'external', 'napcat', 'login', 'exec', 'settings'];
 
   /* 记忆类型：顺序即页面分组顺序。值和插件端 lib/memory.js 的 kind 枚举一一对应，
      中文标签只在前端出现，不参与任何写请求。 */
@@ -82,6 +82,19 @@
       hint: ''
     },
     loginAutoStart: false,   /* 总览黄条点进来时置位：进页后自动生成一次 */
+    /*
+     * 运维 / 外部服务（task-58）。
+     * 心跳、网关用量、模型清单都**不进** 4 秒的 overview 轮询：它们各自要
+     * 走一次外部请求（网关面板登录、远端 /health），挂在轮询里会把一台
+     * 不在的服务器变成整页的延迟。进页拉一次 + 手动刷新就够。
+     */
+    ops: { hb: null, hbError: null, hbAt: 0, push: null },
+    ext: {
+      usage: null, usageError: null,
+      models: null, modelsError: null,
+      hb: null, hbError: null,
+      at: 0, loading: false
+    },
     reloading: false   /* 前端版本不一致时只自动 reload 一次 */
   };
 
@@ -675,7 +688,10 @@
       ].join('');
 
       var learner = p.learner || {};
+      var today = learner.today || {};
       var learnRows = [
+        kv('累计学会', mono(learner.total) + ' 张'),
+        kv('今日学会', mono(today.kept) + ' 张'),
         kv('采纳', mono(learner.kept)),
         kv('拒绝', mono(learner.rejected)),
         kv('重复', mono(learner.dup))
@@ -729,10 +745,25 @@
 
     var learnerTable =
       '<table class="tbl"><thead><tr><th>结果</th><th class="num">条数</th></tr></thead><tbody>' +
-      '<tr><td>采纳</td><td class="num">' + num(l.kept, 0) + '</td></tr>' +
-      '<tr><td>拒绝</td><td class="num">' + num(l.rejected, 0) + '</td></tr>' +
-      '<tr><td>重复</td><td class="num">' + num(l.dup, 0) + '</td></tr>' +
+      '<tr><td>累计学会</td><td class="num">' + num(l.total, 0) + '</td></tr>' +
+      '<tr><td>今日学会</td><td class="num">' + num(l.today && l.today.kept, 0) + '</td></tr>' +
+      '<tr><td>本进程采纳</td><td class="num">' + num(l.kept, 0) + '</td></tr>' +
+      '<tr><td>本进程拒绝</td><td class="num">' + num(l.rejected, 0) + '</td></tr>' +
+      '<tr><td>本进程重复</td><td class="num">' + num(l.dup, 0) + '</td></tr>' +
       '</tbody></table>';
+
+    /* 跳过/拒绝原因（P0）：来自 .learned-stats.json 的 reasons，
+       用来回答"为什么一张都没学成"——是体积超限、视觉描述失败还是配额满了。 */
+    var reasons = l.reasons || {};
+    var reasonKeys = Object.keys(reasons)
+      .filter(function (k) { return Number(reasons[k]) > 0; })
+      .sort(function (a, b) { return Number(reasons[b]) - Number(reasons[a]); })
+      .slice(0, 6);
+    var reasonTable = reasonKeys.length
+      ? '<table class="tbl"><thead><tr><th>跳过原因</th><th class="num">次数</th></tr></thead><tbody>' +
+        reasonKeys.map(function (k) { return kv(k, mono(reasons[k])); }).join('') +
+        '</tbody></table>'
+      : '<p class="card-sub">还没有跳过记录。</p>';
 
     var sideRows = side.reachable
       ? [
@@ -759,6 +790,7 @@
     setHtml(box, [
       card('消息指标', metricsTable),
       card('学习器取舍', learnerTable),
+      card('学习跳过原因', reasonTable),
       card('数据服务计数', sideRows + (groupRows ? '<div class="kv-sep"></div>' + groupRows : ''))
     ].join(''));
   }
@@ -3053,6 +3085,395 @@
     if (pendTimer) { clearInterval(pendTimer); pendTimer = null; }
   }
 
+  /* ---------------- 运维 / 外部服务（task-58） ----------------
+     两页都只调 /api/action/*，不新增接口：服务端动作在 task-57 已就位。
+     主人定的硬规矩（m00223）：
+       - 停 / 重启 Molly 只做页内确认弹层，不做「输入 RESTART」二次保险
+       - 日志只在页面里看和复制，不提供下载
+       - 切模型只在控制台（令牌只待在服务端）
+     ------------------------------------------------------------------------ */
+
+  /* 页内确认弹层。为什么不用 window.confirm：它会卡住整页、样式不可控，
+     而且在某些壳里会被静默吞掉；确认文案与后果应该由调用点写清楚。 */
+  var confirmCb = null;
+
+  function openConfirm(opts) {
+    opts = opts || {};
+    var mask = $('#confirmSheet');
+    var title = $('#confirmTitle');
+    var body = $('#confirmBody');
+    var ok = $('#confirmOk');
+    var cancel = $('#confirmCancel');
+    if (!mask || !title || !body || !ok || !cancel) {
+      /* 弹层被改坏了也别静默：退回原生确认，至少动作还能执行 */
+      if (window.confirm((opts.title || '确认') + '\n\n' + (opts.desc || ''))) {
+        if (typeof opts.onYes === 'function') opts.onYes();
+      }
+      return;
+    }
+    confirmCb = typeof opts.onYes === 'function' ? opts.onYes : null;
+    title.textContent = opts.title || '确认';
+    body.innerHTML = '<p class="confirm-desc">' + esc(opts.desc || '') + '</p>' +
+      (Array.isArray(opts.items) && opts.items.length
+        ? '<ul class="confirm-list">' + opts.items.map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul>'
+        : '');
+    ok.textContent = opts.okText || '确认执行';
+    ok.className = 'btn ' + (opts.danger === false ? 'btn-primary' : 'btn-danger');
+    cancel.textContent = opts.cancelText || '取消';
+    mask.hidden = false;
+    try { ok.focus(); } catch (err) { /* 聚焦失败不影响执行 */ }
+  }
+
+  function closeConfirm() {
+    confirmCb = null;
+    var mask = $('#confirmSheet');
+    if (mask) mask.hidden = true;
+  }
+
+  function fireConfirm() {
+    var fn = confirmCb;
+    closeConfirm();
+    if (fn) fn();
+  }
+
+  /* ---------------- 运维 ---------------- */
+
+  function pushPlusCard() {
+    var p = state.ops.push;
+    var on = !!(p && p.enabled);
+    return card('PushPlus 推送', [
+      kv('状态', p ? (on ? pill('ok', '已开启') : pill('idle', '已关闭')) : '未知'),
+      kv('Token', p ? (p.hasToken ? '<span class="mono">' + esc(p.token) + '</span>' : '未配置') : '—'),
+      '<div class="row-actions"><button class="btn btn-ghost btn-sm" type="button" id="opsPushToggle" data-enabled="' +
+        (on ? '1' : '0') + '">' + (on ? '关掉推送' : '打开推送') + '</button></div>'
+    ].join(''));
+  }
+
+  function heartbeatKv(hb, hbError) {
+    if (!hb) {
+      return kv('本地推送', hbError ? '<span class="is-bad">' + esc(hbError) + '</span>' : '正在读取…') +
+        kv('服务器', '—');
+    }
+    var local = hb.local || null;
+    var remote = hb.remote || {};
+    return kv('本地推送', local
+        ? (local.ok ? pill('ok', '正常') : pill('warn', '失败 ' + num(local.fails, 0) + ' 次'))
+        : pill('idle', '还没有记录')) +
+      kv('最近推送', local && local.lastAt ? fmtStamp(local.lastAt) : '—') +
+      kv('服务器', remote.ok
+        ? pill(remote.stale ? 'warn' : 'ok', remote.stale ? '可达（数据偏旧）' : '可达')
+        : pill('bad', esc(remote.error || '不可达'))) +
+      kv('服务器延迟', remote.ok && remote.ageSeconds !== null ? mono(remote.ageSeconds) + ' 秒前收到' : '—');
+  }
+
+  function renderOps() {
+    var box = $('#opsCards');
+    if (!box) return;
+    var ov = state.overview;
+    if (!ov) { setHtml(box, card('等待数据', '<p class="card-sub">正在连接控制台服务…</p>')); return; }
+
+    var pl = ov.plugin || {};
+    var nc = ov.napcat || {};
+    var wd = ov.watchdog || {};
+    var linkReady = !!(pl.link && pl.link.ready);
+    var linkState = (pl.link && pl.link.state) || 'unknown';
+
+    setHtml(box, [
+      card('Molly 进程', [
+        kv('插件', pl.reachable ? (pl.enabled ? pill('ok', '已加载') : pill('warn', '已停用')) : pill('bad', '不可达')),
+        kv('QQ 连接', linkReady ? pill('ok', '在线') : pill('warn', esc(linkState))),
+        kv('QQ 号', pl.bot && pl.bot.userId ? '<span class="mono">' + esc(pl.bot.userId) + '</span>' : '—'),
+        kv('昵称', pl.bot && pl.bot.nickname ? esc(pl.bot.nickname) : '—'),
+        kv('今天消息', pl.metrics && pl.metrics.messages !== null ? mono(pl.metrics.messages) : '—')
+      ].join('')),
+      card('NapCat', [
+        kv('WebUI', nc.reachable ? pill('ok', '可达') : pill('bad', '不可达')),
+        kv('登录态', nc.isLogin ? pill('ok', '已登录') : pill('warn', '未登录')),
+        kv('阶段', val(nc.loginPhase)),
+        kv('核心就绪', nc.coreReady ? '是' : '否')
+      ].join('')),
+      card('守护', [
+        kv('watchdog', wd.reachable ? pill('ok', '可达') : pill('bad', '不可达')),
+        kv('计划任务', wd.taskEnabled === false ? pill('warn', '已禁用') : pill('ok', '已启用')),
+        kv('上次巡检', wd.lastRun ? fmtStamp(wd.lastRun) : '—'),
+        kv('最近结论', wd.lastResult ? esc(wd.lastResult) : '—')
+      ].join('')),
+      card('心跳 / 中继', heartbeatKv(state.ops.hb, state.ops.hbError)),
+      pushPlusCard()
+    ].join(''));
+  }
+
+  function loadOpsHeartbeat() {
+    /* 心跳和推送状态一起取：两者都只读，且都只在进页 / 手动刷新时拉一次 */
+    Promise.all([
+      apiPost('heartbeat/status', {}),
+      apiPost('pushplus/status', {})
+    ]).then(function (all) {
+      var hb = all[0] || {};
+      var pp = all[1] || {};
+      state.ops.hbAt = Date.now();
+      if (hb.ok) { state.ops.hb = hb.data || null; state.ops.hbError = null; }
+      else { state.ops.hb = null; state.ops.hbError = hb.error || '心跳接口失败'; }
+      if (pp.ok) { state.ops.push = pp.data || null; }
+      safe(renderOps);
+    });
+  }
+
+  function loadOpsLogs() {
+    var body = $('#opsLogBody');
+    var pathEl = $('#opsLogPath');
+    var sel = $('#opsLogSource');
+    if (!body) return;
+    var source = (sel && sel.value) || 'watchdog';
+    body.textContent = '（加载中…）';
+    fetch('/api/logs?source=' + encodeURIComponent(source) + '&tail=200', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j || j.ok === false) throw new Error((j && j.error) || '读取失败');
+        var lines = Array.isArray(j.lines) ? j.lines : [];
+        body.textContent = lines.length ? lines.join('\n') : '（' + (j.note || '暂无日志') + '）';
+        if (pathEl) pathEl.textContent = j.path || '';
+        body.scrollTop = body.scrollHeight;
+      })
+      .catch(function (err) {
+        if (pathEl) pathEl.textContent = '';
+        body.textContent = '日志读取失败：' + (err && err.message ? err.message : String(err));
+      });
+  }
+
+  function copyOpsLogs() {
+    var body = $('#opsLogBody');
+    if (!body) return;
+    var text = body.textContent || '';
+    if (!text || text.indexOf('尚未加载') >= 0 || text.indexOf('加载中') === 0) {
+      toast('先点「加载」把日志读出来');
+      return;
+    }
+    if (!navigator.clipboard || !navigator.clipboard.writeText) {
+      toast('当前环境不支持剪贴板');
+      return;
+    }
+    navigator.clipboard.writeText(text).then(function () {
+      toast('日志已复制（' + text.length + ' 字符）');
+    }).catch(function (err) {
+      toast('复制失败：' + (err && err.message ? err.message : '浏览器拒绝'));
+    });
+  }
+
+  function opsStartMolly() {
+    /* 启动不破坏任何东西，不需要确认；跑完 overview 会自己跟上 */
+    runAction('molly/start', {}, { btn: $('#opsStart'), box: $('#opsOut') });
+  }
+
+  function opsStopMolly() {
+    openConfirm({
+      title: '停止 Molly',
+      desc: '会杀掉 QQ 与 NapCat 进程，Molly 立刻掉线。',
+      items: [
+        '只停 QQ 与 NapCat；DSH 宿主、网关、控制台本身不动',
+        '再要说话得重新启动，可能需要重新扫码'
+      ],
+      okText: '停掉',
+      onYes: function () {
+        runAction('molly/stop', { confirm: true }, { btn: $('#opsStop'), box: $('#opsOut') });
+      }
+    });
+  }
+
+  function opsRestartMolly() {
+    openConfirm({
+      title: '重启 Molly',
+      desc: '先停 QQ 与 NapCat，等 3 秒再重新拉起。中间会有一段空窗。',
+      items: ['重启期间消息不会回应', '拉起成功与否看下面结果里的 tail'],
+      okText: '重启',
+      onYes: function () {
+        runAction('molly/restart', { confirm: true }, { btn: $('#opsRestart'), box: $('#opsOut') });
+      }
+    });
+  }
+
+  /* ---------------- 外部服务 ---------------- */
+
+  function loadExternal() {
+    if (state.ext.loading) return;
+    state.ext.loading = true;
+    safe(renderExternal);
+    var jobs = [
+      apiPost('gateway/usage', {}).then(function (res) {
+        if (res.ok) { state.ext.usage = res.data || null; state.ext.usageError = null; }
+        else { state.ext.usage = null; state.ext.usageError = res.error || '网关用量读取失败'; }
+      }),
+      apiPost('gateway/models', {}).then(function (res) {
+        if (res.ok) { state.ext.models = res.data || null; state.ext.modelsError = null; }
+        else { state.ext.models = null; state.ext.modelsError = res.error || '模型清单读取失败'; }
+      }),
+      apiPost('heartbeat/status', {}).then(function (res) {
+        if (res.ok) { state.ext.hb = res.data || null; state.ext.hbError = null; }
+        else { state.ext.hb = null; state.ext.hbError = res.error || '心跳接口失败'; }
+      })
+    ];
+    Promise.all(jobs).then(function () {
+      state.ext.loading = false;
+      state.ext.at = Date.now();
+      safe(renderExternal);
+      safe(fillModelSelects);
+    });
+  }
+
+  function byModelHtml(byModel) {
+    var keys = Object.keys(byModel || {});
+    if (!keys.length) return '<p class="card-sub">网关照没有按模型统计。</p>';
+    return '<div class="ext-table">' + keys.map(function (k) {
+      var v = byModel[k] || {};
+      return '<div class="ext-row">' +
+        '<span class="mono">' + esc(k) + '</span>' +
+        '<span class="mono">' + num(v.requests, 0) + ' 次</span>' +
+        '<span class="mono">' + num(v.credit, 2) + ' 分</span>' +
+        '</div>';
+    }).join('') + '</div>';
+  }
+
+  function renderExternal() {
+    var box = $('#extCards');
+    if (!box) return;
+    var ext = state.ext;
+    if (!ext.at && ext.loading) {
+      setHtml(box, card('读取中', '<p class="card-sub">正在读网关与中继…</p>'));
+      return;
+    }
+    if (!ext.at) {
+      setHtml(box, card('还没读到', '<p class="card-sub">点右上角「刷新」读一次网关与中继。</p>'));
+      return;
+    }
+
+    var u = ext.usage;
+    var usageCard = ext.usageError
+      ? card('网关用量', '<p class="ar-error">' + esc(ext.usageError) + '</p>')
+      : card('网关用量', u ? [
+          kv('请求数', mono(u.requests)),
+          kv('错误数', mono(u.errors)),
+          kv('积分', mono(u.credit)),
+          kv('成本', u.costCny !== null ? '¥' + num(u.costCny, 2) : '—'),
+          kv('总 Token', mono(u.totalTokens)),
+          kv('缓存命中', u.totalTokens && u.cachedTokens !== null
+            ? '<span class="mono">' + (u.cachedTokens / u.totalTokens * 100).toFixed(1) + '%</span>'
+            : '—'),
+          kv('统计起点', u.since ? fmtStamp(u.since) : '—')
+        ].join('') : '<p class="card-sub">没有数据。</p>');
+
+    var m = ext.models;
+    var modelsCard = ext.modelsError
+      ? card('网关模型', '<p class="ar-error">' + esc(ext.modelsError) + '</p>')
+      : card('网关模型', m && Array.isArray(m.items) && m.items.length
+          ? '<div class="ext-table">' + m.items.map(function (x) {
+              return '<div class="ext-row"><span class="mono">' + esc(x.id) + '</span>' +
+                '<span class="mono">' + esc(x.ownedBy || '—') + '</span>' +
+                '<span class="mono">' + (x.supportsVision === true ? '看图' : (x.supportsVision === false ? '不看图' : '—')) + '</span></div>';
+            }).join('') + '</div>'
+          : '<p class="card-sub">没有可用模型。</p>');
+
+    var remote = (ext.hb && ext.hb.remote) || {};
+    var relayCard = card('服务器中继', [
+      kv('地址', remote.relayBase ? '<span class="mono">' + esc(remote.relayBase) + '</span>' : '—'),
+      kv('状态', remote.ok ? pill(remote.stale ? 'warn' : 'ok', remote.stale ? '可达（数据偏旧）' : '可达')
+        : pill('bad', esc(remote.error || '不可达'))),
+      kv('水位', remote.level ? esc(remote.level) : '—'),
+      kv('数据年龄', remote.ageSeconds !== null && remote.ageSeconds !== undefined ? mono(remote.ageSeconds) + ' 秒' : '—'),
+      kv('服务器收到', remote.lastReceivedAt ? fmtStamp(remote.lastReceivedAt) : '—')
+    ].join(''));
+
+    setHtml(box, [usageCard, modelsCard, relayCard].join(''));
+  }
+
+  function fillModelSelects() {
+    var ids = ((state.ext.models && state.ext.models.items) || [])
+      .map(function (x) { return x.id; })
+      .filter(Boolean);
+    ['#extModelChat', '#extModelWork', '#extModelCode'].forEach(function (sel) {
+      var node = $(sel);
+      if (!node) return;
+      var keep = node.value;
+      node.innerHTML = '<option value="">（不改）</option>' + ids.map(function (id) {
+        return '<option value="' + esc(id) + '">' + esc(id) + '</option>';
+      }).join('');
+      if (keep) node.value = keep;
+    });
+    var now = $('#extModelNow');
+    var cur = (state.overview && state.overview.plugin && state.overview.plugin.model) || '';
+    if (now) now.textContent = cur ? '聊天当前：' + cur : '';
+  }
+
+  function saveModelChange() {
+    var body = {};
+    [['chat', '#extModelChat'], ['work', '#extModelWork'], ['code', '#extModelCode']].forEach(function (pair) {
+      var node = $(pair[1]);
+      var v = node && node.value ? String(node.value).trim() : '';
+      if (v) body[pair[0]] = v;
+    });
+    if (!Object.keys(body).length) { toast('先选一个要换的模型'); return; }
+    openConfirm({
+      title: '切换模型',
+      desc: '写进插件配置后立即生效，下一轮对话就用新模型。',
+      items: Object.keys(body).map(function (k) { return k + ' → ' + body[k]; }),
+      okText: '确认切换',
+      danger: false,
+      onYes: function () {
+        runAction('plugin/model-set', body, { btn: $('#extModelSave'), box: $('#extOut') });
+        /* 插件成功后 overview 需要一次刷新，顶部模型胶囊才跟上 */
+        setTimeout(function () { poll(); }, 1200);
+      }
+    });
+  }
+
+  function bindOpsEvents() {
+    var start = $('#opsStart');
+    if (start) start.addEventListener('click', opsStartMolly);
+    var stop = $('#opsStop');
+    if (stop) stop.addEventListener('click', opsStopMolly);
+    var restart = $('#opsRestart');
+    if (restart) restart.addEventListener('click', opsRestartMolly);
+
+    var logLoad = $('#opsLogLoad');
+    if (logLoad) logLoad.addEventListener('click', loadOpsLogs);
+    var logCopy = $('#opsLogCopy');
+    if (logCopy) logCopy.addEventListener('click', copyOpsLogs);
+    var logSource = $('#opsLogSource');
+    if (logSource) logSource.addEventListener('change', loadOpsLogs);
+
+    /* 推送开关在卡片重绘后还在，用事件委托 */
+    var opsBox = $('#opsCards');
+    if (opsBox) {
+      opsBox.addEventListener('click', function (ev) {
+        var b = ev.target && ev.target.closest ? ev.target.closest('#opsPushToggle') : null;
+        if (!b) return;
+        var next = b.getAttribute('data-enabled') !== '1';
+        apiPost('pushplus/toggle', { enabled: next }).then(function (res) {
+          if (res.ok) {
+            state.ops.push = res.data || null;
+            toast(next ? '推送已打开' : '推送已关闭');
+          } else {
+            toast('切换失败：' + (res.error || '未知错误'));
+          }
+          safe(renderOps);
+        });
+      });
+    }
+
+    var extReload = $('#extReload');
+    if (extReload) extReload.addEventListener('click', function () { loadExternal(); });
+    var save = $('#extModelSave');
+    if (save) save.addEventListener('click', saveModelChange);
+
+    var okBtn = $('#confirmOk');
+    if (okBtn) okBtn.addEventListener('click', fireConfirm);
+    var cancelBtn = $('#confirmCancel');
+    if (cancelBtn) cancelBtn.addEventListener('click', closeConfirm);
+    var mask = $('#confirmSheet');
+    if (mask) {
+      mask.addEventListener('click', function (ev) { if (ev.target === mask) closeConfirm(); });
+    }
+  }
+
   /* ---------------- 路由 ---------------- */
 
   function currentPage() {
@@ -3067,6 +3488,8 @@
       case 'budget': renderBudget(); break;
       case 'work': renderWork(); break;
       case 'watchdog': renderWatchdog(); break;
+      case 'ops': renderOps(); break;
+      case 'external': renderExternal(); break;
       case 'napcat': renderNapcat(); break;
       case 'login': renderLogin(); break;
       case 'settings': renderSettings(); break;
@@ -3088,6 +3511,9 @@
     /* 进页签时强制拉一次：轮询只动数字，列表可能是几十分钟前的 */
     if (name === 'pending') loadPending(true);
     if (name === 'stickers') loadStickers();
+    /* 运维 / 外部服务：进页各拉一次，别让 4 秒轮询拖着外部请求走 */
+    if (name === 'ops') loadOpsHeartbeat();
+    if (name === 'external') loadExternal();
     /* 登录页只在等待扫码时轮询，离开就停，别在后台空转 */
     if (name === 'login') enterLoginPage();
     else stopLoginPoll();
@@ -3214,6 +3640,8 @@
 
     document.addEventListener('keydown', function (ev) {
       if (ev.key !== 'Escape') return;
+      var cf = $('#confirmSheet');
+      if (cf && !cf.hidden) { closeConfirm(); return; }
       var cm = $('#crudModal');
       if (cm && !cm.hidden) { closeCrud(); return; }
       var m = $('#stkModal');
@@ -3264,6 +3692,7 @@
     try {
       initActions();
       bindQuickActions();
+      bindOpsEvents();
       bindEvents();
       setPage(currentPage());
       loadHealth();

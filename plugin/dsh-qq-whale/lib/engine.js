@@ -189,6 +189,29 @@ export class ChatEngine {
      */
     this.memoryGate = { added: 0, rejected: 0, pending: 0, dup: 0 }
 
+    /**
+     * 行为计数（P0，2026-10-21）。
+     *
+     * `/state.stats` 直接读它，用来回答"她到底多说了多少"：
+     *   replies         真正发出去的回复轮数
+     *   lightReactions  不回复但甩了张表情包的次数
+     *   likes           点赞次数
+     *   stickersSent    成功发出的表情包张数
+     *   stickerFallback 图库找不到、退化成文字的次数（P2 要把这个数压下去）
+     *   unmatched       模型给的关键词一个都没匹配上
+     *   sprinkled       回复里"顺手补一张"的次数
+     * 进程内计数（重载归零）；累计口径看 metrics.json 与表情包统计文件。
+     */
+    this.stats = {
+      replies: 0,
+      lightReactions: 0,
+      likes: 0,
+      stickersSent: 0,
+      stickerFallback: 0,
+      unmatched: 0,
+      sprinkled: 0,
+    }
+
     // 模型来源三选一：
     //   - 'wbai'（默认）：直连 WorkBuddy 免费额度，独立进程也能跑，不依赖宿主
     //   - 'wb-proxy'：走本地 8788 多账号池网关（抗限流），保留 wbai 直连做 429 回退
@@ -376,6 +399,14 @@ export class ChatEngine {
      * code 执行器懒创建：宿主没有 agents 服务时不该在构造期就炸。
      */
     this.codeExecutor = new CommandExecutor({ ctx, logger, config, engine: this, role: 'code' })
+    /*
+     * 记账包装（task-54）：work/code 会话跑在宿主 agent 里，宿主不透出 usage。
+     * 在**执行器入口**记一次 calls（不编 token/credit），这样无论是私聊命令、
+     * 控制台 /work/run 还是 research 内部直调 executor.run，都会进账本。
+     * 包在 run 上而不是 runCommand 里，是为了覆盖所有调用路径、且只记一次。
+     */
+    this.wrapExecutorAccounting(this.executor, 'work')
+    this.wrapExecutorAccounting(this.codeExecutor, 'code')
     /** 路由可观测性：last + counts（/state 会原样吐出来） */
     this.routeState = { last: null, counts: { chat: 0, work: 0, code: 0 } }
 
@@ -399,6 +430,12 @@ export class ChatEngine {
       // 2026-10-20 主人要求：查资料超时从 45 秒放宽到 5 分钟（config 里也有同名项）。
       timeoutMs: (config.researchTimeoutSeconds ?? 300) * 1000,
     })
+    /*
+     * 查网记账（task-54）：research 内部直调 executor.run，如果只靠执行器包装，
+     * 这次会落进 work 桶。包一层 research()，在调用期间把执行器包装切到
+     * research 桶——只记一次、桶也对。
+     */
+    this.wrapResearchAccounting(this.researcher)
 
     /**
      * 任务进度播报器。attach() 由 index.js 在宿主就绪后调用。
@@ -506,6 +543,9 @@ export class ChatEngine {
         logger,
         maxFileSizeMB: config.stickerLearnMaxFileSizeMB ?? 2,
         maxPerDay: config.stickerLearnMaxPerDay ?? 20,
+        // 2026-10-21：默认放开学图。平台侧真正常用的表情包都以普通图片发出，
+        // 只认 sub_type=1 等于永远学不到；视觉闸门仍在兜底。
+        allImages: config.stickerLearnAllImages !== false,
         vision: {
           describe: (buf, mime) => this.gateway.describeImage(buf, mime),
         },
@@ -1423,22 +1463,44 @@ export class ChatEngine {
     }
 
     const verdict = this.shouldRespond({ scene, ev, norm, conv })
-    if (!verdict.yes) {
-      this.logger('debug', `不回：${verdict.reason || `意愿 ${verdict.willingness?.toFixed(2)} < ${verdict.threshold}`}`)
+    /*
+     * 三档反应（2026-10-21，用户：「我想让他能主动吐槽，而不是被@才会回话」）：
+     *   1. 想说      → 正常回复
+     *   2. 不想说    → 甩一张表情包（轻回应）
+     *   3. 连图都不甩 → 点个赞
+     * 旧版只有 1 和 3：「不回复」直接等于「点个赞」，用户看到的就是一个
+     * 只会点赞的哑巴。第二档是这次补的。
+     *
+     * 节流（replyMinGapSeconds / replyMaxPer10Min）默认 0 = 不限制，命中时
+     * 同样降级成轻回应/点赞，而不是硬憋着什么都不做。
+     */
+    if (!verdict.yes || !this.replyRateOk(conv)) {
+      if (!verdict.yes) {
+        this.logger('debug', `不回：${verdict.reason || `意愿 ${verdict.willingness?.toFixed(2)} < ${verdict.threshold}`}`)
 
-      /*
-       * 陌生人私聊：不回复对方，改成去问主人（用户 m16260）。
-       *
-       * 放在这里而不是更早，是因为前面的记忆抽取、偷表情包都该照常跑
-       * （对方说了什么、发了什么图仍然有价值），只是"不接话"。
-       */
-      if (scene === SCENE_PRIVATE && verdict.reason === '陌生人来访（转审批）') {
-        await this.handleStranger(ev, norm, userName)
-        return
+        /*
+         * 陌生人私聊：不回复对方，改成去问主人（用户 m16260）。
+         *
+         * 放在这里而不是更早，是因为前面的记忆抽取、偷表情包都该照常跑
+         * （对方说了什么、发了什么图仍然有价值），只是"不接话"。
+         */
+        if (scene === SCENE_PRIVATE && verdict.reason === '陌生人来访（转审批）') {
+          await this.handleStranger(ev, norm, userName)
+          return
+        }
+      } else {
+        this.logger('debug', '不回：触发回复节流（replyMinGapSeconds / replyMaxPer10Min）')
       }
 
-      // 已读回应：偶尔点个表情赞而不是彻底消失
-      if (scene !== SCENE_PRIVATE && this.config.tapEmoji !== false && shouldTapEmoji()) {
+      // 第二档：不开口，但甩张图（比单纯点赞更像人）
+      if (await this.maybeLightReaction(ev, norm, scene, conv)) return
+
+      // 第三档：已读回应，偶尔点个表情赞而不是彻底消失
+      if (
+        scene !== SCENE_PRIVATE &&
+        this.config.tapEmoji !== false &&
+        shouldTapEmoji({ tapEmojiProbability: this.config.tapEmojiProbability })
+      ) {
         this.tapEmoji(ev.message_id).catch(() => {})
       }
       return
@@ -1487,6 +1549,125 @@ export class ChatEngine {
     const entry = this.memory.add({ kind, who, qq, text: t, weight })
     if (entry) this.memoryGate.added += 1
     return entry
+  }
+
+  /**
+   * 第二档反应：不开口，但甩一张表情包。
+   *
+   * 用户 2026-10-21 要的「畅所欲言」不是"每句都接"，而是别只剩点赞一种反应。
+   * 判定不回时：先试轻回应（一张图）→ 再点赞 → 最后才彻底沉默。
+   *
+   * 为什么复用 deliver：发图、写历史、更新 lastSelfAt、统计 stickersSent 它都做完了；
+   * 自己另写一条发送路径，迟早跟主链路走偏。
+   */
+  async maybeLightReaction(ev, norm, scene, conv) {
+    if (scene === SCENE_PRIVATE) return false
+    if (this.config.stickerLightReaction === false) return false
+    const chance = Number(this.config.stickerLightReactionChance ?? 0.25)
+    if (!(Math.random() < chance)) return false
+
+    // 同一个群不要连着甩图，像刷屏机器人
+    const cooldownMs = Number(this.config.stickerLightReactionCooldownSeconds ?? 90) * 1000
+    if (!this._lastLightAt) this._lastLightAt = new Map()
+    const key = conv.key || String(ev.group_id || '')
+    const last = this._lastLightAt.get(key) || 0
+    if (this.now() - last < cooldownMs) return false
+
+    // 挑图：能对上这句话就优先用，否则随机挑一张——轻回应本来就是"随手甩"
+    let pick = null
+    try {
+      const hits = this.stickers.match(norm.text, { limit: 3 })
+      pick = hits.length > 0 ? hits[0] : this.pickRandomSticker()
+    } catch {
+      pick = null
+    }
+    if (!pick) return false
+    const query = (Array.isArray(pick.tags) && pick.tags[0]) || ''
+    if (!query) return false
+
+    try {
+      await this.deliver({ ev, scene, conv, reply: { parts: [{ type: 'sticker', query }] } })
+      this._lastLightAt.set(key, this.now())
+      this.stats.lightReactions++
+      this.logger('debug', `轻回应（不开口）：甩了张「${query}」`)
+      return true
+    } catch (err) {
+      this.logger('debug', `轻回应失败：${err?.message || err}`)
+      return false
+    }
+  }
+
+  /**
+   * 回复节流。配置默认 0 = 不限制（用户 2026-10-21 明确「先不设限」）。
+   *
+   * 留这个开关是因为阈值降到 0.42 后她可能对每条都接话；
+   * 真要控频率时改配置即可，不用改代码。
+   */
+  replyRateOk(conv) {
+    const minGap = Number(this.config.replyMinGapSeconds ?? 0)
+    const maxPer10 = Number(this.config.replyMaxPer10Min ?? 0)
+    if (minGap <= 0 && maxPer10 <= 0) return true
+    const nowMs = this.now()
+    if (minGap > 0 && conv.lastSelfAt && nowMs - conv.lastSelfAt < minGap * 1000) return false
+    if (maxPer10 > 0) {
+      const recent = (conv.history || []).filter(
+        (h) => h.role === 'assistant' && nowMs - (Number(h?.at) || 0) < 10 * 60000,
+      ).length
+      if (recent >= maxPer10) return false
+    }
+    return true
+  }
+
+  /**
+   * 随机挑一张图，并记住最近发过的几张（避免连着发同一张）。
+   *
+   * @returns {object|null} StickerLibrary item；图库空时 null
+   */
+  pickRandomSticker() {
+    if (!this.stickers) return null
+    if (!this._recentStickerFiles) this._recentStickerFiles = []
+    const exclude = new Set(this._recentStickerFiles)
+    let pick = null
+    try {
+      pick = this.stickers.random(Math.random, { exclude })
+    } catch {
+      pick = null
+    }
+    if (!pick) return null
+    if (pick.file) {
+      this._recentStickerFiles.push(pick.file)
+      if (this._recentStickerFiles.length > 8) this._recentStickerFiles.shift()
+    }
+    return pick
+  }
+
+  /**
+   * 撒图（P2，2026-10-21）：回复本身没带图、又是短句时，偶尔补一张。
+   *
+   * 只生成回复时往 parts 里加一条，不直接发送——发送仍由 deliver 统一负责，
+   * 这样表情包的节流、历史记录、lastSelfAt 全部跟正常回复一致。
+   */
+  maybeSprinkleSticker({ ev, scene, conv, reply }) {
+    if (this.config.stickerSprinkle === false) return
+    if (!reply || !Array.isArray(reply.parts) || reply.parts.length === 0) return
+    if (reply.parts.some((p) => p && p.type === 'sticker')) return
+    const text = reply.parts.map((p) => String(p?.text || '')).join('').trim()
+    if (!text || text.length > Number(this.config.stickerSprinkleMaxChars ?? 30)) return
+    const chance = Number(this.config.stickerSprinkleChance ?? 0.25)
+    if (!(Math.random() < chance)) return
+    const cooldownMs = Number(this.config.stickerSprinkleCooldownSeconds ?? 120) * 1000
+    if (!this._lastSprinkleAt) this._lastSprinkleAt = new Map()
+    const key = conv.key || String(ev.group_id || ev.user_id || '')
+    const last = this._lastSprinkleAt.get(key) || 0
+    if (this.now() - last < cooldownMs) return
+    const pick = this.pickRandomSticker()
+    if (!pick) return
+    const query = (Array.isArray(pick.tags) && pick.tags[0]) || ''
+    if (!query) return
+    reply.parts.push({ type: 'sticker', query })
+    this._lastSprinkleAt.set(key, this.now())
+    this.stats.sprinkled++
+    this.logger('debug', `撒图：补了一张「${query}」（${scene}）`)
   }
 
   /**
@@ -2110,6 +2291,9 @@ export class ChatEngine {
     const controller = new AbortController()
     const job = { phase: 'thinking', controller, pending: [] }
     this.jobs.set(key, job)
+    // 耗时起点：从"决定开口"算到最后一个气泡落地（含防抖等待与模型生成）。
+    // metrics.onReplied 只认毫秒数，别再传时间戳（2026-10-21 修）。
+    const t0 = Date.now()
 
     // 群名片实时状态：进入「正在想」（只在群聊，私聊没有群名片）。
     // 不 await——改名片失败不该卡住回复，而且它在冷却内会自己短路。
@@ -2134,8 +2318,22 @@ export class ChatEngine {
         return
       }
 
+      /*
+       * 撒图（2026-10-21，P2）：模型这轮没发图、回复又很短时，偶尔替它补一张。
+       *
+       * 为什么放在 generate 之后、deliver 之前：deliver 只负责按 parts 发送，
+       * 这时往 parts 里塞一张 sticker 就能复用整套节流/打字延迟/历史记录逻辑，
+       * 不需要另开发送通道。为什么只补短回复：长回答通常是在讲正经事，中途
+       * 甩图会很怪；短吐槽才是表情包的主场。
+       */
+      this.maybeSprinkleSticker({ ev, scene, conv, reply })
+
       job.phase = 'sending'
       await this.deliver({ ev, scene, conv, reply, signal: controller.signal })
+      if (!controller.signal.aborted) {
+        this.stats.replies++
+        try { this.metrics?.onReplied?.(Date.now() - t0) } catch {}
+      }
     } catch (err) {
       if (!controller.signal.aborted) {
         this.logger('error', `回复流程出错: ${err?.stack || err}`)
@@ -2411,9 +2609,12 @@ export class ChatEngine {
       realm: 'cn',
     })
 
+    // 记账（task-54）：备用脑也算一次真实模型调用；自己的日额度另记一份。
+    const credit = Number(res?.usage?.credit)
+    if (Number.isFinite(credit) && credit > 0) this.spare.spend(credit)
+    this.recordUsage({ channel: 'spare', usage: res?.usage, provider: 'wb-proxy', model: spareModel })
+
     if (res?.ok) {
-      const credit = Number(res?.usage?.credit)
-      if (Number.isFinite(credit) && credit > 0) this.spare.spend(credit)
       this.noteModelOk()
       this.logger('info', `备用脑接住了（credit=${Number.isFinite(credit) ? credit : '?'}，今日 ${this.spare.snapshot().used}/${this.spare.dailyCap}）`)
       return { ...res, degraded: true, backend: 'spare', model: spareModel }
@@ -2456,6 +2657,12 @@ export class ChatEngine {
   async callDegraded({ system, messages, signal, noBackflow = false }) {
     if (!this.trae) return null
     const res = await this.trae.chat({ system, messages, signal })
+    /*
+     * 记账（task-54）：以前这里写着「trae 用量不记账」，于是降档/接盘整条路径
+     * 在账本里完全隐身。现在统一走 recordUsage —— 拿不到 usage 也至少 calls+1，
+     * credit 拿不到就不加（绝不编造）。
+     */
+    this.recordUsage({ channel: 'degraded', usage: res?.usage, provider: 'trae' })
     if (res.ok) {
       this.noteModelOk()
       return { ...res, degraded: true, backend: 'trae' }
@@ -2592,10 +2799,8 @@ export class ChatEngine {
       temperature: this.config.temperature,
       signal,
     })
-    if (res?.ok && res.usage) {
-      const credit = Number(res.usage.credit)
-      if (Number.isFinite(credit) && credit > 0) this.budget.spend(credit)
-    }
+    // 记账（task-54）：网关回退到 wbai 也是一次真实调用，无论有没有 usage 都记。
+    this.recordUsage({ channel: 'chat', usage: res?.usage, provider: 'wbai' })
     if (res?.ok) {
       this.logger('info', 'wbai 直连接住了（网关回退成功）')
       return { ...res, degraded: true, gatewayFallback: true }
@@ -2693,6 +2898,113 @@ export class ChatEngine {
     this.logger('info', '额度缓过来了，恢复正常说话节奏')
   }
 
+  /**
+   * 唯一记账出口（task-54）。
+   *
+   * 以前预算只在三处、且都以「credit>0」为前提调用 `budget.spend()`。主脑走
+   * intl 免费 flash 时 credit 恒为 0，于是真机出现「回了 1222 条消息、只记到
+   * 5 次调用」。现在所有模型调用都经过这里：
+   *   - usage 有就解析 token/credit；没有就 tokens=null，但 **calls 一定 +1**
+   *   - channel 分桶：chat / degraded / spare / work / code / research
+   *   - 绝不编造 credit（拿不到就是 0，不计）
+   *
+   * 解析兼容两套字段名：
+   *   - OpenAI 风格：prompt_tokens / completion_tokens / total_tokens /
+   *     completion_tokens_details.reasoning_tokens / prompt_tokens_details.cached_tokens
+   *   - 网关简写：credit / promptTokens / completionTokens / reasoningTokens / cachedTokens
+   *
+   * @param {object} p
+   * @param {string} p.channel
+   * @param {object|null} [p.usage]
+   * @param {string} [p.provider]
+   * @param {string} [p.model]
+   */
+  recordUsage({ channel = 'chat', usage = null, provider = '', model = '' } = {}) {
+    try {
+      if (!this.budget) return
+      const u = usage && typeof usage === 'object' ? usage : null
+      const num = (v) => {
+        if (v === null || v === undefined || v === '') return null
+        const n = Number(v)
+        return Number.isFinite(n) ? n : null
+      }
+      const prompt = u ? num(u.prompt_tokens ?? u.promptTokens ?? u.input_tokens) : null
+      const completion = u ? num(u.completion_tokens ?? u.completionTokens ?? u.output_tokens) : null
+      const reasoning = u
+        ? num(u.reasoning_tokens ?? u.reasoningTokens ?? u.completion_tokens_details?.reasoning_tokens)
+        : null
+      const cached = u
+        ? num(u.cached_tokens ?? u.cachedTokens ?? u.prompt_tokens_details?.cached_tokens)
+        : null
+      const credit = u ? num(u.credit) : null
+      /*
+       * total_tokens 有就直接用（上游口径最准）；否则 prompt+completion 相加。
+       * 两边都没有 → null（这次拿不到 usage，不假装是 0）。
+       */
+      let tokens = u ? num(u.total_tokens ?? u.totalTokens ?? u.tokens) : null
+      if (tokens === null && (prompt !== null || completion !== null)) {
+        tokens = (prompt || 0) + (completion || 0)
+      }
+      this.budget.record({
+        channel: String(channel || 'chat'),
+        credit,
+        promptTokens: prompt,
+        completionTokens: completion,
+        reasoningTokens: reasoning,
+        cachedTokens: cached,
+        tokens,
+        provider,
+        model,
+      })
+    } catch (err) {
+      // 记账失败绝不影响聊天
+      this.logger('debug', `记账失败（${channel}）：${err?.message || err}`)
+    }
+  }
+
+  /**
+   * 给执行器的 run() 包一层记账（task-54）。
+   *
+   * 幂等：重复包只记一次（标记 __budgetWrapped）。宿主 agent 的模型调用不透出
+   * usage，所以这里只记 calls+1、tokens=null、credit 不加——宁缺勿假。
+   *
+   * @param {object} ex CommandExecutor 实例
+   * @param {string} channel 'work' | 'code'
+   */
+  wrapExecutorAccounting(ex, channel) {
+    if (!ex || typeof ex.run !== 'function' || ex.__budgetWrapped) return
+    const orig = ex.run.bind(ex)
+    const self = this
+    ex.run = async function budgetWrappedRun(...args) {
+      try {
+        return await orig(...args)
+      } finally {
+        // research() 期间发起的那次执行记到 research 桶，其余按执行器角色记
+        self.recordUsage({ channel: (self._researchDepth || 0) > 0 ? 'research' : channel })
+      }
+    }
+    ex.__budgetWrapped = true
+  }
+
+  /**
+   * 给查网包一层记账标记（task-54）。
+   * 只加标记，不重复记账：真正的 calls+1 在执行器 run 的 finally 里做。
+   */
+  wrapResearchAccounting(researcher) {
+    if (!researcher || typeof researcher.research !== 'function' || researcher.__budgetWrapped) return
+    const orig = researcher.research.bind(researcher)
+    const self = this
+    researcher.research = async function budgetWrappedResearch(...args) {
+      self._researchDepth = (self._researchDepth || 0) + 1
+      try {
+        return await orig(...args)
+      } finally {
+        self._researchDepth = Math.max(0, (self._researchDepth || 0) - 1)
+      }
+    }
+    researcher.__budgetWrapped = true
+  }
+
   /** 两个后端的调用统一走这里，形状对齐成 {ok,text,error,code} */
   async callModel({ system, messages, signal, maxTokens, model }) {
     if (this.gateway) {
@@ -2720,20 +3032,21 @@ export class ChatEngine {
         signal,
         model: mainModel,
       })
-      // 记账：只在真的调到了 wbai 时按 usage.credit 累计。
-      // 失败（429/网络）没有 usage，不记——那是没花钱的请求。
-      // 注意：intl 免费 flash 的 credit 恒为 0，所以正常聊天不会动预算。
-      if (res?.ok && res.usage) {
-        const credit = Number(res.usage.credit)
-        if (Number.isFinite(credit) && credit > 0) {
-          this.budget.spend(credit)
-          this.logger('debug', `本轮积分 ${credit}（今日 ${this.budget.snapshot().used}/${this.budget.dailyCap}）`)
-        }
-      }
+      // 记账（task-54）：成功与否都算一次调用；usage 有就解析，没有就 tokens=null。
+      // 真机教训：intl 免费 flash 的 credit 恒为 0，旧代码因此一次都没记。
+      this.recordUsage({
+        channel: 'chat',
+        usage: res?.usage,
+        provider: 'wb-proxy',
+        model: mainModel,
+      })
       if (res?.ok) res.model = mainModel
       return res
     }
-    return await this.model.chat({ system, messages, maxTokens, signal, model: this.chatModelName() || undefined })
+    const dshRes = await this.model.chat({ system, messages, maxTokens, signal, model: this.chatModelName() || undefined })
+    // dsh 后端拿不到 usage（宿主不透出）→ 只记 calls+1
+    this.recordUsage({ channel: 'chat', usage: dshRes?.usage, provider: this.config.provider || 'dsh' })
+    return dshRes
   }
 
   /**
@@ -2754,6 +3067,46 @@ export class ChatEngine {
     if (this.backend === 'wbai') return ''
     if (!provider || provider === this.config.provider) return model
     return ''
+  }
+
+  /**
+   * 运行时切模型（task-56）：把 `{chat, work, code}` 盖到 config 上，**内存立即生效**。
+   *
+   * 只改这三处的 `model` 字段，不碰记账（budget/usage 那套归 task-54）。
+   * 不重建 ModelCaller：`chat()` 每次调用都现读 `this.config.chatModel`，
+   * 重建实例反而会丢掉网关连接与重试状态。
+   *
+   * @param {{chat?:string, work?:string, code?:string}} next
+   * @returns {{chat:string, work:string, code:string, degraded:string, spare:string}}
+   */
+  applyModelOverride(next = {}) {
+    const pick = (v) => (typeof v === 'string' ? v : (v?.model ?? ''))
+    for (const role of ['chat', 'work', 'code']) {
+      const id = next?.[role]
+      if (!id) continue
+      const field = `${role}Model`
+      const cur = this.config[field]
+      if (typeof cur === 'string' || cur === undefined || cur === null) {
+        this.config[field] = { provider: this.config.provider || 'wb-proxy', model: String(id) }
+      } else if (typeof cur === 'object') {
+        this.config[field] = { ...cur, model: String(id) }
+      } else {
+        this.config[field] = { provider: this.config.provider || 'wb-proxy', model: String(id) }
+      }
+    }
+    // dsh 后端下 this.model 是 ModelCaller，模型名在实例上——同步一份，
+    // 否则 callWithFallback 的第三层还在用旧模型。
+    if (this.model && typeof this.model === 'object' && 'model' in this.model) {
+      const chat = pick(this.config.chatModel) || this.model.model
+      if (chat) this.model.model = chat
+    }
+    return {
+      chat: pick(this.config.chatModel),
+      work: pick(this.config.workModel),
+      code: pick(this.config.codeModel),
+      degraded: pick(this.config.degradedModel),
+      spare: pick(this.config.spareModel),
+    }
   }
 
   /** 限流兜底：用鱼的口气说一句，比沉默强 */
@@ -2883,9 +3236,12 @@ export class ChatEngine {
       if (part.type === 'sticker') {
         payload = await this.resolveSticker(part.query)
         if (!payload) {
-          // 图库里没有：退化成文字，装作被噎到
+          this.stats.stickerFallback++
+          // 图库里没有：退化成文字，装作被噎到（P2 会改成先试随机图，最后才退文字）
           const fallback = this.stickerFallback()
           payload = buildMessage([{ type: 'text', text: fallback }])
+        } else {
+          this.stats.stickersSent++
         }
       } else {
         let text = part.text
@@ -2968,11 +3324,22 @@ export class ChatEngine {
   /** 把 <sticker>关键词</sticker> 变成实际的图片消息段 */
   async resolveSticker(query) {
     const hits = this.stickers.match(query, { limit: 3 })
-    if (hits.length === 0) {
-      this.logger('debug', `图库没有匹配「${query}」的表情包`)
-      return null
+    let pick = hits[0] || null
+    if (!pick) {
+      /*
+       * P2（2026-10-21）：关键词没命中时不再直接退化成文字。
+       * 用户要的是"想甩图就甩图"，模型的标签和文件名不可能永远严丝合缝；
+       * 随机挑一张还在图库里的图，比突然来一句「找图找了半天」自然得多。
+       * 关键词没命中的次数仍记在 unmatched 里，用来评估 match 质量。
+       */
+      this.stats.unmatched++
+      this.logger('debug', `图库没有匹配「${query}」的表情包，改随机挑一张`)
+      pick = this.pickRandomSticker()
+      if (!pick) {
+        this.logger('debug', '图库是空的，表情包发送退化成文字')
+        return null
+      }
     }
-    const pick = hits[0]
     try {
       const b64 = await this.readFileAsBase64(pick.path)
       return buildMessage([{ type: 'image', file: `base64://${b64}` }])
@@ -3161,15 +3528,19 @@ export class ChatEngine {
       messageId: `self-${this.now()}`,
     })
     conv.lastSelfAt = this.now()
-    // onReplied 收的是「耗时毫秒」，不是「现在几点」。
-    // 早先这里传的是 this.now()，导致挂件「上次说话」被写成 2026-10-18T01:59:39
-    // 这种"2 毫秒回复"的假数据。注入回击不计耗时就别传。
-    try { this.metrics?.onReplied?.() } catch {}
+    /*
+     * 这里**不调** metrics.onReplied。
+     * onReplied 的参数是「耗时毫秒」，这条注入回击没有模型生成阶段，
+     * 传个 0 会拉低平均回复耗时，不传又会被写成 undefined——早先就是
+     * 这里空调用，把挂件的 replyDurations 污染成一串假数据
+     * （2026-10-21 排查：metrics.json 里全是 1~3ms）。
+     */
   }
 
   async tapEmoji(messageId, emojiId = 76) {
     try {
       await this.client.setMsgEmojiLike(messageId, emojiId, true)
+      this.stats.likes++
     } catch {
       // 点不了就算了，不重要
     }
@@ -3885,11 +4256,20 @@ export class ChatEngine {
       '- 他的喜好与雷点（爱吃什么、讨厌什么）',
       '- 他遇到过的事、当下的处境（加班、生病、考试、搬家）',
       '- 他明确的承诺或计划（说好周末一起、要去做某事）',
+      /*
+       * 2026-10-21（P3）：用户要「多记日常」，所以把"当天在干什么/心情/
+       * 吐槽的事/计划"也算进来。原来只收长期事实，导致"今天被老板骂了"
+       * 这种当天最该接得上的话全被当成寒暄丢掉。
+       */
+      '- 他今天在干什么、心情怎么样、在吐槽什么、最近有什么打算',
       '',
-      '不要记：寒暄、语气词、你无法确定的内容、重复的东西。',
-      '最多 5 条，每条不超过 25 字，写成"他……"或"他喜欢……"这样的第三人称短句。',
-      '有几条值得记就写几条，宁少勿滥；但**有具体信息的一条都别漏**，',
-      '尤其是宠物、家人、身体、住处、工作内容这类以后一定会被问到的。',
+      '不要记：寒暄、语气词、你无法确定的内容、重复的东西（同一件事只记一条）。',
+      /*
+       * 上限从 5 条放宽到 8 条、每条 25→30 字。实测一次 buffers 攒满 12 句时，
+       * 5 条经常把后半段的具体信息挤掉；8 条 + 900 maxTokens 才能装下。
+       */
+      '最多 8 条，每条不超过 30 字，写成"他……"或"他喜欢……"这样的第三人称短句。',
+      '有具体信息就记，重复的不要；宠物、家人、身体、住处、工作内容这类以后一定会被问到的优先。',
       '一条都不值得记就只输出两个字：无',
     ].join('\n')
 
@@ -3907,11 +4287,14 @@ export class ChatEngine {
        * 早先这里写的是 200（"够用了"），结果模型层从来没成功记过东西，
        * 用户看到的就是「聊了半天她什么都没记住」。reasoning 模型必须先
        * 花 token 想，这部分跟正文共用 max_tokens 预算——给 200 等于没给。
+       *
+       * 2026-10-21（P3）：上限 5→8 条，700→900。8 条 × 30 字再加上 reasoning，
+       * 700 容易在最后一条被截断。
        */
       const res = await this.callModel({
         system,
         messages: [{ role: 'user', content: said }],
-        maxTokens: cfg.memoryExtractMaxTokens ?? 700,
+        maxTokens: cfg.memoryExtractMaxTokens ?? 900,
       })
       if (res?.ok && res.text) out = res.text.trim()
       else if (res?.ok && !res.text) {

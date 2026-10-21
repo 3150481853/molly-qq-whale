@@ -180,6 +180,25 @@ $env:MOLLY_CONSOLE_PORT=19394; .\dist\molly-console.exe
 **方案 B：把 exe 放服务器，只当只读看板**
 `/api/overview` 等纯读接口需要 `pluginBase`/`sidecar` 能打到本机——除非有内网连通，否则它们会显示 `reachable: false`。**前端页面、`/api/health` 可以正常工作**。适合「只要一个能打开的页面」。
 
+> ⚠️ **注意：光有内网连通还不够。**
+> 插件侧的 HTTP 路由有 Host 白名单（`lib/web.js` 的 `isTrustedRequest`），**只接受回环地址**。实测（`node:http` 直发，`Host` 头可伪造）：
+>
+> | 请求的 Host | `/dsh-qq-whale/state` | `/dsh-qq-whale/memory/list` |
+> | --- | --- | --- |
+> | `127.0.0.1:7053` | 200 | 200 |
+> | `localhost:7053` | 200 | 200 |
+> | `<REDACTED>:7053` | **403** | **403** |
+> | `<REDACTED>:7053` | **403** | **403** |
+> | `console.example.com` | **403** | **403** |
+> | `molly.example.com:7053` | **403** | **403** |
+>
+> 另外两个横向对照也都是 403：内网 Host + 匹配的 `Origin`、回环 Host + 外站 `Origin`、回环 Host + `Sec-Fetch-Site: cross-site`。
+>
+> 所以把 `pluginBase` 写成内网 IP，网络是通的也一样全部 403。
+> **console-server 必须和 DSH 宿主跑在同一台机器上**，跨机只能靠本机反代（方案 A）。
+>
+> 复现脚本：`qq-whale\out\_t-host-gate.mjs`（只发 GET，15 条断言）。
+
 要真正把增删改搬到服务器，前提是把 DSH 插件和 NapCat 一起搬过去——那是另一件事，不在本文范围。
 
 ### 4.2 服务器上的最小部署
@@ -204,12 +223,15 @@ $env:MOLLY_CONSOLE_PORT=19394; .\dist\molly-console.exe
   "host": "127.0.0.1",
   "port": 19392,
   "token": "换成你自己的长随机串",
-  "pluginBase": "http://本机内网IP:7053",
+  "pluginBase": "",
   "consoleDir": "/opt/molly/console"
 }
 ```
 
 `host` 填 `127.0.0.1` 是故意的：**让 nginx 反代，不让 exe 直接对外**。
+
+`pluginBase` 留**空串**也是故意的。原因见 4.1 的注意框：插件只接受回环 Host，填内网 IP 会被 403。
+留空时 console-server 会自己去 7053 探宿主；探不到就退化成「插件不可达」，页面本身照常打开。**不要**在这里填 `http://<内网IP>:7053`，那是最容易犯、且症状最迷惑的错（页面能开、数据全空、动作全 403）。
 
 启动（systemd）：
 
@@ -296,6 +318,7 @@ sudo ufw deny 19392/tcp
 | --- | --- |
 | 网页 503，日志有「找不到前端入口」 | `console/` 没放对位置。看 `--version` 里的 `consoleDir`，或用 `console.json` 的 `consoleDir` 指过去 |
 | 页面能开但全是 `reachable: false` | exe 打不到插件 / sidecar / NapCat。检查 `pluginBase` 和网络连通性 |
+| 页面能开、数据全空、**动作全 403** | `pluginBase` 填了**非回环**地址（如内网 IP）。插件只接受 `127.0.0.1` / `localhost` 的 Host，别的 Host 一律 403。把 `pluginBase` 留空，让服务自己探 7053（见 4.1） |
 | 所有请求 401 | `console.json` 里设了 `token` 但请求没带 `x-molly-token` |
 | 双击后窗口闪一下就没、服务也没起 | 分三种：**exit 0 + 「控制台已经在运行」** = 已有一个在跑，这是正常的（见第 3 节三态）；**exit 1 + 「端口被别的程序占了」** = 换端口；**exit 1 + 「启动失败：…」** = 其它错误，看后面的消息 |
 | 明明没开控制台，双击却说「已经在运行」 | `/api/health` 能被别的服务冒充不太可能，但先 `curl http://127.0.0.1:19392/api/health` 看一眼返回的 `version` 是不是 `1.0.0`；确认是别人占的，就按第 3 节情况 ③ 换端口 |

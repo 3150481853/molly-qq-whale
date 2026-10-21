@@ -1,0 +1,7 @@
+# dsh-qq-whale 插件挂载补丁
+#
+# 这一行会被 DSH 启动时合并进 profile 的 cordis.patch.yml。
+# 卸载/还原：删掉本插件目录，并把下面这段从 cordis.patch.yml 移除即可。
+- insert:
+    - id: dsh-qq-whale
+      name: dsh-qq-whale

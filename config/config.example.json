@@ -1,5 +1,5 @@
 {
-  "$comment": "示例配置：复制成 config.local.json 再填自己的值。所有 ${...} 都需要替换。",
+  "$comment": "示例：只展示字段形状。真正生效的配置写在 DSH profile 的 cordis.patch.yml 里（模板见 config/cordis.patch.example.yml）；本文件不会被插件读取。",
   "napcat": {
     "baseUrl": "http://127.0.0.1:6099",
     "token": "${NAPCAT_TOKEN}",

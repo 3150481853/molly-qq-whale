@@ -11,7 +11,15 @@
         commandEnabled: true
         commandPrefixes: ['命令 ']
         commandGroups: ['666666666']
+        # 模型后端：wbai（默认，直连 WorkBuddy 免费额度）| wb-proxy（本地 8788 网关）
+        # | dsh（走 DSH 宿主里配好的 provider；接自己的 API 就用这个）
         modelBackend: wbai
+        # 只有 modelBackend=dsh 时下面两项才生效；用 wbai / wb-proxy 可以删掉
+        provider: '${PROVIDER}'
+        model: '${MODEL}'
+        # 公共镜像里路径一律留占位符，复制后换成你自己的绝对路径
+        dataDir: '${WORKSPACE}/qq-whale'
+        workSandboxDir: '${WORKSPACE}/qq-work'
         memoryDir: '${MOLLY_ROOT}/data/qq-whale/memory'
         stickerDir: '${MOLLY_ROOT}/data/qq-whale/stickers'
         personaDir: '${MOLLY_ROOT}/plugin/dsh-qq-whale/persona'

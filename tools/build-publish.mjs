@@ -7,6 +7,7 @@
  *   2. **替换 + 复检双闸**。文件先过 REPLACEMENTS，再过 VERIFY；复检有任何命中就
  *      exit 1，且不产出清单（宁可这一轮不出包，也不出一个带真值的包）。
  *   3. **只读运行目录**。本脚本只往 publish 目录写，`qq-whale\` 下只新增它自己。
+ *   4. **按内容判编码**：UTF-8/UTF-16（含 BOM）解码后照常脱敏；二进制（ico/png 等）原样字节复制。
  *
  * 跑法：node tools/build-publish.mjs
  * 退出码：0 成功；1 复检不过 / 复制失败；2 有文件因脱敏失败被丢弃（见输出）
@@ -24,7 +25,7 @@ const OUT = path.join(PARENT, 'publish', 'molly-qq-whale')
 
 /* ─────────────────────────── 1. 白名单 ─────────────────────────── */
 
-/** 目录递归复制（白名单） */
+/** 目录复制白名单：[源, 目标, 是否递归]。目录不存在就静默跳过（图还没放的时候不许报错） */
 const DIRS = [
   ['plugin/dsh-qq-whale/lib', 'plugin/dsh-qq-whale/lib'],
   ['plugin/dsh-qq-whale/assets', 'plugin/dsh-qq-whale/assets'],
@@ -35,11 +36,20 @@ const DIRS = [
    * 这条是补的缺口：第一次 build 时忘了加，publish 副本里没有 dsh-qq-pest/。
    */
   ['plugin/dsh-qq-pest/lib', 'plugin/dsh-qq-pest/lib'],
+  /*
+   * README 配图（2026-10-21）：publish-assets/assets/ 里放 README 引用的 SVG 等，
+   * 递归复制到副本根 assets/，GitHub 上的 ![](assets/xxx.svg) 才能显示。
+   * 目录不存在时静默跳过；SVG 是文本，照样走下面的脱敏双闸。
+   */
+  ['publish-assets/assets', 'assets', true],
 ]
 
 /** 单文件复制（源 → 目标） */
 const FILES = [
   ['plugin/dsh-qq-whale/package.json', 'plugin/dsh-qq-whale/package.json'],
+  // 插件自带的挂载补丁：package.json 的 dsh.bundle.patch 指向它，
+  // 缺了它「按仓库装插件」只装代码、不挂载（2026-10-21 补进白名单）
+  ['plugin/dsh-qq-whale/cordis.patch.yml', 'plugin/dsh-qq-whale/cordis.patch.yml'],
   // pest 独立包的三份清单（lib/ 由 DIRS 递归带走）
   ['plugin/dsh-qq-pest/package.json', 'plugin/dsh-qq-pest/package.json'],
   ['plugin/dsh-qq-pest/cordis.patch.yml', 'plugin/dsh-qq-pest/cordis.patch.yml'],
@@ -66,6 +76,9 @@ const FILES = [
   ['tools/build-exe.mjs', 'tools/build-exe.mjs'],
   ['tools/scan-secrets.mjs', 'tools/scan-secrets.mjs'],
   ['tools/build-publish.mjs', 'tools/build-publish.mjs'],
+  // README 顶部主图：assets/ 走 DIRS 递归也能带走，这里再显式列一次保证主图一定在；
+  // copyFile 对同一「源 → 目标」去重，不会重复计数
+  ['publish-assets/assets/hero.svg', 'assets/hero.svg'],
 ]
 
 /** 文档白名单：只发「讲怎么装、怎么用」的，运维流水账一律不发 */
@@ -280,7 +293,7 @@ const CORE_EXAMPLE = `# 这是示例人设，请写你自己的
 `
 
 const CONFIG_EXAMPLE = {
-  $comment: '示例配置：复制成 config.local.json 再填自己的值。所有 ${...} 都需要替换。',
+  $comment: '示例：只展示字段形状。真正生效的配置写在 DSH profile 的 cordis.patch.yml 里（模板见 config/cordis.patch.example.yml）；本文件不会被插件读取。',
   napcat: {
     baseUrl: 'http://127.0.0.1:6099',
     token: '${NAPCAT_TOKEN}',
@@ -317,7 +330,15 @@ const CORDIS_EXAMPLE = `# cordis.patch.yml 示例（节选）
         commandEnabled: true
         commandPrefixes: ['命令 ']
         commandGroups: ['666666666']
+        # 模型后端：wbai（默认，直连 WorkBuddy 免费额度）| wb-proxy（本地 8788 网关）
+        # | dsh（走 DSH 宿主里配好的 provider；接自己的 API 就用这个）
         modelBackend: wbai
+        # 只有 modelBackend=dsh 时下面两项才生效；用 wbai / wb-proxy 可以删掉
+        provider: '\${PROVIDER}'
+        model: '\${MODEL}'
+        # 公共镜像里路径一律留占位符，复制后换成你自己的绝对路径
+        dataDir: '\${WORKSPACE}/qq-whale'
+        workSandboxDir: '\${WORKSPACE}/qq-work'
         memoryDir: '\${MOLLY_ROOT}/data/qq-whale/memory'
         stickerDir: '\${MOLLY_ROOT}/data/qq-whale/stickers'
         personaDir: '\${MOLLY_ROOT}/plugin/dsh-qq-whale/persona'
@@ -391,6 +412,52 @@ let copied = 0
 let bytes = 0
 const dropped = []
 const noteRedacted = []
+const convertedEnc = []
+const binaryCopied = []
+// 同一「源 → 目标」只复制一次：assets/hero.svg 既在 DIRS 递归里又在 FILES 里，
+// 不去重的话文件数/体积会重复计数，脱敏也会白跑一遍。
+const copiedPairs = new Set()
+
+/* ───────────── 复制引擎：按内容判编码（文本才脱敏，二进制原样复制） ───────────── */
+
+/** 二进制嗅探窗口（前 4 KB），和 verify() 判二进制的窗口保持一致 */
+const BINARY_SNIFF = 4096
+
+/**
+ * 按 BOM 判源文件编码，返回 { enc, bom }，enc ∈ 'utf8' | 'utf16le' | 'utf16be' | null（无 BOM）。
+ *
+ * 为什么要有这一步：publish-assets/CONTRIBUTING.md 之前是记事本存的 UTF-16LE + BOM，
+ * 旧 copyFile 用 readFileSync(src,'utf8') 读 → 每个字节都变成 U+FFFD → 发布副本里的
+ * CONTRIBUTING.md 全是乱码，而且这份乱码已经 commit 并推上 GitHub 了（2026-10-21 修）。
+ */
+function detectEncoding(buf) {
+  if (buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) return { enc: 'utf8', bom: 3 }
+  if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) return { enc: 'utf16le', bom: 2 }
+  if (buf.length >= 2 && buf[0] === 0xfe && buf[1] === 0xff) return { enc: 'utf16be', bom: 2 }
+  return { enc: null, bom: 0 }
+}
+
+/**
+ * 读源文件：返回 { kind:'text', enc, text } 或 { kind:'binary' }。
+ * 判定顺序：BOM → 无 BOM 且前 4 KB 含 NUL 即二进制 → 其余按 UTF-8。
+ * 二进制绝不能在这里解成字符串：字符串化会把字节变成 U+FFFD，复制出去就是坏文件
+ * （发布副本里的 console/molly.ico 就这么从 95,684 B 变成 171,942 B 的）。
+ * 注意：UTF-16 解出来的文本**仍要**过 copyFile 里的 sanitize + verifyText，不许绕过脱敏。
+ */
+function readSource(rel) {
+  const buf = fs.readFileSync(path.join(SRC, rel))
+  const { enc, bom } = detectEncoding(buf)
+  if (enc === 'utf16le') return { kind: 'text', enc, text: buf.subarray(bom).toString('utf16le') }
+  if (enc === 'utf16be') {
+    // Node 没有 utf16be 解码器：先把 16 位字节交换，再按 UTF-16LE 读
+    const body = Buffer.from(buf.subarray(bom, bom + ((buf.length - bom) & ~1)))
+    body.swap16()
+    return { kind: 'text', enc, text: body.toString('utf16le') }
+  }
+  if (enc === 'utf8') return { kind: 'text', enc, bom, text: buf.subarray(bom).toString('utf8') }
+  if (buf.subarray(0, BINARY_SNIFF).includes(0)) return { kind: 'binary', enc: null }
+  return { kind: 'text', enc: null, text: buf.toString('utf8') }
+}
 
 function put(rel, content, { sanitizeIt = true } = {}) {
   const dst = path.join(OUT, rel)
@@ -402,19 +469,40 @@ function put(rel, content, { sanitizeIt = true } = {}) {
 }
 
 function copyFile(rel, dstRel = rel) {
+  const pairKey = `${rel}\u0000${dstRel}`
+  if (copiedPairs.has(pairKey)) return
+  copiedPairs.add(pairKey)
   const src = path.join(SRC, rel)
   if (!fs.existsSync(src)) {
     dropped.push(`${rel}（源不存在）`)
     return
   }
-  let text
+  let source
   try {
-    text = fs.readFileSync(src, 'utf8')
+    source = readSource(rel)
   } catch {
     dropped.push(`${rel}（读不出，按二进制跳过）`)
     return
   }
-  let cleaned = sanitize(text)
+  const dst = path.join(OUT, dstRel)
+  fs.mkdirSync(path.dirname(dst), { recursive: true })
+
+  // 二进制：原样 byte-copy，**不进 sanitize / verifyText**（字符串处理会读坏字节）
+  if (source.kind === 'binary') {
+    try {
+      fs.copyFileSync(src, dst)
+    } catch {
+      dropped.push(`${rel}（二进制复制失败）`)
+      return
+    }
+    binaryCopied.push(rel)
+    copied += 1
+    bytes += fs.statSync(dst).size
+    return
+  }
+
+  // 文本：UTF-16 等源文件解码后照样走「替换 → 复检 → <REDACTED> 兜底」，脱敏一步不落
+  let cleaned = sanitize(source.text)
   // 兜底：脱敏后仍命中的，就地替换成 <REDACTED>（宁可让这个常量变占位，也不发真值）
   const first = verifyText(rel, cleaned)
   const redacted = []
@@ -430,21 +518,46 @@ function copyFile(rel, dstRel = rel) {
     return
   }
   if (redacted.length) noteRedacted.push(rel)
-  const dst = path.join(OUT, dstRel)
-  fs.mkdirSync(path.dirname(dst), { recursive: true })
-  fs.writeFileSync(dst, cleaned, 'utf8')
+  // PS1 必须保住 BOM：Windows PowerShell 5.1 读「无 BOM 的 UTF-8」会按 ANSI/GBK 解码，
+  // 中文注释/字符串全变乱码。这 4 个 .ps1 是被 powershell.exe -File 调用的，所以
+  // 「源带 UTF-8 BOM 且目标扩展名是 .ps1」时把 BOM 写回去；其余文本（md/json/mjs…）照旧去 BOM。
+  const keepBom = source.bom === 3 && /\.ps1$/i.test(dstRel)
+  const outText = keepBom ? '\uFEFF' + cleaned : cleaned
+  fs.writeFileSync(dst, outText, 'utf8')
   copied += 1
-  bytes += Buffer.byteLength(cleaned, 'utf8')
+  bytes += Buffer.byteLength(outText, 'utf8')
+  if (source.enc && source.enc !== 'utf8') convertedEnc.push(`${rel}（${source.enc} → UTF-8）`)
+}
+
+/** 递归复制一个白名单子目录（发布资源用）；.bak-* / *.log 的跳过规则和 DIRS 一致 */
+function copyDirRecursive(fromRel, toRel) {
+  for (const e of fs.readdirSync(path.join(SRC, fromRel), { withFileTypes: true })) {
+    const rel = `${fromRel}/${e.name}`
+    const dstRel = `${toRel}/${e.name}`
+    if (e.isDirectory()) {
+      copyDirRecursive(rel, dstRel)
+      continue
+    }
+    if (!e.isFile()) continue
+    // 下划线开头 = 本地预览/临时文件（如 assets/_preview.html、_preview.png），不随包发布
+    if (e.name.startsWith('_')) continue
+    if (/\.bak-|\.log$/i.test(e.name)) continue
+    copyFile(rel, dstRel)
+  }
 }
 
 console.log('① 白名单复制…')
-for (const [from] of DIRS) {
+for (const [from, to = from, recursive = false] of DIRS) {
   const abs = path.join(SRC, from)
-  if (!fs.existsSync(abs)) continue
+  if (!fs.existsSync(abs)) continue // 不存在就静默跳过（assets 目录可能还没放图）
+  if (recursive) {
+    copyDirRecursive(from, to)
+    continue
+  }
   for (const e of fs.readdirSync(abs, { withFileTypes: true })) {
     if (!e.isFile()) continue
     if (/\.bak-|\.log$/i.test(e.name)) continue
-    copyFile(`${from}/${e.name}`, `${from}/${e.name}`)
+    copyFile(`${from}/${e.name}`, `${to}/${e.name}`)
   }
 }
 for (const [from, to] of FILES) copyFile(from, to)
@@ -452,6 +565,11 @@ for (const d of DOCS) copyFile(`docs/${d}`, `docs/${d}`)
 for (const e of fs.readdirSync(path.join(SRC, 'tools'), { withFileTypes: true })) {
   if (!e.isFile() || !TEST_GLOB.test(e.name)) continue
   copyFile(`tools/${e.name}`, `tools/${e.name}`)
+}
+if (convertedEnc.length) console.log(`   · 编码转换：${convertedEnc.length} 个（${convertedEnc.join('、')}）`)
+if (binaryCopied.length) {
+  const head = binaryCopied.slice(0, 6).join('、')
+  console.log(`   · 二进制原样复制：${binaryCopied.length} 个（${head}${binaryCopied.length > 6 ? ' …' : ''}）`)
 }
 
 console.log('② 生成 persona / 配置 / 记忆示例…')
@@ -532,7 +650,7 @@ ${noteRedacted.length ? noteRedacted.map((d) => `- ${d}`).join('\n') : '（无�
 ## 你要做的
 
 1. \`git init\` 后自己推；本脚本不执行任何 git 写操作。
-2. 复制 \`config/config.example.json\` → \`config.local.json\`，填自己的 token。
+2. 配置写在你 DSH profile 的 \`cordis.patch.yml\`（参考 \`config/cordis.patch.example.yml\`）；\`config.example.json\` 只是字段形状示例，插件不读它。
 3. 写自己的 \`persona/core.md\`（参考 \`core.example.md\` 的结构）。
 4. 首次运行前跑一次 \`node tools/scan-secrets.mjs\` 自查。
 `

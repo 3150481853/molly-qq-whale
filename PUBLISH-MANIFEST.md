@@ -2,9 +2,9 @@
 
 > 本副本由 `tools/build-publish.mjs` 生成，**勿手改**；要改就改源仓库再重新生成。
 
-- 生成时间：2026-10-21T11:46:46.608Z
-- 文件数：**130**
-- 总体积：**2.19 MB**
+- 生成时间：2026-10-21T11:59:19.654Z
+- 文件数：**132**
+- 总体积：**2.13 MB**
 - 脱敏复检：**命中 0**
 
 ## 顶层结构
@@ -50,6 +50,6 @@
 ## 你要做的
 
 1. `git init` 后自己推；本脚本不执行任何 git 写操作。
-2. 复制 `config/config.example.json` → `config.local.json`，填自己的 token。
+2. 配置写在你 DSH profile 的 `cordis.patch.yml`（参考 `config/cordis.patch.example.yml`）；`config.example.json` 只是字段形状示例，插件不读它。
 3. 写自己的 `persona/core.md`（参考 `core.example.md` 的结构）。
 4. 首次运行前跑一次 `node tools/scan-secrets.mjs` 自查。

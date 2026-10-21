@@ -2,16 +2,10 @@
 
 <img src="assets/hero.svg" width="880" alt="Molly QQ Whale">
 
-**把一只会记事的鲸鱼接进 QQ。**
-
 基于 **DeepSeek Harness** 的 QQ 通道插件：稳定的人设、长期记忆、表情包习惯，
 以及一个能看懂她此刻在干什么的控制台。
 
-[![license](https://img.shields.io/badge/license-MIT-1aae39?style=flat-square)](LICENSE)
-[![node](https://img.shields.io/badge/node-22%2B-1aae39?style=flat-square)](https://nodejs.org)
-[![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0075de?style=flat-square)](#环境要求)
-[![host](https://img.shields.io/badge/host-DeepSeek%20Harness-5645d4?style=flat-square)](#环境要求)
-[![QQ](https://img.shields.io/badge/QQ-OneBot%2011-0075de?style=flat-square)](https://github.com/NapNeko/NapCatQQ)
+[![license](https://img.shields.io/badge/license-MIT-1aae39?style=flat-square)](LICENSE) [![node](https://img.shields.io/badge/node-22%2B-1aae39?style=flat-square)](https://nodejs.org) [![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0075de?style=flat-square)](#环境要求) [![host](https://img.shields.io/badge/host-DeepSeek%20Harness-5645d4?style=flat-square)](#环境要求) [![QQ](https://img.shields.io/badge/QQ-OneBot%2011-0075de?style=flat-square)](https://github.com/NapNeko/NapCatQQ)
 
 </div>
 
@@ -86,11 +80,12 @@ flowchart LR
 
 ## 三个闭环
 
-| 闭环 | 怎么转起来 | 边界 |
-|:--|:--|:--|
-| **记忆** | 规则层先抓「我叫 / 我喜欢 / 我住在 / 我养了…」，模型层再按批抽；进库前过质量闸门，没把握的进「待核实」 | 不全存；条数上限可配；控制台里能删、能改、能审 |
-| **表情** | 群里别人发的图自动入库（体积 + 每日配额双重限制），轮到她就按语境挑一张 | 学来的图有上限；觉得不像她会用的，控制台里删掉 |
-| **自愈** | 掉线 30 秒重连；群名片被改成「（在想…）」会自己撕回去；积分额度状态落盘，重启不丢 | 只修复自己造成的状态，不碰别人的名片 |
+- **记忆** —— 规则层先抓「我叫 / 我喜欢 / 我住在 / 我养了…」，模型层再按批抽；进库前过质量闸门，没把握的先进「待核实」。
+  边界：不全存；条数上限可配；控制台里能删、能改、能审。
+- **表情** —— 群里别人发的图自动入库（体积 + 每日配额双重限制），轮到她就按语境挑一张。
+  边界：学来的图有上限；觉得不像她会用的，控制台里删掉。
+- **自愈** —— 掉线 30 秒重连；群名片被改成「（在想…）」会自己撕回去；积分额度状态落盘，重启不丢。
+  边界：只修复自己造成的状态，不碰别人的名片。
 
 ## 环境要求
 

@@ -1741,6 +1741,121 @@ export class WebWidget {
     })
 
     /*
+     * POST /dsh-qq-whale/qzone/list —— 读 QQ 空间说说 / 好友动态（只读）。
+     *
+     * body: { targetUin?: "123456", count?: 5, feeds?: true }
+     *   feeds=true 时读好友动态流；否则读指定账号（默认自己）的说说列表。
+     */
+    add({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/qzone/list`,
+      ...wrap(async (req, res) => {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          return
+        }
+        const raw = await readBody(req)
+        let body
+        try {
+          body = JSON.parse(raw || '{}')
+        } catch {
+          sendJson(res, 400, { ok: false, error: 'bad json' })
+          return
+        }
+        const e = this.engineRef()
+        if (!e?.qzoneList) {
+          sendJson(res, 503, { ok: false, error: 'engine 还没就绪' })
+          return
+        }
+        const count = Number(body?.count || 5)
+        const targetUin = String(body?.targetUin || '').trim()
+        const out = body?.feeds ? await e.qzoneFeeds({ count }) : await e.qzoneList({ targetUin, count })
+        sendJson(res, 200, out)
+      }),
+    })
+
+    /*
+     * POST /dsh-qq-whale/qzone/draft —— 起草一条说说（**只落盘，不发送**）。
+     *
+     * body: { text: "...", images?: ["http://...", "base64://...", "file://..."] }
+     *
+     * 用户要求（m02658/m02682）：空间对外可见、吃风控，所以必须人工确认后才发。
+     * 这里只产草稿 + 预览；真发是 qzone/publish。
+     */
+    add({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/qzone/draft`,
+      ...wrap(async (req, res) => {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          return
+        }
+        const raw = await readBody(req)
+        let body
+        try {
+          body = JSON.parse(raw || '{}')
+        } catch {
+          sendJson(res, 400, { ok: false, error: 'bad json' })
+          return
+        }
+        const e = this.engineRef()
+        if (!e?.qzoneDraft) {
+          sendJson(res, 503, { ok: false, error: 'engine 还没就绪' })
+          return
+        }
+        const out = await e.qzoneDraft({ text: body?.text, images: body?.images })
+        sendJson(res, out.ok ? 200 : 400, out)
+      }),
+    })
+
+    /*
+     * POST /dsh-qq-whale/qzone/publish —— 发布草稿。**必须 confirm:true**。
+     *
+     * body: { confirm: true }
+     */
+    add({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/qzone/publish`,
+      ...wrap(async (req, res) => {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          return
+        }
+        const raw = await readBody(req)
+        let body
+        try {
+          body = JSON.parse(raw || '{}')
+        } catch {
+          sendJson(res, 400, { ok: false, error: 'bad json' })
+          return
+        }
+        const e = this.engineRef()
+        if (!e?.qzonePublishDraft) {
+          sendJson(res, 503, { ok: false, error: 'engine 还没就绪' })
+          return
+        }
+        const out = await e.qzonePublishDraft({ confirm: body?.confirm === true })
+        sendJson(res, out.ok ? 200 : 400, out)
+      }),
+    })
+
+    /*
+     * POST /dsh-qq-whale/qzone/draft/status —— 看当前草稿（只读）。
+     */
+    add({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/qzone/draft/status`,
+      ...wrap(async (req, res) => {
+        const e = this.engineRef()
+        if (!e?.qzoneDraftStatus) {
+          sendJson(res, 503, { ok: false, error: 'engine 还没就绪' })
+          return
+        }
+        sendJson(res, 200, await e.qzoneDraftStatus())
+      }),
+    })
+
+    /*
      * POST /dsh-qq-whale/work/run —— 真跑一条指令，把结果原样吐出来。
      *
      * 这是给排查和自测用的，不是给日常用的：

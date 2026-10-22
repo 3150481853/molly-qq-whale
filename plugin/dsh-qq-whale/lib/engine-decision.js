@@ -17,7 +17,7 @@
 
 /** 她的所有称呼（昵称 / 群名片基础名 / QQ 号），去重后返回。 */
 export function selfNames(deps) {
-  const { selfId, nickname, groupCardBases } = deps
+  const { selfId, nickname, groupCardBases, selfNickname, config } = deps
   const names = []
   const push = (v) => {
     const s = String(v || '').trim()
@@ -25,6 +25,15 @@ export function selfNames(deps) {
   }
   push(selfId) // QQ 号：最稳，但客户端 @ 时通常显示名字
   push(nickname) // 昵称
+  /*
+   * 2026-10-22 真机：SnowLuma 刚起来时 plugin 已连上、但 get_login_info 还没就绪，
+   * `client.self.nickname` 空了一整轮（/state.bot.nickname 显示纯号码），
+   * 于是「Molly在吗」识别不到叫名字、只能靠问句分。
+   * 这里补两个来源：显式传入的 selfNickname、配置里的 nickname，最后兜底 Molly。
+   */
+  push(selfNickname)
+  push(config?.nickname)
+  push('Molly')
   // 群名片：她自己的名片带「（在想…）」这类实时状态，基础名也要认
   try {
     for (const base of groupCardBases?.values?.() || []) push(base)

@@ -55,7 +55,7 @@ const {
   shouldTapEmoji,
   pickActivity,
 } = await import(sub('./aliveness.js'))
-const { normalizeMessage, buildMessage, fetchQuoted } = await import(sub('./onebot.js'))
+const { normalizeMessage, buildMessage, fetchQuoted, fetchForward } = await import(sub('./onebot.js'))
 const { mergeReportTexts, coreText, similarity, containment } = await import(sub('./dedupe.js'))
 // 出站 markdown 清洗（P6）。persona.js 的 splitReply 已经挂了这个，
 // 但下面三条直发路径绕过了 splitReply，得自己洗一遍。
@@ -707,6 +707,20 @@ export class ChatEngine {
   }
 
   /**
+   * 我自己的昵称：客户端上报的优先，空则用配置，最后兜底 'Molly'。
+   *
+   * 2026-10-22 真机：SnowLuma 刚起来时 plugin 连上了但 get_login_info 还没就绪，
+   * self.nickname 空了一整轮，`/state.bot.nickname` 显示纯号码，
+   * `callsMyName` 拿不到「Molly」→「Molly在吗」只能靠问句分命中。
+   * onebot.js 那边已加心跳补查；这里是双保险。
+   */
+  selfNickname() {
+    const fromClient = String(this.client?.self?.nickname || '').trim()
+    if (fromClient) return fromClient
+    return String(this.config?.nickname || 'Molly').trim()
+  }
+
+  /**
    * 文本里是不是在 @ 我。给 decideScene 兜底用。
    *
    * 只认「@ + 我的某个名字」这种形状，不做模糊匹配——群里有人叫
@@ -717,7 +731,9 @@ export class ChatEngine {
     // Stage 3 Step 2：规则在 engine-decision.js，这里只注入状态
     return engineDecision.looksLikeAtMe(text, {
       selfId: this.selfId,
-      nickname: this.client?.self?.nickname,
+      // 「名字被叫」判定要用（callsMyName）：SnowLuma 刚起来时 self.nickname
+      // 可能为空，退化到配置昵称/默认值 Molly，否则「Molly在吗」识别不到。
+      nickname: this.selfNickname(),
       groupCardBases: this.groupCardBase,
     })
   }
@@ -744,7 +760,9 @@ export class ChatEngine {
       config: this.config,
       // 「名字被叫」判定要用（callsMyName）
       selfId: this.selfId,
-      nickname: this.client?.self?.nickname,
+      // 「名字被叫」判定要用（callsMyName）：SnowLuma 刚起来时 self.nickname
+      // 可能为空，退化到配置昵称/默认值 Molly，否则「Molly在吗」识别不到。
+      nickname: this.selfNickname(),
       groupCardBases: this.groupCardBase,
     })
   }
@@ -1393,6 +1411,33 @@ export class ChatEngine {
         norm.images.push(...q.images)
       }
     }
+    /*
+     * P3：合并转发的聊天记录要读出来。
+     *
+     * OneBot 的 forward 段只给 id，正文里只有一个 '[聊天记录]'，模型完全看不见
+     * 转了什么。fetchForward 自带 4 秒超时 + 降级文案、永远不抛；每个 forward 段
+     * 单独取，最多取 2 段（多了会慢，而且很少有人一条消息转两段）。
+     */
+    try {
+      const forwardSegs = Array.isArray(norm.segments)
+        ? norm.segments.filter((s) => s && s.type === 'forward' && s.data && (s.data.id || s.data.resid))
+        : []
+      if (forwardSegs.length > 0) {
+        const texts = []
+        for (const seg of forwardSegs.slice(0, 2)) {
+          const fid = seg.data.id || seg.data.resid
+          const f = await fetchForward(this.client, fid)
+          if (f && f.ok) texts.push(f.text)
+        }
+        if (texts.length > 0) {
+          const body = String(norm.text || '').replace(/\[聊天记录\]/g, '').trim()
+          norm.text = [...texts, body].filter(Boolean).join(' ')
+          norm.forwarded = texts.length
+        }
+      }
+    } catch (err) {
+      this.logger('debug', `转发消息解析失败: ${err?.message || err}`)
+    }
     if (!norm.text && norm.images.length === 0) return
 
     const scene = this.decideScene(ev, norm)
@@ -1755,6 +1800,190 @@ export class ChatEngine {
     this._lastSprinkleAt.set(key, this.now())
     this.stats.sprinkled++
     this.logger('debug', `撒图：补了一张「${query}」（${scene}）`)
+  }
+
+  /* ———————————————— QQ 空间（P3，SnowLuma 扩展动作） ————————————————
+   *
+   * 用户需求（m02658 / m02682）：能读说说/好友动态；发说说**不自动发**，
+   * 必须先落草稿、人工确认后才真发（空间对外可见 + 吃风控）。
+   *
+   * 读：get_qzone_msg_list / get_qzone_msg_detail / get_qzone_feeds
+   * 写：send_qzone_msg → 只由 qzonePublishDraft({confirm:true}) 调用
+   */
+
+  /** 草稿文件路径（和 memory/budget 同放 dataDir）。 */
+  qzoneDraftPath() {
+    const dir = this.config.dataDir || this.config.memoryDir || '.'
+    return path.join(dir, 'qzone-draft.json')
+  }
+
+  /** 把一条说说洗成可读摘要（空间正文带 <img>/[em] 表情，必须清洗）。 */
+  qzoneMsgDigest(msg) {
+    const raw = String(msg?.content ?? '')
+    const text = raw
+      .replace(/<[^>]+>/g, '')
+      .replace(/\[em\][^[]*\[\/em\]/gi, '')
+      .replace(/\[em\]e\d+\[\/em\]/gi, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+    const t = Number(msg?.time)
+    const time = t > 0 ? new Date(t * 1000).toLocaleString('sv-SE', { hour12: false }) : ''
+    return {
+      tid: String(msg?.tid ?? ''),
+      time,
+      text: text.length > 160 ? `${text.slice(0, 159)}…` : text,
+      images: Array.isArray(msg?.images) ? msg.images.length : 0,
+      likes: Number(msg?.like_num ?? msg?.likenum ?? 0) || 0,
+      comments: Number(msg?.comment_num ?? 0) || 0,
+      isPrivate: Boolean(msg?.is_private),
+    }
+  }
+
+  /** 把好友动态的一条洗成摘要（feeds 的正文在 html 里）。 */
+  qzoneFeedDigest(item) {
+    const raw = String(item?.html ?? item?.content ?? '')
+    const text = raw
+      .replace(/<[^>]+>/g, '')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/\s+/g, ' ')
+      .trim()
+    const t = Number(item?.time)
+    const time = t > 0 ? new Date(t * 1000).toLocaleString('sv-SE', { hour12: false }) : ''
+    return {
+      uin: String(item?.uin ?? ''),
+      nickname: String(item?.nickname ?? ''),
+      time,
+      text: text.length > 160 ? `${text.slice(0, 159)}…` : text,
+    }
+  }
+
+  /** 读 QQ 空间说说列表（默认自己空间）。 */
+  async qzoneList({ targetUin = '', count = 5 } = {}) {
+    const n = Math.max(1, Math.min(20, Number(count) || 5))
+    try {
+      const data = await this.client.getQzoneMsgList(targetUin, n, 0)
+      const list = Array.isArray(data?.msglist) ? data.msglist : Array.isArray(data) ? data : []
+      const items = list.slice(0, n).map((m) => this.qzoneMsgDigest(m))
+      const total = Number(data?.total ?? items.length) || items.length
+      const who = targetUin ? `QQ${targetUin} 的` : '我自己'
+      const lines = items.map((it, i) => {
+        const bits = [`${i + 1}. ${it.time || '（时间未知）'} ${it.text || '[无文字]'}`]
+        if (it.images) bits.push(`（${it.images} 张图）`)
+        if (it.likes) bits.push(`赞${it.likes}`)
+        if (it.comments) bits.push(`评${it.comments}`)
+        return bits.join('')
+      })
+      const text = items.length === 0
+        ? `${who}空间里最近没有说说。`
+        : `${who}空间共有 ${total} 条说说，最近 ${items.length} 条：\n${lines.join('\n')}`
+      return { ok: true, total, items, text }
+    } catch (err) {
+      const msg = String(err?.message || err)
+      /*
+       * SnowLuma 的一个怪癖：自己空间没有任何说说时，QZone 接口返回
+       * `{"msglist":null,...}`，SnowLuma 把它当「响应结构异常」直接抛错。
+       * 这其实是正常情况（她还没发过说说），不该显示成"读失败"。
+       */
+      if (/响应结构异常/.test(msg) && /"msglist":\s*null/.test(msg)) {
+        const who = targetUin ? `QQ${targetUin} 的` : '我自己'
+        return { ok: true, total: 0, items: [], text: `${who}空间里还没有说说。` }
+      }
+      return { ok: false, total: 0, items: [], text: '读空间失败了（可能是登录态/权限问题）。', error: msg }
+    }
+  }
+
+  /** 读 QQ 空间一条说说的详情（含评论），按列表序号 pos 取。 */
+  async qzoneDetail({ targetUin = '', pos = 0 } = {}) {
+    try {
+      const data = await this.client.getQzoneMsgDetail(targetUin, pos)
+      const items = Array.isArray(data?.msglist) ? data.msglist : []
+      if (items.length === 0) return { ok: false, text: '这条说说取不到详情。' }
+      const m = items[0]
+      const digest = this.qzoneMsgDigest(m)
+      const comments = Array.isArray(m?.commentlist) ? m.commentlist.slice(0, 10) : []
+      const lines = comments.map((c) => `- ${String(c?.name || c?.uin || '某人')}：${String(c?.content || '').slice(0, 100)}`)
+      return { ok: true, item: digest, comments: comments.length, text: `${digest.time} ${digest.text}\n${lines.join('\n')}`.trim() }
+    } catch (err) {
+      return { ok: false, text: '读说说详情失败了。', error: String(err?.message || err) }
+    }
+  }
+
+  /** 读好友动态流。 */
+  async qzoneFeeds({ count = 5 } = {}) {
+    const n = Math.max(1, Math.min(20, Number(count) || 5))
+    try {
+      const data = await this.client.getQzoneFeeds(n, 1)
+      const list = Array.isArray(data?.feeds) ? data.feeds : Array.isArray(data?.msglist) ? data.msglist : []
+      const items = list.slice(0, n).map((it) => this.qzoneFeedDigest(it))
+      const text = items.length === 0
+        ? '好友动态暂时是空的。'
+        : `好友动态最近 ${items.length} 条：\n${items.map((it, i) => `${i + 1}. ${it.nickname || it.uin} ${it.time || ''} ${it.text || ''}`).join('\n')}`
+      return { ok: true, items, text }
+    } catch (err) {
+      return { ok: false, items: [], text: '读好友动态失败了。', error: String(err?.message || err) }
+    }
+  }
+
+  /**
+   * 起草一条空间说说（**不发送**）。
+   *
+   * 用户明确要求：发之前先出草稿、人工确认。所以这里只落盘 + 返回预览，
+   * 真正的发送在 qzonePublishDraft({ confirm: true })。
+   */
+  async qzoneDraft({ text = '', images = [] } = {}) {
+    const content = String(text || '').trim()
+    if (!content) return { ok: false, error: '正文是空的' }
+    const draft = {
+      text: content,
+      images: (Array.isArray(images) ? images : []).map(String).slice(0, 9),
+      at: new Date(this.now()).toLocaleString('sv-SE', { hour12: false }),
+    }
+    try {
+      const fs = await import('node:fs/promises')
+      await fs.mkdir(path.dirname(this.qzoneDraftPath()), { recursive: true })
+      await fs.writeFile(this.qzoneDraftPath(), JSON.stringify(draft, null, 2), 'utf8')
+      const preview = `【空间说说草稿】\n${draft.text}\n${draft.images.length ? `（${draft.images.length} 张图）` : ''}\n————\n确认后调用 POST /dsh-qq-whale/qzone/publish {"confirm":true} 才会真的发出去。`
+      return { ok: true, draft, path: this.qzoneDraftPath(), preview }
+    } catch (err) {
+      return { ok: false, error: String(err?.message || err) }
+    }
+  }
+
+  /** 查看当前草稿。 */
+  async qzoneDraftStatus() {
+    try {
+      const fs = await import('node:fs/promises')
+      const raw = await fs.readFile(this.qzoneDraftPath(), 'utf8')
+      const draft = JSON.parse(raw)
+      return { ok: true, draft }
+    } catch {
+      return { ok: true, draft: null }
+    }
+  }
+
+  /** 发布草稿。必须 confirm === true（防误发）；发完删除草稿。 */
+  async qzonePublishDraft({ confirm = false } = {}) {
+    if (confirm !== true) return { ok: false, error: '需要 confirm:true 才会真的发布' }
+    try {
+      const fs = await import('node:fs/promises')
+      let draft
+      try {
+        draft = JSON.parse(await fs.readFile(this.qzoneDraftPath(), 'utf8'))
+      } catch {
+        return { ok: false, error: '没有待发布的草稿（先调 /qzone/draft）' }
+      }
+      if (!String(draft?.text || '').trim()) return { ok: false, error: '草稿正文为空' }
+      const res = await this.client.sendQzoneMsg(draft.text, { images: draft.images || [], ugcRight: 1 })
+      await fs.unlink(this.qzoneDraftPath()).catch(() => {})
+      this.logger('info', `已发布空间说说：${String(draft.text).slice(0, 40)}`)
+      return { ok: true, result: res, text: draft.text }
+    } catch (err) {
+      return { ok: false, error: String(err?.message || err) }
+    }
   }
 
   /**

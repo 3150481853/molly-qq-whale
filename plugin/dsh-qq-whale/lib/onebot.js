@@ -342,6 +342,86 @@ export async function fetchQuoted(client, replyId) {
   }
 }
 
+/* ———————————————— 合并转发（P3，SnowLuma 扩展） ————————————————
+ *
+ * 用户需求（m02658 / m02682）：让她能看懂「你转发的那段聊天记录」。
+ *
+ * OneBot v11 标准的合并转发是一个 `forward` 段，只给一个 id，正文里只有一个
+ * `[聊天记录]`。要看到内容必须拿 id 去调 get_forward_msg（SnowLuma 与 NapCat
+ * 都有，SnowLuma 还额外支持 upload/send/forward 系列，但这里只做「读」）。
+ *
+ * 三条硬规矩与 fetchQuoted 一致：
+ *   1. 4 秒超时，取不到就取不到，绝不拖住回复；
+ *   2. 永远不抛异常（上层在消息主路径上）；
+ *   3. 总长截断 400 字、最多 8 个节点 —— 一条转发动辄几十条，全塞进去会把
+ *      真正的提问挤出上下文。
+ */
+
+/** 转发正文的总长度上限（字）。 */
+export const FORWARD_TEXT_MAX = 400
+
+/** get_forward_msg 的硬超时。 */
+export const FORWARD_TIMEOUT_MS = 4000
+
+/** 最多读取的节点数。 */
+export const FORWARD_NODE_MAX = 8
+
+/** 取不到时的统一降级文案。 */
+export const FORWARD_FAIL_TEXT = '[聊天记录：取不到内容]'
+
+/** 把转发节点里的一条消息压成一行纯文本。 */
+function forwardNodeBody(node) {
+  const raw = node?.message ?? node?.content ?? node?.raw_message ?? ''
+  try {
+    return quoteSegmentsToText(raw).replace(/\s+/g, ' ').trim()
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * 取回合并转发的聊天记录。
+ *
+ * @param {OneBotClient} client 已连接的客户端
+ * @param {string} forwardId forward 段的 data.id
+ * @returns {Promise<{ok:boolean, text:string, count:number}>}
+ *   text 永远可以直接拼到消息正文里用（失败时是降级文案）。
+ */
+export async function fetchForward(client, forwardId) {
+  const fail = { ok: false, text: FORWARD_FAIL_TEXT, count: 0 }
+  const id = String(forwardId ?? '').trim()
+  if (!id) return fail
+  if (!client || typeof client.call !== 'function') return fail
+
+  let data
+  try {
+    data = await client.call('get_forward_msg', { id }, FORWARD_TIMEOUT_MS)
+  } catch {
+    return fail
+  }
+
+  try {
+    const rawList = data?.messages ?? data?.nodes ?? data?.message
+    const list = Array.isArray(rawList) ? rawList : []
+    const lines = []
+    for (const node of list.slice(0, FORWARD_NODE_MAX)) {
+      const sender = node?.sender || {}
+      const uid = sender.user_id ?? node?.user_id
+      const name = String(sender.card || sender.nickname || node?.nickname || node?.name || '').trim()
+        || (uid ? `QQ${uid}` : '某人')
+      const body = forwardNodeBody(node)
+      if (!body) continue
+      lines.push(`@${name}：${body}`)
+    }
+    if (lines.length === 0) return fail
+    let text = `[聊天记录 ${list.length} 条 ${lines.join('；')}]`
+    if (text.length > FORWARD_TEXT_MAX) text = `${text.slice(0, FORWARD_TEXT_MAX - 1)}…`
+    return { ok: true, text, count: list.length }
+  } catch {
+    return fail
+  }
+}
+
 export class OneBotError extends Error {
   constructor(retcode, message, payload) {
     super(message)
@@ -461,15 +541,50 @@ export class OneBotClient {
           this.self = { userId: Number(info.user_id), nickname: String(info.nickname || '') }
           this.setState('online')
           this.logger('info', `bot 在线: ${this.self.nickname}(${this.self.userId})`)
+          // SnowLuma 刚起来时 get_login_info 可能只回 user_id 不回 nickname
+          // （会话还没 warmup 完）。昵称是「叫名字就回」判定的关键输入，
+          // 空着会导致「Molly在吗」识别不到。2.5 秒后补一次。
+          if (!this.self.nickname) this.scheduleSelfInfoRefresh(2500)
         } else {
           this.setState('online')
+          this.scheduleSelfInfoRefresh(3000)
         }
       })
       .catch((err) => {
         // 拿不到也不致命：可能是还没登录 QQ
         this.logger('warn', `get_login_info 失败（QQ 可能未登录）: ${err?.message || err}`)
         this.setState('online')
+        this.scheduleSelfInfoRefresh(5000)
       })
+  }
+
+  /**
+   * 补一次登录信息（昵称）。
+   *
+   * 触发场景：连上时 SnowLuma 的 OneBot 会话还没 warmup 完，get_login_info
+   * 只给了 user_id / 或直接失败；而心跳里我们只更新 userId、保留旧 nickname，
+   * 于是 self.nickname 永远空 → engine-decision.selfNames 拿不到「Molly」，
+   * 「Molly在吗」只能靠问句分命中。
+   *
+   * 节流：30 秒内最多一次；拿到昵称就停。
+   */
+  scheduleSelfInfoRefresh(delayMs = 3000) {
+    if (this.self?.nickname) return
+    const now = Date.now()
+    if (now - (this._lastSelfRefresh || 0) < 30000) return
+    this._lastSelfRefresh = now
+    setTimeout(() => {
+      if (!this.stopped && this.ws && this.ws.readyState === 1 && !this.self?.nickname) {
+        this.getLoginInfo()
+          .then((info) => {
+            if (info?.nickname) {
+              this.self = { userId: Number(info.user_id || this.self.userId), nickname: String(info.nickname) }
+              this.logger('info', `补到昵称: ${info.nickname}`)
+            }
+          })
+          .catch(() => {})
+      }
+    }, delayMs).unref?.()
   }
 
   handleMessage(e) {
@@ -502,6 +617,8 @@ export class OneBotClient {
         if (payload.status && payload.self_id) {
           this.self = { userId: Number(payload.self_id), nickname: this.self.nickname }
         }
+        // 昵称一直空着就借心跳补一次（30 秒节流，见 scheduleSelfInfoRefresh）
+        if (!this.self.nickname) this.scheduleSelfInfoRefresh(1000)
       }
       return
     }
@@ -667,6 +784,57 @@ export class OneBotClient {
 
   getRecentContact() {
     return this.call('get_recent_contact')
+  }
+
+  // ——— 合并转发（P3） ———
+
+  getForwardMsg(forwardId) {
+    return this.call('get_forward_msg', { id: String(forwardId) }, FORWARD_TIMEOUT_MS)
+  }
+
+  // ——— QQ 空间（P3，SnowLuma 自定义扩展动作） ———
+  // 读：get_qzone_msg_list / get_qzone_msg_detail / get_qzone_feeds
+  // 写：send_qzone_msg（发说说，支持图片数组）/ comment_qzone / like_qzone / unlike_qzone
+  // 参数名按 SnowLuma qzone.ts 的 schema：target_uin / pos / num / page_num / count / tid / content / images / ugc_right
+
+  getQzoneMsgList(targetUin = '', num = 5, pos = 0) {
+    const params = { num: Number(num) || 5, pos: Number(pos) || 0 }
+    if (targetUin) params.target_uin = quoteIdForApi(targetUin)
+    return this.call('get_qzone_msg_list', params, 8000)
+  }
+
+  getQzoneMsgDetail(targetUin = '', pos = 0) {
+    const params = { pos: Number(pos) || 0 }
+    if (targetUin) params.target_uin = quoteIdForApi(targetUin)
+    return this.call('get_qzone_msg_detail', params, 8000)
+  }
+
+  getQzoneFeeds(count = 5, pageNum = 1) {
+    return this.call('get_qzone_feeds', { count: Number(count) || 5, page_num: Number(pageNum) || 1 }, 8000)
+  }
+
+  sendQzoneMsg(content, { images = null, ugcRight = 1 } = {}) {
+    const params = { content: String(content ?? ''), ugc_right: Number(ugcRight) || 1 }
+    if (Array.isArray(images) && images.length > 0) params.images = images.map((x) => String(x))
+    return this.call('send_qzone_msg', params, 20000)
+  }
+
+  commentQzone(tid, content, targetUin = '') {
+    const params = { tid: String(tid), content: String(content ?? '') }
+    if (targetUin) params.target_uin = quoteIdForApi(targetUin)
+    return this.call('comment_qzone', params, 8000)
+  }
+
+  likeQzone(tid, targetUin = '') {
+    const params = { tid: String(tid) }
+    if (targetUin) params.target_uin = quoteIdForApi(targetUin)
+    return this.call('like_qzone', params, 8000)
+  }
+
+  unlikeQzone(tid, targetUin = '') {
+    const params = { tid: String(tid) }
+    if (targetUin) params.target_uin = quoteIdForApi(targetUin)
+    return this.call('unlike_qzone', params, 8000)
   }
 
   setGroupCard(groupId, userId, card) {

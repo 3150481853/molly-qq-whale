@@ -63,6 +63,21 @@ function scopeKey(scene, gid) {
   return gid ? `group:${gid}` : 'group'
 }
 
+/**
+ * 把控制台/接口传进来的 scope 归一成 scopeKey 的写法。
+ * 用户在页面上按提示填的是裸群号（例如 666666666），早期 addMute 原样存了裸号，
+ * 而 activeMute 找的是 group:<gid>，两边对不上 —— 静音显示已加、实际没拦住（用户 m04474 报障）。
+ */
+function normalizeScope(raw) {
+  const s = String(raw || '').trim()
+  if (!s) return ''
+  if (/^\d+$/.test(s)) return `group:${s}`
+  if (s === 'private') return 'private'
+  if (s === 'group') return 'group'
+  if (/^group:\d+$/.test(s)) return s
+  return ''
+}
+
 function cleanCaps(obj, base = {}) {
   const out = { ...base }
   if (!obj || typeof obj !== 'object') return out
@@ -194,7 +209,12 @@ export class SwitchBoard {
         temporaryMutes: Array.isArray(raw.temporaryMutes)
           ? raw.temporaryMutes
               .filter((m) => m && typeof m.scope === 'string' && Number(m.until) > 0)
-              .map((m) => ({ scope: m.scope, until: Number(m.until), note: String(m.note || '') }))
+              .map((m) => ({
+                scope: normalizeScope(m.scope) || m.scope,
+                until: Number(m.until),
+                note: String(m.note || ''),
+              }))
+              .filter((m) => m.scope)
           : [],
         audit: undefined,
       }
@@ -350,23 +370,30 @@ export class SwitchBoard {
     return { ok: true, group: g }
   }
 
-  /** 加临时静音；scope = 'group:<gid>' | 'private'。 */
+  /**
+   * 加临时静音；scope 接受 `private` / 裸群号 / `group` / `group:<gid>`（都会归一成 scopeKey 写法）。
+   */
   addMute(scope, minutes = 30, note = '') {
+    const key = normalizeScope(scope)
+    if (!key) throw new Error('scope 要填 private、群号或 group:<群号>')
     const until = Date.now() / 1000 + Math.max(1, Number(minutes) || 30) * 60
-    this.state.temporaryMutes = this.state.temporaryMutes.filter((m) => m.scope !== scope)
-    this.state.temporaryMutes.push({ scope, until, note: String(note || '') })
+    this.state.temporaryMutes = this.state.temporaryMutes
+      .filter((m) => m.scope !== key)
+    this.state.temporaryMutes.push({ scope: key, until, note: String(note || '') })
     this.save()
-    this.pushAudit({ path: `mute.${scope}`, oldValue: null, value: new Date(until * 1000).toLocaleString('sv-SE'), note: '临时静音' })
-    return { ok: true, scope, until }
+    this.pushAudit({ path: `mute.${key}`, oldValue: null, value: new Date(until * 1000).toLocaleString('sv-SE'), note: '临时静音' })
+    return { ok: true, scope: key, until }
   }
 
   removeMute(scope) {
+    const key = normalizeScope(scope)
+    if (!key) return { ok: false, error: 'scope 要填 private、群号或 group:<群号>' }
     const before = this.state.temporaryMutes.length
-    this.state.temporaryMutes = this.state.temporaryMutes.filter((m) => m.scope !== scope)
+    this.state.temporaryMutes = this.state.temporaryMutes.filter((m) => m.scope !== key)
     if (before === this.state.temporaryMutes.length) return { ok: false, error: '没有这条静音' }
     this.save()
-    this.pushAudit({ path: `unmute.${scope}`, oldValue: before, value: Math.max(0, before - 1) })
-    return { ok: true, scope }
+    this.pushAudit({ path: `unmute.${key}`, oldValue: before, value: Math.max(0, before - 1) })
+    return { ok: true, scope: key }
   }
 
   reset() {

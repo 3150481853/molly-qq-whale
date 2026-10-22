@@ -69,6 +69,9 @@ const engineDecision = await import(sub('./engine-decision.js'))
 // 发言开关（2026-10-22，用户 m03759/m03849）：控制台点一下立即生效，重启保持。
 // 状态落在 data/qq-whale/switches.json；旧 noLikeGroups 在构造时迁移成群级 like=false。
 const { SwitchBoard, sanitizeGroupText } = await import(sub('./switches.js'))
+// 语音（2026-10-22，用户 m04697/m04855）：把回复的一部分换成 edge-tts 合成的声音。
+// 生成失败/超时一律退回文字——语音是锦上添花，不能因为它把回复搞丢。
+const { VoiceMaker, cleanVoiceText } = await import(sub('./voice.js'))
 
 const SCENE_PRIVATE = 'private'
 const SCENE_MENTION = 'group_mention'
@@ -181,6 +184,24 @@ export class ChatEngine {
       noLikeGroups: config.noLikeGroups || [],
     })
     this.memory = new MemoryStore({ dir: config.memoryDir, logger })
+
+    /**
+     * 语音合成（2026-10-22，用户 m04697/m04855）。
+     *
+     * 只在「这次回复决定要转语音」时才会真的调 python，平时零开销；
+     * 合成结果按文本 + 音色参数做缓存，重复的短句不会反复调用。
+     * voiceEnabled === false 时整个对象都不建，后面 maybeVoice 直接跳过。
+     */
+    this.voice = config.voiceEnabled === false ? null : new VoiceMaker({
+      dir: path.join(config.dataDir || config.memoryDir, 'voice'),
+      logger,
+      voiceName: config.voiceName,
+      rate: config.voiceRate,
+      pitch: config.voicePitch,
+      timeoutMs: config.voiceTimeoutMs,
+      maxChars: config.voiceMaxChars,
+      maxKeep: config.voiceMaxKeep,
+    })
 
     /**
      * 待核实区（2026-10-19）：闸门拦下来的记忆放这里，等人在控制台过一眼。
@@ -1893,6 +1914,80 @@ export class ChatEngine {
     this.logger('debug', `撒图：补了一张「${query}」（${scene}）`)
   }
 
+  /* ———————————————— 语音（2026-10-22，用户 m04697/m04855） ————————————————
+   *
+   * 「让他能时不时发一句语音代替说话」。
+   *
+   * 设计约束：
+   *  1. **只在生成之后动手**：把已经决定要说的那句话转成语音，不改内容；
+   *  2. **只换单气泡**：多气泡回复中间插一条语音会让节奏很怪，只在 parts 恰好
+   *     一条文字时转换；表情包等其它段不动。
+   *  3. **失败一律退回文字**：没网、edge-tts 挂了、超时，都当没发生——语音是
+   *     锦上添花，不能因为它把回复搞丢。
+   *  4. 受 switches 的 voice 开关 + 全局概率 + 每会话冷却三重限制。
+   */
+
+  /**
+   * 条件满足时把 reply 的唯一文字段换成 voice 段。
+   * 不直接发送——仍由 deliver 统一发，历史/节流口径与普通回复一致。
+   */
+  async maybeVoice({ ev, scene, conv, reply, signal }) {
+    if (!this.voice) return
+    if (this.config.voiceEnabled === false) return
+    if (!reply || !Array.isArray(reply.parts) || reply.parts.length === 0) return
+    /*
+     * 2026-10-22 实测：真实回复经常被 splitReply 拆成 2~3 段（「在吗」都能拆 4 段），
+     * 而且模型爱自己在结尾 <sticker>得意</sticker>，只认单段纯文字会让语音永不触发。
+     *
+     * 放宽规则：
+     *   - 文字段合并成一条语音；
+     *   - 表情包段保留（语音说完再甩图，真人就是这么干的）；
+     *   - 出现 @/引用/其它类型段就整条跳过（@ 吃掉会漏点名，语义就坏了）。
+     */
+    const stickerParts = []
+    const textParts = []
+    for (const p of reply.parts) {
+      if (!p) return
+      if (p.type === 'text') textParts.push(String(p.text ?? ''))
+      else if (p.type === 'sticker') stickerParts.push(p)
+      else return
+    }
+    if (textParts.length === 0) return
+    if (!this.switches.allow('voice', { scene, gid: ev?.group_id })) return
+
+    const text = cleanVoiceText(textParts.join(''))
+    const maxChars = Number(this.config.voiceMaxChars ?? 42)
+    if (!text || text.length < 2 || text.length > maxChars) return
+
+    const chance = Number(this.config.voiceChance ?? 0.2)
+    if (!(Math.random() < chance)) return
+
+    const cooldownMs = Number(this.config.voiceCooldownSeconds ?? 600) * 1000
+    if (!this._lastVoiceAt) this._lastVoiceAt = new Map()
+    const ckey = conv?.key || String(ev?.group_id || ev?.user_id || '')
+    const last = this._lastVoiceAt.get(ckey) || 0
+    if (this.now() - last < cooldownMs) return
+
+    let file = null
+    try {
+      // synthesize() 返回的是 {file, bytes, ms, cached} 结果对象，不是路径字符串。
+      // 2026-10-22 集成测试踩过：把整个对象塞进 part.file，发出去成了 [object Object]。
+      const res = await this.voice.synthesize(text, { signal })
+      file = res?.file || null
+    } catch (err) {
+      this.logger('warn', `语音合成异常，退回文字: ${err?.message || err}`)
+    }
+    if (!file) {
+      this.stats.voiceFail = (this.stats.voiceFail || 0) + 1
+      return
+    }
+    // 语音在前、表情包在后：先说话再甩图，表情包段原样保留，不丢内容。
+    reply.parts = [{ type: 'voice', file, text }, ...stickerParts]
+    this._lastVoiceAt.set(ckey, this.now())
+    this.stats.voiceSent = (this.stats.voiceSent || 0) + 1
+    this.logger('debug', `语音：${scene} 转成一条语音（${text.length} 字）`)
+  }
+
   /* ———————————————— QQ 空间（P3，SnowLuma 扩展动作） ————————————————
    *
    * 用户需求（m02658 / m02682）：能读说说/好友动态；发说说**不自动发**，
@@ -2746,6 +2841,13 @@ export class ChatEngine {
        * 甩图会很怪；短吐槽才是表情包的主场。
        */
       this.maybeSprinkleSticker({ ev, scene, conv, reply })
+
+      /*
+       * 语音（2026-10-22，用户 m04697/m04855）：一部分回复换成真人的声音。
+       * 放在这里的原因和撒图一样——已经生成完了、还没发送，改的是 parts，
+       * 后面 deliver/历史/节流全部照旧。合成失败时 maybeVoice 内部会退回文字。
+       */
+      await this.maybeVoice({ ev, scene, conv, reply, signal: controller.signal })
 
       job.phase = 'sending'
       await this.deliver({ ev, scene, conv, reply, signal: controller.signal })
@@ -3769,6 +3871,22 @@ export class ChatEngine {
         } else {
           this.stats.stickersSent++
         }
+      } else if (part.type === 'voice') {
+        /*
+         * 语音（2026-10-22，用户 m04697/m04855）：本地合成好的 mp3 直接交给
+         * SnowLuma——它会自己转 NT silk 再上传（2026-10-22 真机取证：发
+         * `{type:'record', data:{file}}` → [Highway.Ptt] converted record to silk）。
+         * 开关关掉或文件丢了就跳过这一段，不退化文字：模型以为自己说过了，
+         * 再补一句文字反而重复。
+         */
+        if (!this.switches.allow('voice', { scene, gid: ev.group_id ? String(ev.group_id) : null })) continue
+        if (!part.file) {
+          this.stats.voiceFail = (this.stats.voiceFail || 0) + 1
+          continue
+        }
+        // buildMessage 从**顶层** p.file 取字段（onebot.js:173-174），
+        // 别写成 data.file，否则发出去是空文件（2026-10-22 集成测试踩过）。
+        payload = buildMessage([{ type: 'record', file: part.file }])
       } else {
         let text = part.text
         /*
@@ -3854,7 +3972,11 @@ export class ChatEngine {
          * 换成描述性文本后，模型读到的历史变成「我发了张震惊的表情包」——
          * 语义一样，但不会被当成可复制的模板。
          */
-        const sentText = part.type === 'sticker' ? `（我发了张表情包：${part.query}）` : part.text
+        const sentText = part.type === 'sticker'
+          ? `（我发了张表情包：${part.query}）`
+          : part.type === 'voice'
+            ? `（我发了一条语音：${part.text || ''}）`
+            : part.text
         this.pushHistory(conv, { role: 'assistant', text: sentText, at: this.now(), messageId: `self-${this.now()}` })
       } catch (err) {
         this.logger('warn', `发送失败: ${err?.message || err}`)

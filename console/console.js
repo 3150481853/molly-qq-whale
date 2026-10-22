@@ -3528,20 +3528,22 @@
 
   /* ---------------- 发言开关（运行时热切换，不用重载插件） ---------------- */
 
-  var SW_CAPS = ['reply', 'sticker', 'light', 'like', 'proactive'];
+  var SW_CAPS = ['reply', 'sticker', 'light', 'like', 'proactive', 'voice'];
   var SW_CAP_LABEL = {
     reply: '回话',
     sticker: '发表情包',
     light: '轻回应（单独甩图/表情）',
     like: '点赞',
-    proactive: '主动搭话'
+    proactive: '主动搭话',
+    voice: '发语音'
   };
   var SW_CAP_HINT = {
     reply: '关掉后只有 @ 或叫名字能让她开口（会带一句状态前缀）',
     sticker: '关掉后回复里不再夹表情包',
     light: '关掉后不会单独发一张图或一个表情就完事',
     like: '关掉后不再给群消息点赞',
-    proactive: '关掉后不会自己找话说'
+    proactive: '关掉后不会自己找话说',
+    voice: '关掉后不会再发语音（需要本机 python + edge-tts）'
   };
 
   function swFetch(url, opt) {

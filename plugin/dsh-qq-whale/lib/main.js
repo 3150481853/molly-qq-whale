@@ -499,6 +499,23 @@ export const DEFAULTS = {
   stickerSprinkleChance: 0.25,
   stickerSprinkleMaxChars: 30,
   stickerSprinkleCooldownSeconds: 120,
+
+  // —— 语音（2026-10-22，用户 m04697/m04855）——
+  // 「时不时发一句语音代替说话」：默认开着，但只有一部分回复会转语音（voiceChance）。
+  // 太长的回复不转——语音条超过十几秒没人听，长内容还是文字更合适。
+  // 音色/语速/音高是用户试听后拍板的（样本 I）：晓晓、-5%、+15Hz。
+  voiceEnabled: true,
+  voiceChance: 0.2,
+  voiceMaxChars: 42,
+  voiceName: 'zh-CN-XiaoxiaoNeural',
+  voiceRate: '-5%',
+  voicePitch: '+15Hz',
+  voiceTimeoutMs: 20000,
+  // 语音文件保留数量上限（按文件数淘汰最旧的），避免音频缓存无限涨。
+  voiceMaxKeep: 200,
+  // 同一个会话发过语音后，至少隔这么久才会再发（毫秒换算前的秒数）。
+  // 原因：语音连续出现会显得很吵，真人也不会句句发语音。
+  voiceCooldownSeconds: 600,
 }
 
 function resolveDirs(config) {
@@ -704,6 +721,15 @@ function _configShapeReference(Schema) {
     stickerLearn: s.boolean().default(DEFAULTS.stickerLearn).description('偷学别人发的表情包（只认 QQ 动画表情/商城表情，需视觉模型）'),
     stickerLearnMaxFileSizeMB: s.natural().default(DEFAULTS.stickerLearnMaxFileSizeMB),
     stickerLearnMaxPerDay: s.natural().default(DEFAULTS.stickerLearnMaxPerDay),
+    voiceEnabled: s.boolean().default(DEFAULTS.voiceEnabled).description('语音：偶尔把一条回复换成语音发出去（需要本机 python + edge-tts）'),
+    voiceChance: s.number().min(0).max(1).default(DEFAULTS.voiceChance).description('每条回复转语音的概率（0~1，默认 0.2）'),
+    voiceMaxChars: s.natural().default(DEFAULTS.voiceMaxChars).description('超过这个字数的回复不转语音（太长没人听）'),
+    voiceName: s.string().default(DEFAULTS.voiceName).description('音色（edge-tts 的 voice 名，默认 zh-CN-XiaoxiaoNeural）'),
+    voiceRate: s.string().default(DEFAULTS.voiceRate).description('语速（edge-tts 格式，如 -5%）'),
+    voicePitch: s.string().default(DEFAULTS.voicePitch).description('音高（edge-tts 格式，如 +15Hz）'),
+    voiceTimeoutMs: s.natural().default(DEFAULTS.voiceTimeoutMs).description('单次合成超时（毫秒）'),
+    voiceMaxKeep: s.natural().default(DEFAULTS.voiceMaxKeep).description('语音缓存保留文件数上限'),
+  voiceCooldownSeconds: s.natural().default(DEFAULTS.voiceCooldownSeconds).description('同一会话两次语音的最小间隔（秒）'),
   })
 }
 

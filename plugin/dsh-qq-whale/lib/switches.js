@@ -25,13 +25,14 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-export const CAPABILITIES = ['reply', 'sticker', 'light', 'like', 'proactive']
+export const CAPABILITIES = ['reply', 'sticker', 'light', 'like', 'proactive', 'voice']
 export const CAPABILITY_LABEL = {
   reply: '回复',
   sticker: '表情包',
   light: '轻回应',
   like: '点赞',
   proactive: '主动搭话',
+  voice: '语音',
 }
 
 const DEFAULT_CAPABILITIES = () => ({
@@ -40,6 +41,9 @@ const DEFAULT_CAPABILITIES = () => ({
   light: true,
   like: true,
   proactive: true,
+  // 语音（2026-10-22 用户 m04697/m04855 要求）：开着才可能把某条回复换成一条语音；
+  // 关掉后退回纯文字，不影响其它几项。
+  voice: true,
 })
 
 /** 一份「全开」的默认状态。 */

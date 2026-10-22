@@ -4821,10 +4821,14 @@ export class ChatEngine {
       '',
       '不要记：寒暄、语气词、你无法确定的内容、重复的东西（同一件事只记一条）。',
       /*
-       * 上限从 5 条放宽到 8 条、每条 25→30 字。实测一次 buffers 攒满 12 句时，
-       * 5 条经常把后半段的具体信息挤掉；8 条 + 900 maxTokens 才能装下。
+       * 2026-10-22（主人反馈）：每条只记了几个字，信息量不够。
+       * 原来钉「每条不超过 30 字」，模型就只写「他吐槽工作」这种空壳，
+       * 事后根本接不上话。现在放宽到 40~180 字，并要求把「谁、什么时候、
+       * 发生了什么、他什么态度」写完整；同时解析侧上限也从 120→200 字。
        */
-      '最多 8 条，每条不超过 30 字，写成"他……"或"他喜欢……"这样的第三人称短句。',
+      '最多 8 条，每条 40~180 字。写成"他……"的第三人称，但要把信息写全：',
+      '谁、什么时候、因为什么、他当时是什么态度/心情。别只写"他吐槽工作"这种空壳。',
+      '一条只讲一件事，宁可写得具体一点，也别为凑字数注水。',
       '有具体信息就记，重复的不要；宠物、家人、身体、住处、工作内容这类以后一定会被问到的优先。',
       '一条都不值得记就只输出两个字：无',
     ].join('\n')
@@ -4846,11 +4850,14 @@ export class ChatEngine {
        *
        * 2026-10-21（P3）：上限 5→8 条，700→900。8 条 × 30 字再加上 reasoning，
        * 700 容易在最后一条被截断。
+       *
+       * 2026-10-22：每条从 30 字放宽到 40~180 字（8 条 × 180 字 ≈ 1500~1900 token），
+       * 900 肯定不够，会给到 1800；实测若最后一条被截断再往上加。
        */
       const res = await this.callModel({
         system,
         messages: [{ role: 'user', content: said }],
-        maxTokens: cfg.memoryExtractMaxTokens ?? 900,
+        maxTokens: cfg.memoryExtractMaxTokens ?? 1800,
       })
       if (res?.ok && res.text) out = res.text.trim()
       else if (res?.ok && !res.text) {
@@ -4876,7 +4883,8 @@ export class ChatEngine {
       text = text.replace(/^(?:[-·*—–]|\d+[.、)]|\(\d+\))\s*/, '').trim()
       // 去掉模型爱加的引号、书名号包装
       text = text.replace(/^[「『"'“”](.*)[」』"'“”]$/, '$1').trim()
-      if (text.length < 3 || text.length > 120) continue
+      // 2026-10-22：上限 120→200（主人要「每条写全」，prompt 也放宽到 180 字）
+      if (text.length < 3 || text.length > 200) continue
       if (/^(无|没有|none|null)$/i.test(text)) continue
       // 明显是解释性废话的整行丢掉（"以下是…" / "这些事实…" / "注意："）
       if (/^(以下是|这些|注意|说明|备注|其中|综上)/.test(text)) continue
@@ -4888,9 +4896,11 @@ export class ChatEngine {
         text,
         weight: 3,
       })
-      // 被闸门拦下的不计数（它没进库），上限 5 条按"真写进去的"算
+      // 被闸门拦下的不计数（它没进库），上限按"真写进去的"算
       if (e) kept++
-      if (kept >= 5) break
+      // 2026-10-22：上限 5→8，和 prompt 的「最多 8 条」对齐（原来两侧不一致，
+      // 模型认真写 8 条也只会入库 5 条）
+      if (kept >= 8) break
     }
     if (kept > 0) {
       this.logger('info', `模型抽到 ${kept} 条关于 ${userName} 的记忆`)

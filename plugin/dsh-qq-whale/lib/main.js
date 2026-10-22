@@ -505,7 +505,7 @@ export const DEFAULTS = {
   // 太长的回复不转——语音条超过十几秒没人听，长内容还是文字更合适。
   // 音色/语速/音高是用户试听后拍板的（样本 I）：晓晓、-5%、+15Hz。
   voiceEnabled: true,
-  voiceChance: 0.2,
+  voiceChance: 0.35,
   voiceMaxChars: 42,
   // 2026-10-22 22:5x 用户拍板（m05352）：语音改用社区音色 Dania
   // （本机 GPT-SoVITS v2ProPlus + villia/dania 权重，HTTP 9880）。
@@ -736,7 +736,7 @@ function _configShapeReference(Schema) {
     stickerLearnMaxFileSizeMB: s.natural().default(DEFAULTS.stickerLearnMaxFileSizeMB),
     stickerLearnMaxPerDay: s.natural().default(DEFAULTS.stickerLearnMaxPerDay),
     voiceEnabled: s.boolean().default(DEFAULTS.voiceEnabled).description('语音：偶尔把一条回复换成语音发出去（默认用本机 GPT-SoVITS 的社区音色 Dania）'),
-    voiceChance: s.number().min(0).max(1).default(DEFAULTS.voiceChance).description('每条回复转语音的概率（0~1，默认 0.2）'),
+    voiceChance: s.number().min(0).max(1).default(DEFAULTS.voiceChance).description('每条回复转语音的概率（0~1，默认 0.35）'),
     voiceMaxChars: s.natural().default(DEFAULTS.voiceMaxChars).description('超过这个字数的回复不转语音（太长没人听）'),
     voiceBackend: s.string().default(DEFAULTS.voiceBackend).description('语音后端：sovits（本地 GPT-SoVITS，默认）或 edge（edge-tts 的晓晓）'),
     voiceSovitsUrl: s.string().default(DEFAULTS.voiceSovitsUrl).description('GPT-SoVITS api_v2 地址（默认 http://127.0.0.1:9880）'),

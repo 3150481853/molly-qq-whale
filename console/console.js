@@ -96,7 +96,9 @@
       at: 0, loading: false
     },
     /* 发言开关：data 是 /api/plugin/switches 返回的整包（master/private/group/groups/contentFilter/temporaryMutes/audit） */
-    sw: { data: null, error: '', loading: false, group: '', busy: false },
+    /* form：输入框草稿值缓存。页面每 4 秒被 poll 重渲染一次，不缓存的话
+     「临时静音」里刚输入的群号/分钟会被清空（2026-10-22 用户报障 m04335）。 */
+  sw: { data: null, error: '', loading: false, group: '', busy: false, form: {} },
     reloading: false   /* 前端版本不一致时只自动 reload 一次 */
   };
 
@@ -3647,6 +3649,7 @@
       var gid = String((input && input.value) || el.getAttribute('data-gid') || '').replace(/[^0-9]/g, '');
       if (!gid) { toast('先填群号'); return; }
       state.sw.group = gid;
+      state.sw.form.group = '';   /* 已打开该群，输入框回到显示当前群号 */
       safe(renderSwitches);
       loadSwitches();
       return;
@@ -3682,7 +3685,15 @@
       var minutes = Number((minEl && minEl.value) || 30) || 30;
       var note = String((noteEl && noteEl.value) || '');
       state.sw.busy = true;
-      swPost('/api/plugin/switches/mute', { scope: scope, minutes: minutes, note: note }).then(swApplyResult);
+      swPost('/api/plugin/switches/mute', { scope: scope, minutes: minutes, note: note }).then(function (res) {
+        if (res && res.ok) {
+          /* 静音成功：清掉输入框草稿，避免下次重渲染又填回来 */
+          state.sw.form.muteScope = '';
+          state.sw.form.muteNote = '';
+          state.sw.form.muteMinutes = 30;
+        }
+        swApplyResult(res);
+      });
       return;
     }
     if (act === 'unmute') {
@@ -3697,6 +3708,22 @@
       state.sw.busy = true;
       swPost('/api/plugin/switches/reset', {}).then(swApplyResult);
     }
+  }
+
+  /* 输入框草稿值：有缓存用缓存，没有用页面给的默认值 */
+  function swFormVal(name, fallback) {
+    var f = state.sw.form || {};
+    return Object.prototype.hasOwnProperty.call(f, name) ? f[name] : fallback;
+  }
+
+  /* 正在输入框里打字时，跳过整页重渲染，别把光标和内容冲掉 */
+  function swInputFocused() {
+    var el = document.activeElement;
+    if (!el) return false;
+    var tag = String(el.tagName || '').toUpperCase();
+    if (tag !== 'INPUT' && tag !== 'TEXTAREA') return false;
+    var box = $('#swCards');
+    return !!(box && box.contains(el));
   }
 
   function renderSwitches() {
@@ -3743,7 +3770,7 @@
     }
     gh += '<div class="field"><div class="field-label">群号</div><div class="row-actions">'
       + '<input class="input input-sm" id="swGroupInput" inputmode="numeric" placeholder="例如 666666666" value="'
-      + esc(gid) + '">'
+      + esc(swFormVal('group', gid)) + '">'
       + '<button class="btn btn-sm" type="button" data-sw-act="group-open">打开</button>'
       + (gid ? '<button class="btn btn-sm btn-ghost" type="button" data-sw-act="group-remove" data-gid="'
         + esc(gid) + '">清除该群覆盖</button>' : '')
@@ -3769,7 +3796,7 @@
         + '</div></div>',
       '<div class="field"><div class="field-label">压短后的字数上限（60–2000，默认 180）</div><div class="row-actions">'
         + '<input class="input input-sm" id="swMaxChars" type="number" min="60" max="2000" value="'
-        + (Number(cf.maxChars) || 180) + '">'
+        + esc(swFormVal('cfMax', Number(cf.maxChars) || 180)) + '">'
         + '<button class="btn btn-sm" type="button" data-sw-act="cf-max">保存</button>'
         + '</div></div>'
     ].join('')));
@@ -3778,9 +3805,12 @@
     var mh = mutes.length ? mutes.map(swMuteRow).join('')
       : '<p class="card-sub">现在没有临时静音。</p>';
     mh += '<div class="field"><div class="field-label">加临时静音（到点自动恢复）</div><div class="row-actions">'
-      + '<input class="input input-sm" id="swMuteScope" placeholder="private 或 群号" style="width:150px">'
-      + '<input class="input input-sm" id="swMuteMinutes" type="number" min="1" max="10080" value="30" style="width:90px"> 分钟'
-      + '<input class="input input-sm" id="swMuteNote" placeholder="备注（可选）" style="width:160px">'
+      + '<input class="input input-sm" id="swMuteScope" placeholder="private 或 群号" style="width:150px" value="'
+      + esc(swFormVal('muteScope', '')) + '">'
+      + '<input class="input input-sm" id="swMuteMinutes" type="number" min="1" max="10080" style="width:90px" value="'
+      + esc(swFormVal('muteMinutes', 30)) + '"> 分钟'
+      + '<input class="input input-sm" id="swMuteNote" placeholder="备注（可选）" style="width:160px" value="'
+      + esc(swFormVal('muteNote', '')) + '">'
       + '<button class="btn btn-sm" type="button" data-sw-act="mute">静音</button>'
       + '</div><p class="field-hint">scope 写 private（私聊）或群号（群聊），例如 666666666。</p></div>';
     cards.push(card('临时静音', mh));
@@ -3815,7 +3845,7 @@
       case 'napcat': renderNapcat(); break;
       case 'login': renderLogin(); break;
       case 'settings': renderSettings(); break;
-      case 'switches': renderSwitches(); break;
+      case 'switches': if (!swInputFocused()) renderSwitches(); break;
       default: break;
     }
   }
@@ -3855,6 +3885,28 @@
     if (swReload) swReload.addEventListener('click', function () { loadSwitches(); });
     var swCards = $('#swCards');
     if (swCards) swCards.addEventListener('click', onSwAction);
+    /* 记住输入框草稿：4 秒一次的 poll 会重渲染本页，靠这份缓存把值带回来 */
+    if (swCards) swCards.addEventListener('input', function (e) {
+      var t = e.target;
+      var id = t && t.id;
+      if (!id || !state.sw.form) return;
+      if (id === 'swGroupInput') state.sw.form.group = t.value;
+      else if (id === 'swMaxChars') state.sw.form.cfMax = t.value;
+      else if (id === 'swMuteScope') state.sw.form.muteScope = t.value;
+      else if (id === 'swMuteMinutes') state.sw.form.muteMinutes = t.value;
+      else if (id === 'swMuteNote') state.sw.form.muteNote = t.value;
+    });
+    /* 回车直接提交：省得点按钮时不小心点到别处把输入框弄丢 */
+    if (swCards) swCards.addEventListener('keydown', function (e) {
+      if (!e || e.key !== 'Enter') return;
+      var id = e.target && e.target.id;
+      var act = id === 'swGroupInput' ? 'group-open'
+        : (id === 'swMuteScope' ? 'mute' : (id === 'swMaxChars' ? 'cf-max' : ''));
+      if (!act) return;
+      e.preventDefault();
+      var btn = swCards.querySelector('[data-sw-act="' + act + '"]');
+      if (btn) onSwAction({ target: btn, preventDefault: function () {} });
+    });
     var swAudit = $('#swAudit');
     if (swAudit) swAudit.addEventListener('click', onSwAction);
 

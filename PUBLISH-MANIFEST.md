@@ -2,9 +2,9 @@
 
 > 本副本由 `tools/build-publish.mjs` 生成，**勿手改**；要改就改源仓库再重新生成。
 
-- 生成时间：2026-10-22T14:25:05.222Z
-- 文件数：**148**
-- 总体积：**2.38 MB**
+- 生成时间：2026-10-22T15:28:33.840Z
+- 文件数：**149**
+- 总体积：**2.40 MB**
 - 脱敏复检：**命中 0**
 
 ## 顶层结构
@@ -41,6 +41,7 @@
 - tools/heartbeat-push.mjs
 - tools/setup-quicklogin.ps1
 - tools/snowluma-start.ps1
+- tools/voice-sovits-start.ps1
 - tools/scan-secrets.mjs
 - tools/build-publish.mjs
 - docs/INSTALL-AND-ROLLBACK.md

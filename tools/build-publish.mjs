@@ -88,6 +88,9 @@ const FILES = [
   ['tools/snowluma-verify.ps1', 'tools/snowluma-verify.ps1'],
   ['tools/setup-snowluma-boot.ps1', 'tools/setup-snowluma-boot.ps1'],
   ['tools/p2-enable-watchdog.ps1', 'tools/p2-enable-watchdog.ps1'],
+  // 2026-10-22 语音升级：GPT-SoVITS 服务保活脚本（watchdog 每分钟 ensureVoice 会调用它）。
+  // 发布版缺它，语音服务挂了就只能等主人手动起——保活等于白做。
+  ['tools/voice-sovits-start.ps1', 'tools/voice-sovits-start.ps1'],
   // 2026-10-22：watchdog/心跳从 10 分钟/3 分钟提速到 1 分钟（含夜间降频），
   // 这个提权脚本负责改计划任务触发器；发布版缺它就没法把恢复周期压进 2 分钟验收线。
   ['tools/tune-ops-tasks.ps1', 'tools/tune-ops-tasks.ps1'],

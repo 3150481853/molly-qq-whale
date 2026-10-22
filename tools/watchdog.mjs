@@ -31,7 +31,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import http from 'node:http'
 import https from 'node:https'
-import { execFile } from 'node:child_process'
+import { execFile, execFileSync, spawn } from 'node:child_process'
 
 // ── 路径 ────────────────────────────────────────────────────────────────────
 const HERE = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'))
@@ -638,6 +638,62 @@ async function portListening(port) {
   return Number.isFinite(n) ? n > 0 : null
 }
 
+// ── 语音服务（GPT-SoVITS / Dania）保活 ────────────────────────────────
+// 2026-10-22：Molly 的语音换成社区音色 Dania，api_v2.py 需要常驻 9880。
+// 新注册计划任务被系统拒绝（Access is denied），所以让本 watchdog（本身
+// 是提权任务、每分钟跑一次）顺手保活：端口不通就拉一次启动脚本。
+let _voiceSpawnAt = 0
+
+async function voiceAlive(port) {
+  try {
+    const ac = AbortSignal.timeout(1500)
+    const r = await fetch(`http://127.0.0.1:${port}/docs`, { signal: ac })
+    return r.ok
+  } catch {
+    return false
+  }
+}
+
+async function ensureVoice(cfg) {
+  if (!cfg || cfg.voiceKeepAlive === false) return { ok: true, skipped: true }
+  const port = Number(cfg.voicePort || 9880)
+  if (await voiceAlive(port)) return { ok: true, note: '在线' }
+  // 节流必须落盘：watchdog 每分钟是一个新 node 进程，模块级变量记不住上次拉起时间，
+  // 2026-10-22 实测 12 秒内被拉了两份 api_v2（第二份抢不到端口）。
+  const throttleFile = path.join(path.dirname(HERE), 'out', 'voice-keepalive-throttle.json')
+  let lastSpawnAt = _voiceSpawnAt
+  try {
+    const j = JSON.parse(fs.readFileSync(throttleFile, 'utf8'))
+    lastSpawnAt = Math.max(lastSpawnAt, Number(j?.at || 0))
+  } catch {}
+  if (lastSpawnAt && Date.now() - lastSpawnAt < 3 * 60 * 1000) {
+    return { ok: false, note: '刚拉起过，等待就绪' }
+  }
+  try { fs.writeFileSync(throttleFile, JSON.stringify({ at: Date.now() })) } catch {}
+  _voiceSpawnAt = Date.now()
+  try {
+    const script = path.join(HERE, 'voice-sovits-start.ps1')
+    if (!fs.existsSync(script)) {
+      log('语音保活：缺少 voice-sovits-start.ps1')
+      return { ok: false, note: '缺少启动脚本' }
+    }
+    // 2026-10-22 两次事故，别再改回去：
+    //   ① detached:true 的 powershell 会「秒退」（子进程 exit 0，脚本一行都没执行）；
+    //   ② 普通 spawn 由 watchdog（每秒都可能被父进程收尾）拉起时，也可能随父进程一起没了。
+    // `cmd /c start` 会创建一个和 node 无关的独立进程，node 立刻退出也不影响它。
+    // 实测：node 秒退后 55 秒内服务就绪（voice-sovits-start.log 有 pid 与「就绪」两行）。
+    execFileSync('C:\\Windows\\System32\\cmd.exe', [
+      '/c', 'start', '""', '/b', 'powershell.exe',
+      '-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', script,
+    ], { cwd: path.dirname(HERE), windowsHide: true, timeout: 15000, stdio: 'ignore' })
+    log('语音保活：9880 不在线，已触发 voice-sovits-start.ps1（cmd start）')
+    return { ok: false, note: '已触发启动' }
+  } catch (e) {
+    log('语音保活：拉起失败', String(e?.message || e))
+    return { ok: false, note: String(e?.message || e) }
+  }
+}
+
 async function qqProcessList() {
   const cmd = "Get-Process QQ -ErrorAction SilentlyContinue | Select-Object Id,ProcessName," +
     "@{n='memMB';e={[int]($_.WorkingSet64/1MB)}}" +
@@ -749,6 +805,10 @@ export async function checkOnce(cfg, opts = {}) {
 
   const res = await checkStatus(cfg, state)
   state.lastCheckAt = nowMs()
+
+  // 顺手保活语音服务（Dania / GPT-SoVITS 9880）：不在线就拉启动脚本。
+  // 语音是加分项，保活异常绝不能影响掉线检测与抢修，所以这里吞掉所有错误。
+  await ensureVoice(cfg).catch(() => {})
 
   // 日志实证优先于接口自报（2026-10-22 13:54 掉线：接口一度还能应答）。
   // 只要日志里 session closed 之后没有新的 login detected，就判掉线，

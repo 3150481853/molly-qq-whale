@@ -195,6 +195,17 @@ export class ChatEngine {
     this.voice = config.voiceEnabled === false ? null : new VoiceMaker({
       dir: path.join(config.dataDir || config.memoryDir, 'voice'),
       logger,
+      /*
+       * 2026-10-22 22:5x 用户拍板（m05352）：改用社区音色「Dania」
+       * （ModelScope villia/dania + 本机 GPT-SoVITS v2ProPlus，HTTP 9880）。
+       * backend='sovits' 时本地服务不可用会退回 edge-tts，回复不会因此丢。
+       */
+      backend: config.voiceBackend,
+      sovitsUrl: config.voiceSovitsUrl,
+      refAudio: config.voiceRefAudio,
+      promptText: config.voicePromptText,
+      promptLang: config.voicePromptLang,
+      fallbackEdge: config.voiceFallbackEdge,
       voiceName: config.voiceName,
       rate: config.voiceRate,
       pitch: config.voicePitch,
@@ -1962,11 +1973,12 @@ export class ChatEngine {
     const chance = Number(this.config.voiceChance ?? 0.2)
     if (!(Math.random() < chance)) return
 
-    const cooldownMs = Number(this.config.voiceCooldownSeconds ?? 600) * 1000
-    if (!this._lastVoiceAt) this._lastVoiceAt = new Map()
-    const ckey = conv?.key || String(ev?.group_id || ev?.user_id || '')
-    const last = this._lastVoiceAt.get(ckey) || 0
-    if (this.now() - last < cooldownMs) return
+    /*
+     * 2026-10-22 用户 m05352 拍板：**取消同会话冷却**（voiceCooldownSeconds 置 0
+     * 即完全不限制），但 **23:50–09:00 不提供语音**。静默时段按本机时间判断；
+     * 跨午夜区间（23:50 > 09:00）单独处理。
+     */
+    if (this.inVoiceQuietHours()) return
 
     let file = null
     try {
@@ -1983,9 +1995,35 @@ export class ChatEngine {
     }
     // 语音在前、表情包在后：先说话再甩图，表情包段原样保留，不丢内容。
     reply.parts = [{ type: 'voice', file, text }, ...stickerParts]
-    this._lastVoiceAt.set(ckey, this.now())
     this.stats.voiceSent = (this.stats.voiceSent || 0) + 1
     this.logger('debug', `语音：${scene} 转成一条语音（${text.length} 字）`)
+  }
+
+  /**
+   * 语音静默时段（2026-10-22 用户 m05352）：默认 23:50–09:00 不发语音。
+   * 配置 `voiceQuietStart` / `voiceQuietEnd`（HH:mm）可改，置空串可关闭。
+   */
+  inVoiceQuietHours(now = this.now()) {
+    const start = String(this.config.voiceQuietStart ?? '23:50').trim()
+    const end = String(this.config.voiceQuietEnd ?? '09:00').trim()
+    if (!start || !end) return false
+    const parse = (s) => {
+      const m = /^(\d{1,2}):(\d{2})$/.exec(s)
+      if (!m) return null
+      const h = Number(m[1])
+      const mi = Number(m[2])
+      if (h > 23 || mi > 59) return null
+      return h * 60 + mi
+    }
+    const s = parse(start)
+    const e = parse(end)
+    if (s === null || e === null) return false
+    const d = new Date(now)
+    const cur = d.getHours() * 60 + d.getMinutes()
+    if (s === e) return false
+    // 跨午夜（23:50 > 09:00）：命中 [start, 24:00) ∪ [00:00, end)
+    if (s > e) return cur >= s || cur < e
+    return cur >= s && cur < e
   }
 
   /* ———————————————— QQ 空间（P3，SnowLuma 扩展动作） ————————————————

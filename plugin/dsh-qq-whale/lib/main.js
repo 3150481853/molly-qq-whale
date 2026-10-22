@@ -507,15 +507,29 @@ export const DEFAULTS = {
   voiceEnabled: true,
   voiceChance: 0.2,
   voiceMaxChars: 42,
+  // 2026-10-22 22:5x 用户拍板（m05352）：语音改用社区音色 Dania
+  // （本机 GPT-SoVITS v2ProPlus + villia/dania 权重，HTTP 9880）。
+  // backend='edge' 可退回 edge-tts（晓晓）；本地服务挂了会按 voiceFallbackEdge 自动退。
+  voiceBackend: 'sovits',
+  voiceSovitsUrl: 'http://127.0.0.1:9880',
+  voiceRefAudio: 'G:\\Molly\\data\\qq-whale\\voice-ref\\dania-ref.wav',
+  voicePromptText: '怎么啊？如果有你在也不放心，那就干脆给我也装个限制器或者炸弹喽。',
+  voicePromptLang: 'zh',
+  voiceFallbackEdge: true,
+  // 静默时段：这段时间不提供语音（用户 m05352：23:50–次日 09:00）。
+  // 置空串可关闭；时间格式 HH:mm，本机时间。
+  voiceQuietStart: '23:50',
+  voiceQuietEnd: '09:00',
+  // edge-tts 音色参数（仅 backend='edge' 或 sovits 失败退回时用）。
   voiceName: 'zh-CN-XiaoxiaoNeural',
   voiceRate: '-5%',
   voicePitch: '+15Hz',
   voiceTimeoutMs: 20000,
   // 语音文件保留数量上限（按文件数淘汰最旧的），避免音频缓存无限涨。
   voiceMaxKeep: 200,
-  // 同一个会话发过语音后，至少隔这么久才会再发（毫秒换算前的秒数）。
-  // 原因：语音连续出现会显得很吵，真人也不会句句发语音。
-  voiceCooldownSeconds: 600,
+  // 2026-10-22 用户 m05352 拍板：**取消同会话冷却**（0 = 不限制）。
+  // 保留字段是为了兼容旧配置，engine.maybeVoice 已不再用它。
+  voiceCooldownSeconds: 0,
 }
 
 function resolveDirs(config) {
@@ -721,15 +735,23 @@ function _configShapeReference(Schema) {
     stickerLearn: s.boolean().default(DEFAULTS.stickerLearn).description('偷学别人发的表情包（只认 QQ 动画表情/商城表情，需视觉模型）'),
     stickerLearnMaxFileSizeMB: s.natural().default(DEFAULTS.stickerLearnMaxFileSizeMB),
     stickerLearnMaxPerDay: s.natural().default(DEFAULTS.stickerLearnMaxPerDay),
-    voiceEnabled: s.boolean().default(DEFAULTS.voiceEnabled).description('语音：偶尔把一条回复换成语音发出去（需要本机 python + edge-tts）'),
+    voiceEnabled: s.boolean().default(DEFAULTS.voiceEnabled).description('语音：偶尔把一条回复换成语音发出去（默认用本机 GPT-SoVITS 的社区音色 Dania）'),
     voiceChance: s.number().min(0).max(1).default(DEFAULTS.voiceChance).description('每条回复转语音的概率（0~1，默认 0.2）'),
     voiceMaxChars: s.natural().default(DEFAULTS.voiceMaxChars).description('超过这个字数的回复不转语音（太长没人听）'),
-    voiceName: s.string().default(DEFAULTS.voiceName).description('音色（edge-tts 的 voice 名，默认 zh-CN-XiaoxiaoNeural）'),
-    voiceRate: s.string().default(DEFAULTS.voiceRate).description('语速（edge-tts 格式，如 -5%）'),
-    voicePitch: s.string().default(DEFAULTS.voicePitch).description('音高（edge-tts 格式，如 +15Hz）'),
+    voiceBackend: s.string().default(DEFAULTS.voiceBackend).description('语音后端：sovits（本地 GPT-SoVITS，默认）或 edge（edge-tts 的晓晓）'),
+    voiceSovitsUrl: s.string().default(DEFAULTS.voiceSovitsUrl).description('GPT-SoVITS api_v2 地址（默认 http://127.0.0.1:9880）'),
+    voiceRefAudio: s.string().default('').description('GPT-SoVITS 参考音频路径（Dania 模型自带的那条 wav）'),
+    voicePromptText: s.string().default('').description('参考音频对应的文字（参考文本，直接影响语气）'),
+    voicePromptLang: s.string().default(DEFAULTS.voicePromptLang).description('参考音频/文本语言（zh / en / ja）'),
+    voiceFallbackEdge: s.boolean().default(DEFAULTS.voiceFallbackEdge).description('sovits 合成失败时自动退回 edge-tts，保证语音功能不会整条消失'),
+    voiceQuietStart: s.string().default('').description('语音静默时段开始（HH:mm，默认 23:50；置空关闭）'),
+    voiceQuietEnd: s.string().default('').description('语音静默时段结束（HH:mm，默认 09:00；跨午夜自动处理）'),
+    voiceName: s.string().default(DEFAULTS.voiceName).description('edge-tts 音色（backend=edge 或 sovits 失败退回时用，默认 zh-CN-XiaoxiaoNeural）'),
+    voiceRate: s.string().default(DEFAULTS.voiceRate).description('edge-tts 语速（如 -5%）'),
+    voicePitch: s.string().default(DEFAULTS.voicePitch).description('edge-tts 音高（如 +15Hz）'),
     voiceTimeoutMs: s.natural().default(DEFAULTS.voiceTimeoutMs).description('单次合成超时（毫秒）'),
     voiceMaxKeep: s.natural().default(DEFAULTS.voiceMaxKeep).description('语音缓存保留文件数上限'),
-  voiceCooldownSeconds: s.natural().default(DEFAULTS.voiceCooldownSeconds).description('同一会话两次语音的最小间隔（秒）'),
+    voiceCooldownSeconds: s.natural().default(DEFAULTS.voiceCooldownSeconds).description('已废弃（用户 2026-10-22 取消冷却，保留字段兼容旧配置）'),
   })
 }
 

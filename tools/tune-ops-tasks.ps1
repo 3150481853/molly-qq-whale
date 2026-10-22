@@ -5,16 +5,22 @@
     背景：13:54 那次掉线只持续 2.5 分钟，watchdog 10 分钟一查整段错过，
           既没生成快照也没发通知。验收要求「掉线 ≤2 分钟发现并自动恢复」。
 
-    改动：
+    改动（2026-10-22 服务器 DSH #17 之后回调）：
       Molly-Watchdog   repetition PT10M -> PT1M   （夜间由脚本内部降频到 5 分钟）
-      Molly-Heartbeat  repetition PT3M  -> PT1M   （夜间由脚本内部降到 3 分钟）
+      Molly-Heartbeat  repetition PT3M  -> PT3M   （白天 3 分钟；夜间脚本内压到 1 小时）
+
+     之前曾把心跳提到 PT1M，服务器反馈「太密、每轮都在处理过期的还活着」，
+     实时性由本机 watchdog（1 分钟一查）+ 服务器阈值保证，心跳回到 3 分钟。
+     用 -HeartbeatMinutes / -WatchdogMinutes 可以临时调。
 
     做法：只改触发器的 repetition，其余（动作/主体/设置）保持原样；改完回读验证。
     必须提权运行（任务主体是最高权限）。
 #>
 param(
     [switch]$SkipHeartbeat,
-    [switch]$SkipWatchdog
+    [switch]$SkipWatchdog,
+    [int]$HeartbeatMinutes = 3,
+    [int]$WatchdogMinutes = 1
 )
 
 $ErrorActionPreference = 'Stop'
@@ -90,8 +96,8 @@ try {
         [System.Security.Principal.WindowsIdentity]::GetCurrent().Name)
 
     $rows = @()
-    if (-not $SkipWatchdog) { $rows += Set-Repetition -TaskName 'Molly-Watchdog' -Minutes 1 }
-    if (-not $SkipHeartbeat) { $rows += Set-Repetition -TaskName 'Molly-Heartbeat' -Minutes 1 }
+    if (-not $SkipWatchdog) { $rows += Set-Repetition -TaskName 'Molly-Watchdog' -Minutes $WatchdogMinutes }
+    if (-not $SkipHeartbeat) { $rows += Set-Repetition -TaskName 'Molly-Heartbeat' -Minutes $HeartbeatMinutes }
 
     # 顺手确认 SnowLuma 的三个提权任务还在（迁移后可回滚的依据）
     $others = @()

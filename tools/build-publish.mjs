@@ -91,6 +91,9 @@ const FILES = [
   // 2026-10-22：watchdog/心跳从 10 分钟/3 分钟提速到 1 分钟（含夜间降频），
   // 这个提权脚本负责改计划任务触发器；发布版缺它就没法把恢复周期压进 2 分钟验收线。
   ['tools/tune-ops-tasks.ps1', 'tools/tune-ops-tasks.ps1'],
+  // 2026-10-22：Molly ⇄ 服务器 DSH 留言通道小工具（契约见 STATE.md「怎么和服务器对话」，
+  // 服务器侧是 /molly/messages；发布版带上它，别处接手时能直接读/发留言）。
+  ['tools/relay-msg.mjs', 'tools/relay-msg.mjs'],
   ['tools/open-console-window.ps1', 'tools/open-console-window.ps1'],
   ['tools/make-desktop-shortcut.ps1', 'tools/make-desktop-shortcut.ps1'],
   ['tools/build-exe.mjs', 'tools/build-exe.mjs'],

@@ -275,6 +275,9 @@ export const DEFAULTS = {
   tapEmoji: true,
   // 判定不回之后点一个赞的概率（2026-10-21 从硬编码搬进配置）
   tapEmojiProbability: 0.35,
+  // 不点赞的群（群号数组）。2026-10-22 主人要求：666666666 用户群里别点赞。
+  // 只影响"已读回应/命令确认"这类表情赞，不影响正常开口回复。
+  noLikeGroups: [],
 
   // —— 回复节流（2026-10-21）——
   // 0 = 不限制。用户当时明确「先不设限」，留这两个开关是为了后面能按群收紧。
@@ -635,6 +638,7 @@ function _configShapeReference(Schema) {
     groupAutoReply: s.boolean().default(true).description('群里未被 @ 时是否允许主动插话'),
     bystanderThreshold: s.number().default(DEFAULTS.bystanderThreshold),
     tapEmoji: s.boolean().default(DEFAULTS.tapEmoji),
+    noLikeGroups: s.array(s.string()).default([]).description('不点赞的群号（已读回应/命令确认都不点）'),
     groupCardStatusEnabled: s.boolean().default(DEFAULTS.groupCardStatusEnabled).description('群名片实时状态：想事情/回复时把群名片改成「名字（在想…）」'),
     groupCardThinkingSuffix: s.string().default(DEFAULTS.groupCardThinkingSuffix).description('想事情时追加到群名片后的后缀'),
     groupCardCooldownMs: s.natural().default(DEFAULTS.groupCardCooldownMs).description('同一群两次改名片的最小间隔毫秒数（防风控）'),

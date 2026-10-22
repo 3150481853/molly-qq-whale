@@ -1496,7 +1496,7 @@ export class ChatEngine {
       const until = this.pest.mute()
       this.logger('info', `安全停止词被 ${uid} 触发，骂街静音到 ${new Date(until).toLocaleString()}`)
       // 只对喊停的人回一句，别再往群里发——群里喊停通常是不想让她继续骂
-      if (scene !== SCENE_PRIVATE) {
+      if (scene !== SCENE_PRIVATE && !this.likeBlocked(ev)) {
         this.tapEmoji(ev.message_id).catch(() => {})
       } else {
         this.sayQuick(ev, scene, '……行吧，我闭嘴。').catch(() => {})
@@ -1648,6 +1648,7 @@ export class ChatEngine {
       // 第三档：已读回应，偶尔点个表情赞而不是彻底消失
       if (
         scene !== SCENE_PRIVATE &&
+        !this.likeBlocked(ev) &&
         this.config.tapEmoji !== false &&
         shouldTapEmoji({ tapEmojiProbability: this.config.tapEmojiProbability })
       ) {
@@ -2141,7 +2142,7 @@ export class ChatEngine {
       )
       return { handled: true, refused: true, route }
     }
-    this.tapEmoji(ev.message_id, this.config.commandConfirmEmoji ?? 424).catch(() => {})
+    if (!this.likeBlocked(ev)) this.tapEmoji(ev.message_id, this.config.commandConfirmEmoji ?? 424).catch(() => {})
     this.runCommand({
       ev,
       conv,
@@ -2208,7 +2209,7 @@ export class ChatEngine {
 
     this.logger('info', `${userName} 下指令：${verdict.task}`)
     // 先确认收到（点个 👌），免得主人以为没听见
-    this.tapEmoji(ev.message_id, this.config.commandConfirmEmoji ?? 424).catch(() => {})
+    if (!this.likeBlocked(ev)) this.tapEmoji(ev.message_id, this.config.commandConfirmEmoji ?? 424).catch(() => {})
 
     return { handled: true, task: verdict.task, forced: !!verdict.forced }
   }
@@ -3931,6 +3932,18 @@ export class ChatEngine {
      * 这里空调用，把挂件的 replyDurations 污染成一串假数据
      * （2026-10-21 排查：metrics.json 里全是 1~3ms）。
      */
+  }
+
+  /**
+   * 这个群是否禁止点赞/表情回应。
+   * 2026-10-22 主人要求：群里（666666666 用户群）别点赞——点赞会暴露她在线、
+   * 又会被人当成"已读不回"，宁可不动作。配置项 `noLikeGroups`（群号数组）。
+   */
+  likeBlocked(ev) {
+    const gid = String(ev?.group_id || '')
+    if (!gid) return false
+    const list = Array.isArray(this.config.noLikeGroups) ? this.config.noLikeGroups : []
+    return list.some((g) => String(g) === gid)
   }
 
   async tapEmoji(messageId, emojiId = 76) {

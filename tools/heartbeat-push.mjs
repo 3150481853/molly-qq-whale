@@ -7,15 +7,18 @@
  * 服务器做看守：家里定时推一次"我还活着"，服务器超时没收到就
  * 用 PushPlus 推手机。**它的价值恰恰在家里死掉的时候体现。**
  *
- * 频率（2026-10-22 m03035 调整）：白天 8–24 点每分钟一次；夜间 0–8 点
- * 每 3 分钟一次（夜间降频由脚本内判断实现，计划任务统一按 PT1M 触发）。
+ * 频率（以服务器 DSH 留言 #15 为准）：白天 8–24 点每分钟一条（服务器阈值 180 秒），
+ * 夜间 0–8 点每小时一条（服务器阈值 4500 秒，留 15 分钟余量）。计划任务保持 PT1M，
+ * 实际节奏由脚本内节流实现（读 out/heartbeat-state.json 的 lastAt）。实时的掉线
+ * 发现由本机 watchdog（1 分钟一查）+ 服务器侧阈值保证，心跳只证明「整机还活着」。
+ * 注意：白天若压到 3 分钟一条，就贴着 180 秒阈值跑，边界抖动会触发假告警——不要那样调。
  *
  * 只做出站 HTTP：不需要公网 IP、不开任何端口、不动路由器。
  *
  * 宿主端口（DSH 桌面那一侧）**不写死**：auto 发现，见 resolvePluginBase()。
  * 每次运行往 out/heartbeat.log 追加一行，控制台运维页的「心跳」日志读的就是它。
  *
- * 用法（计划任务每 1 分钟调一次；夜间由脚本自行跳过 2/3）：
+ * 用法（计划任务每分钟调一次；实际发送节奏由脚本内节流控制）：
  *   node tools/heartbeat-push.mjs
  *   node tools/heartbeat-push.mjs --once --verbose
  *   node tools/heartbeat-push.mjs --dry-run     只打印要发的内容，不真发
@@ -78,20 +81,43 @@ const args = new Set(process.argv.slice(2))
 const VERBOSE = args.has('--verbose')
 const DRY = args.has('--dry-run')
 
-/* ── 夜间降频（2026-10-22 主人 m03035 定的节奏）─────────────────
- * 白天（默认 8 点以后）计划任务每分钟跑一次 → 家里掉线服务器 1 分钟内就能发现；
- * 夜间 0–8 点主人睡觉/合盖，掉了也没人扫码，改成每 3 分钟推一次，
- * 只向服务器证明「整机还活着」，半夜不拿 pushplus 吵人。
- * 计划任务按 PT1M 触发，靠这里跳过来实现两种频率（任务本身只配一个触发器）。
+/* ── 节流：白天每分钟一条、夜间每小时一条（服务器 DSH 留言 #15 / /molly/status 为准）──
+ * 计划任务仍是 PT1M（改触发器要提权，且任务本身很便宜），这里按
+ * out/heartbeat-state.json 的 lastAt 做最小间隔节流：
+ *   - 白天 8–24 点：lastAt 距今 < 45 秒就跳过（任务 PT1M + 抖动，正常约每分钟一条，
+ *     服务器阈值 180 秒，留足余量；不要调大到 170 秒，否则贴着阈值会触发假告警）；
+ *   - 夜间 0–8 点：距上次成功超过 55 分钟才发 → 约每小时一条（服务器阈值 4500 秒）。
+ * 上一次发送失败（state.ok === false）时不节流，立刻重试。
  */
 const HIGH_FREQ_START_HOUR = Number(
   process.env.MOLLY_HIGH_FREQ_START_HOUR || cfg.highFreqStartHour || 8
 )
-const NIGHT_SKIP_MOD = Math.max(1, Number(process.env.MOLLY_NIGHT_SKIP_MOD || cfg.nightSkipMod || 3))
+const NIGHT_MIN_GAP_MINUTES = Math.max(
+  1,
+  Number(process.env.MOLLY_NIGHT_MIN_GAP_MINUTES || cfg.nightMinGapMinutes || 55)
+)
+const DAY_MIN_GAP_SECONDS = Math.max(
+  1,
+  Number(process.env.MOLLY_DAY_MIN_GAP_SECONDS || cfg.dayMinGapSeconds || 45)
+)
 {
   const d = new Date()
-  if (d.getHours() < HIGH_FREQ_START_HOUR && d.getMinutes() % NIGHT_SKIP_MOD !== 0) {
-    if (VERBOSE) console.log('[heartbeat] 夜间降频：', d.getHours(), '点，本次跳过')
+  let st = {}
+  try {
+    st = readState() || {}
+  } catch {
+    st = {}
+  }
+  const lastAt = Number(st.lastAt || 0)
+  const gapSec = lastAt ? (Date.now() - lastAt) / 1000 : Infinity
+  const lastOk = st.ok !== false
+  if (d.getHours() < HIGH_FREQ_START_HOUR) {
+    if (lastAt && lastOk && gapSec < NIGHT_MIN_GAP_MINUTES * 60) {
+      if (VERBOSE) console.log('[heartbeat] 夜间节流：距上次', Math.round(gapSec / 60), '分钟，本次跳过')
+      process.exit(0)
+    }
+  } else if (lastAt && lastOk && gapSec < DAY_MIN_GAP_SECONDS) {
+    if (VERBOSE) console.log('[heartbeat] 白天节流：距上次', Math.round(gapSec), '秒，本次跳过')
     process.exit(0)
   }
 }

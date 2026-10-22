@@ -302,7 +302,7 @@ export const OWNER_ONLY_COMMAND_KEYWORDS = Object.freeze([
   }),
   Object.freeze({
     cap: CAP.PROCESS_KILL,
-    keywords: Object.freeze(['杀进程', '结束进程', '关掉 qq', '关 qq', '停 napcat', '关闭 napcat', 'taskkill']),
+    keywords: Object.freeze(['杀进程', '结束进程', '关掉 qq', '关 qq', '停 snowluma', '关闭 snowluma', '停 napcat', '关闭 napcat', 'taskkill']),
   }),
   Object.freeze({
     cap: CAP.DSH_RESTART,

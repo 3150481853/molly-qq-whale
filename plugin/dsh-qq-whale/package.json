@@ -1,13 +1,13 @@
 {
   "name": "dsh-qq-whale",
-  "version": "0.1.0",
-  "description": "QQ 通道 for DeepSeek Harness — 蓝色大肥鱼住进 QQ：活人感回复、表情包斗图、持久记忆",
+  "version": "1.0.0",
+  "description": "QQ 通道 for DeepSeek Harness — 蓝色大肥鱼住进 QQ：活人感回复、表情包斗图、持久记忆、会发语音",
   "keywords": [
     "dsh",
     "dsh-plugin",
     "qq",
     "onebot",
-    "napcat",
+    "snowluma",
     "chatbot",
     "persona"
   ],

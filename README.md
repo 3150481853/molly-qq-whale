@@ -2,10 +2,12 @@
 
 <img src="assets/hero.svg" width="880" alt="Molly QQ Whale">
 
-基于 **DeepSeek Harness** 的 QQ 通道插件：稳定的人设、长期记忆、表情包习惯，
+基于 **DeepSeek Harness** 的 QQ 通道插件：稳定的人设、长期记忆、表情包习惯、会发语音，
 以及一个能看懂她此刻在干什么的控制台。
 
-[![license](https://img.shields.io/badge/license-MIT-1aae39?style=flat-square)](LICENSE) [![node](https://img.shields.io/badge/node-22%2B-1aae39?style=flat-square)](https://nodejs.org) [![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0075de?style=flat-square)](#环境要求) [![host](https://img.shields.io/badge/host-DeepSeek%20Harness-5645d4?style=flat-square)](#环境要求) [![QQ](https://img.shields.io/badge/QQ-OneBot%2011-0075de?style=flat-square)](https://github.com/NapNeko/NapCatQQ)
+**v1.0.0** —— 第一个正式版：记忆、表情、语音、QQ 空间、自愈、控制台，全部跑通闭环。
+
+[![license](https://img.shields.io/badge/license-MIT-1aae39?style=flat-square)](LICENSE) [![node](https://img.shields.io/badge/node-22%2B-1aae39?style=flat-square)](https://nodejs.org) [![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0075de?style=flat-square)](#环境要求) [![host](https://img.shields.io/badge/host-DeepSeek%20Harness-5645d4?style=flat-square)](#环境要求) [![QQ](https://img.shields.io/badge/QQ-OneBot%2011-0075de?style=flat-square)](#环境要求)
 
 </div>
 
@@ -42,9 +44,11 @@
 | **人设** | 人格写在 `persona/*.md` 里：怎么说话、底线在哪、对不同的人用什么语气 | 改文件 + 重载插件就换一个人；不是换个提示词那种换 |
 | **记忆** | 短期窗口之外还有长期库和关系画像；模型按批抽事实，没把握的先进「待核实区」 | 她记得你上周说过要搬家，也记得你讨厌被叫全名 |
 | **表情包** | 收到的图会自动学（有日配额和体积上限），按语境挑，一条回复最多两张 | 聊着聊着甩一张图过来，不是随机贴表情 |
+| **语音** | 接 SnowLuma 的 PTT 通道，edge-tts 打底，也能挂 GPT-SoVITS 社区音色；23:50–9:00 静默 | 冷不丁一条 4 秒语音弹出来 |
+| **手（V1.0）** | 合并转发的正文进上下文；QQ 空间能读、能写草稿，发布必须你确认；群里叫她的名字会应 | 她会看、会等批准，不擅自替你发 |
 | **先查再说** | 事实性问题先委派干活会话去查，再用自己的话讲；查不到就说不知道 | 不编。宁可漏，不可滥 |
 | **干活** | 以 `命令` 开头的指令会进常驻 agent：读文件、跑脚本、整理资料，进度实时播报到 QQ | 她一边干一边碎碎念，不是等十分钟后甩一个结果 |
-| **控制台** | 14 个页面的本地控制台 | 她在跟谁聊、记得什么、花了多少积分、守护进程是不是还活着 |
+| **控制台** | 15 个页面的本地控制台 | 她在跟谁聊、记得什么、花了多少积分、守护进程是不是还活着 |
 | **看门狗** | 计划任务定时巡检，掉线自动重连、重登、重启；撞上风控就闭嘴等 | 你睡觉的时候她也在，出事了先自己爬起来 |
 
 她刻意不做三件事：**不替你决定人设**、**不越权改你的代码**、**不上传任何数据**。
@@ -55,7 +59,7 @@
 
 ```mermaid
 flowchart LR
-  A([QQ 里的一句话]) --> B[NapCat<br/>注入真客户端]
+  A([QQ 里的一句话]) --> B[SnowLuma<br/>注入真客户端]
   B -->|OneBot 11 · WS 3001| C[插件<br/>闸门 · 场景 · 去抖]
   C -->|该说| D[DSH 宿主<br/>人设 · 记忆 · 关系 · 近况]
   D --> E[模型后端<br/>主脑 → 降级 → 备用]
@@ -92,10 +96,10 @@ flowchart LR
 | 你需要 | 说明 |
 |:--|:--|
 | **Windows 10 / 11** | 主目标平台。插件与控制台是纯 Node，但运维脚本（守护、计划任务、快捷方式）是 Windows 的 |
-| **Node.js ≥ 22** | DSH 自带运行时也行；仓库里的 47 个自测脚本用它跑 |
+| **Node.js ≥ 22** | DSH 自带运行时也行；仓库里的 43 个自测脚本用它跑 |
 | **DeepSeek Harness** | 宿主。插件以 `dsh.bundle` 的形式挂进 profile |
 | **一个 QQ 号** | 建议小号。Molly 会用这个号登录、说话、发图 |
-| **NapCat** | 把真 QQ 客户端接成 OneBot 11 通道。本仓库**不含** NapCat，去上游下 |
+| **SnowLuma** | 把真 QQ 客户端接成 OneBot 11 通道（HTTP 3000 / WS 3001）。许可为源码可见、非商业，商用前先确认。本仓库**不含** SnowLuma，去上游下 |
 | **一个模型接口** | 任意 OpenAI 兼容接口即可，也可以接 WorkBuddy 的免费额度（见第 3 步） |
 
 ## 十分钟跑起来
@@ -106,14 +110,26 @@ flowchart LR
 
 ### 1 · 把 QQ 接成通道
 
-装好 NapCat，用它提供的注入器启动 QQ 客户端，登录你的小号，然后打开一个 **OneBot 11 正向 WebSocket**：
+装好 **SnowLuma**（OneBot 11 框架，要求 Node ≥ 22、与 QQ 同用户同权限），解压后编辑它目录里的 `config\onebot.json`，在 `networks` 里开一对本机 HTTP + WebSocket：
 
-```yaml
-地址: ws://127.0.0.1:3001
-Token: 自己定一个，等会儿填进 onebotToken
+```json
+{
+  "networks": {
+    "httpServers": [{
+      "name": "http-local", "enabled": true, "host": "127.0.0.1", "port": 3000,
+      "accessToken": "自己定一个", "messageFormat": "array", "reportSelfMessage": true
+    }],
+    "wsServers": [{
+      "name": "dsh-qq-whale", "enabled": true, "host": "127.0.0.1", "port": 3001,
+      "role": "Universal", "accessToken": "自己定一个", "messageFormat": "array", "reportSelfMessage": true
+    }]
+  }
+}
 ```
 
-NapCat 的 WebUI 默认在 `http://127.0.0.1:6099`，扫码登录也在那里。NapCat 的版本和注入方式与 DSH 无关，按它自己的说明走。
+然后跑 `launcher.bat`，扫码登录你的小号——SnowLuma 的 WebUI 在 `http://127.0.0.1:5099`。HTTP 3000 给看门狗探活、WS 3001 给插件收发；两处 Token 要一致，等会儿填进 `onebotToken`。
+
+SnowLuma 的版本、Hook 与 QQ 客户端的匹配关系与 DSH 无关，按它自己的说明走。
 
 ### 2 · 把插件挂进 DSH profile
 
@@ -183,7 +199,7 @@ node tools\console-server.mjs      # 或直接双击 .\console.cmd
 }
 ```
 
-- **14 个页面**：总览 · 会话与消息 · 记忆 · 待核实 · 表情包 · 预算 · 干活 · 守护 · 运维 · 外部服务 · NapCat · 登录 · 执行块 · 设置
+- **15 个页面**：总览 · 会话与消息 · 记忆 · 待核实 · 表情包 · 发言开关 · 预算 · 干活 · 守护 · 运维 · 外部服务 · 通道（SnowLuma）· 登录 · 执行块 · 设置
 - 只监听 `127.0.0.1`；宿主端口每次重启都会换，服务端自己探。
 - 打包成单文件 exe 见 [docs/deploy.md](docs/deploy.md)。
 
@@ -216,10 +232,10 @@ node tools\console-server.mjs      # 或直接双击 .\console.cmd
 ```
 molly-qq-whale/
 ├─ plugin/
-│  ├─ dsh-qq-whale/        主插件：35 个模块，QQ 收发的全部逻辑
+│  ├─ dsh-qq-whale/        主插件：37 个模块，QQ 收发的全部逻辑
 │  └─ dsh-qq-pest/         可选的「嘴臭模式」，独立状态机，可单独卸载
 ├─ console/                控制台前端（零依赖静态页）
-├─ tools/                  控制台服务端 + 守护 + 打包 + 47 个自测脚本
+├─ tools/                  控制台服务端 + 守护 + 打包 + 43 个自测脚本
 ├─ persona/                core.example.md：人设模板（不含真实人设）
 ├─ config/                 cordis.patch.example.yml 等挂载与配置样例
 ├─ docs/                   16 篇文档：安装、契约、设计、部署、记忆、人设…
@@ -271,7 +287,7 @@ molly-qq-whale/
 > [!WARNING]
 > Molly 是真的能动手的：她能读文件、跑脚本、发消息。下面几条不是建议，是默认行为，**别在不理解的情况下关掉**。
 
-- **只听本机** —— 控制台、插件接口、NapCat 全部绑定 `127.0.0.1`，不对外开端口；
+- **只听本机** —— 控制台、插件接口、通道后端全部绑定 `127.0.0.1`，不对外开端口；
 - **三级角色** —— `owner` > `adm`（指令、工坊）> `guest`（只能聊天），谁是谁写在配置里，运行期不可改；
 - **命令要批准** —— 改代码会写成 `pending-code.json` 等你回「1」；群名片被改会自己撕回原样；同一时间只跑一个，其余排队；
 - **受保护路径 DENY** —— 人设、记忆、凭据目录默认不允许命令会话碰；
@@ -308,7 +324,7 @@ molly-qq-whale/
 <details>
 <summary><b>她占多少资源？</b></summary>
 
-一个 Node 进程（插件跑在 DSH 宿主里）+ 一个控制台进程 + NapCat 注入的 QQ。没有数据库，没有容器。
+一个 Node 进程（插件跑在 DSH 宿主里）+ 一个控制台进程 + SnowLuma 拉起的 QQ。没有数据库，没有容器。
 </details>
 
 ## 参与开发
@@ -324,7 +340,7 @@ molly-qq-whale/
 MIT，见 [LICENSE](LICENSE)。
 
 致谢：DeepSeek Harness（宿主）·
-[NapCat](https://github.com/NapNeko/NapCatQQ) 与 OneBot 11（QQ 通道）·
+SnowLuma（QQ 通道后端，OneBot 11 实现；源码可见、非商业许可）·
 [VoltAgent/awesome-design-md](https://github.com/VoltAgent/awesome-design-md)（控制台视觉语言）。
 
 <div align="center">

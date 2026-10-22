@@ -2372,7 +2372,14 @@ export class ChatEngine {
       this.logger('debug', `正在发送中，本轮消息排队（${key}）`)
       this.traceReply(key, 'queued')
       existing.pending = existing.pending || []
-      existing.pending.push({ ev, norm, scene, userName, groupName, mood })
+      /*
+       * 2026-10-22 修：这里原来漏了 `conv`，排队的消息在下一轮启动时
+       * `scheduleReply` 第一行 `const key = conv.key` 直接抛
+       * "Cannot read properties of undefined (reading 'key')"，
+       * 被 finally 里的 `.catch` 吞成一条 warn —— 真机表现就是
+       * 「她正在发上一条时我 @ 了她，她永远不回」（10:30:24 那条）。
+       */
+      existing.pending.push({ ev, norm, scene, conv, userName, groupName, mood })
       return
     }
 

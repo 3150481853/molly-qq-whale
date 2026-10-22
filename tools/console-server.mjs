@@ -113,8 +113,15 @@ const stripSlash = (s) => String(s || '').trim().replace(/\/+$/, '');
 
 // 数据服务（只读，已在跑，别动它）
 const SIDECAR = stripSlash(pick('MOLLY_SIDECAR', 'sidecar', 'http://127.0.0.1:19391'));
-// NapCat WebUI（需 JWT 鉴权，见契约 §6）
+// NapCat WebUI（需 JWT 鉴权，见契约 §6）——2026-10-22 起仅作回滚后端展示
 const NAPCAT = stripSlash(pick('MOLLY_NAPCAT', 'napcat', 'http://127.0.0.1:6099'));
+// SnowLuma OneBot HTTP（P2 迁移后的主后端）。token 与 watchdog-config.json 的 snowluma.token 一致。
+// 注意：token 只在服务端内存里用，绝不回显给前端、绝不写日志。
+const SNOWLUMA = stripSlash(pick('MOLLY_SNOWLUMA', 'snowluma', 'http://127.0.0.1:3000'));
+const SNOWLUMA_TOKEN = String(pick('MOLLY_SNOWLUMA_TOKEN', 'snowlumaToken', '${ONEBOT_TOKEN}')).trim();
+const SNOWLUMA_WEBUI = stripSlash(pick('MOLLY_SNOWLUMA_WEBUI', 'snowlumaWebui', 'http://127.0.0.1:5099'));
+// 强制后端：空 = 每次都读 watchdog-config.json 的 backend（默认 snowluma）
+const FORCE_BACKEND = String(pick('MOLLY_BACKEND', 'backend', '')).trim();
 // DSH 宿主插件接口。留空 = 运行时探测端口（宿主重启会换端口，见下方探测逻辑）；
 // 设了就用设的、不再扫端口。两种写法都收：http://h:7053 或 http://h:7053/dsh-qq-whale
 const PLUGIN_BASE = (() => {
@@ -460,6 +467,13 @@ async function buildOverview() {
   return out;
 }
 
+// ── 后端选择：watchdog-config.json 的 backend（默认 snowluma，可切回 napcat 回滚）──
+function currentBackend() {
+  if (FORCE_BACKEND === 'napcat' || FORCE_BACKEND === 'snowluma') return FORCE_BACKEND;
+  const cfg = readJson(WD_CONFIG, null);
+  return cfg && cfg.backend === 'napcat' ? 'napcat' : 'snowluma';
+}
+
 // ── NapCat：POST CheckLoginStatus（JWT 构造见契约 §6，不打印 token）─────────
 function napcatBearer() {
   const SECRET = process.env.NAPCAT_WEBUI_JWT_SECRET_KEY || '${NAPCAT_JWT_SECRET}';
@@ -470,7 +484,84 @@ function napcatBearer() {
   return Buffer.from(JSON.stringify({ Data: data, Hmac: hmac })).toString('base64');
 }
 
+// ── SnowLuma：OneBot v11 HTTP 动作（token 只走请求头，永不回显）────────────
+async function snowlumaAction(action, params = {}, timeoutMs = 2000) {
+  const r = await fetch(`${SNOWLUMA}/${action}`, {
+    method: 'POST',
+    signal: AbortSignal.timeout(timeoutMs),
+    headers: {
+      'content-type': 'application/json',
+      ...(SNOWLUMA_TOKEN ? { authorization: `Bearer ${SNOWLUMA_TOKEN}` } : {}),
+    },
+    body: JSON.stringify(params || {}),
+  });
+  const j = await r.json().catch(() => null);
+  if (!j || typeof j.retcode !== 'number') throw new Error(`HTTP ${r.status}（OneBot 应答不可解析）`);
+  return j;
+}
+
+/**
+ * SnowLuma 状态探测（返回形状与 NapCat 版兼容，前端字段名不变）。
+ * 三层：get_login_info（连通 + 账号）→ get_status.online（登录态）→ get_csrf_token（深度探测）。
+ * 为什么要有深度探测：SnowLuma 也可能「假在线」——get_status 说 online 但服务端登录态
+ * 已经作废（10-22 11:30 的 NapCat 事故同型）；get_csrf_token 需要服务端往返，能暴露出来。
+ */
+async function buildSnowluma() {
+  const base = {
+    reachable: false,
+    backend: 'snowluma',
+    webui: SNOWLUMA_WEBUI,
+    uin: null,
+    nickname: null,
+    deepOk: null,
+    onlineClients: [],
+  };
+  try {
+    const li = await snowlumaAction('get_login_info');
+    if (li.retcode !== 0) {
+      return {
+        ...base,
+        reachable: true,
+        isLogin: false,
+        loginPhase: 'offline',
+        coreReady: false,
+        loginError: li.message || li.wording || `retcode ${li.retcode}`,
+      };
+    }
+    const [st, csrf, clients] = await Promise.all([
+      snowlumaAction('get_status').catch(() => null),
+      snowlumaAction('get_csrf_token').catch(() => null),
+      snowlumaAction('get_online_clients').catch(() => null),
+    ]);
+    const online = Boolean(st && st.retcode === 0 && st.data && st.data.online === true);
+    const deepOk = Boolean(csrf && csrf.retcode === 0);
+    // SnowLuma 把客户端列表包在 data.clients 里（NapCat 兼容接口历史上放在 data 直接成数组）
+    const rawClients = clients && clients.retcode === 0 ? clients.data : null;
+    const list = Array.isArray(rawClients)
+      ? rawClients
+      : (rawClients && Array.isArray(rawClients.clients) ? rawClients.clients : []);
+    return {
+      ...base,
+      reachable: true,
+      isLogin: online,
+      loginPhase: online ? 'online' : 'offline',
+      coreReady: online,
+      uin: li.data && li.data.user_id ? String(li.data.user_id) : null,
+      nickname: li.data && li.data.nickname ? String(li.data.nickname) : null,
+      deepOk,
+      onlineClients: list.slice(0, 5).map((c) => ({
+        name: String((c && (c.device_name || c.app_name)) || ''),
+        kind: String((c && (c.device_kind || c.app_name)) || ''),
+      })),
+      loginError: '',
+    };
+  } catch (err) {
+    return { ...base, error: (err && err.message) || String(err) };
+  }
+}
+
 async function buildNapcat() {
+  if (currentBackend() === 'snowluma') return await buildSnowluma();
   try {
     const r = await fetch(`${NAPCAT}/api/QQLogin/CheckLoginStatus`, {
       method: 'POST',
@@ -484,19 +575,24 @@ async function buildNapcat() {
     const j = await r.json().catch(() => null);
     const d = (j && j.data) || {};
     if (!j || j.code !== 0) {
-      return { reachable: true, isLogin: false, error: (j && j.message) || `HTTP ${r.status}` };
+      return { reachable: true, backend: 'napcat', webui: null, isLogin: false, error: (j && j.message) || `HTTP ${r.status}` };
     }
     return {
       reachable: true,
+      backend: 'napcat',
+      webui: null,
       isLogin: d.isLogin === true,
       loginPhase: d.loginPhase ?? null,
       coreReady: d.coreReady === true,
       uin: d.uin ? String(d.uin) : null,
       qrcodeurl: typeof d.qrcodeurl === 'string' ? d.qrcodeurl : '',
       loginError: typeof d.loginError === 'string' ? d.loginError : '',
+      nickname: null,
+      deepOk: null,
+      onlineClients: [],
     };
   } catch (err) {
-    return { reachable: false, error: `${(err && err.message) || err}` };
+    return { reachable: false, backend: 'napcat', webui: null, error: `${(err && err.message) || err}` };
   }
 }
 
@@ -1649,7 +1745,28 @@ const ACTIONS = {
     return { ...r, ok: okAll, error: okAll ? undefined : err };
   },
 
+  // SnowLuma 后端：没有 WebUI 二维码可生成（登录是 QQ 原生窗口扫码），
+  // 「重新登录」= 触发提权任务 snowluma-start.ps1 -QQOnly：只重启 QQ、不动 SnowLuma 进程，
+  // 保住设备指纹，hookAutoLoad 会把 hook 重新注入新 QQ，QQ 窗口弹出扫码。
   'napcat/qr': async () => {
+    if (currentBackend() === 'snowluma') {
+      if (!LIVE) {
+        return {
+          ok: false,
+          status: 409,
+          error: '开发保护：真实重启会踢掉当前 QQ 登录。设 MOLLY_CONSOLE_LIVE=1 后重启控制台才允许执行。',
+          data: { dryRun: true, would: 'schtasks /Run /TN SnowLuma-Relogin' },
+        };
+      }
+      const r = await runTaskNow('SnowLuma-Relogin', 60_000);
+      return {
+        ...r,
+        data: {
+          backend: 'snowluma',
+          hint: '已触发 SnowLuma-Relogin：约 10~25 秒后 QQ 窗口会弹出，用手机扫码即可（SnowLuma 进程没重启，设备指纹不变）。',
+        },
+      };
+    }
     const r = await runNode(path.join(TOOLS_DIR, 'make-qr.mjs'), [path.join(OUT, 'console-qr.png')], 45_000);
     if (!r.ok) return { ok: false, error: r.error || '生成二维码失败', stdout: r.stdout };
     const out = r.stdout || '';
@@ -1668,13 +1785,24 @@ const ACTIONS = {
     };
   },
 
+  // SnowLuma 后端：全量重启 = 触发 SnowLuma-Boot（清 QQ → 起 SnowLuma → 起 QQ → 等扫码）。
   'napcat/restart': async () => {
     if (!LIVE) {
       return {
         ok: false,
         status: 409,
         error: '开发保护：真实重启会踢掉当前 QQ 登录。设 MOLLY_CONSOLE_LIVE=1 后重启控制台才允许执行。',
-        data: { dryRun: true, would: 'start-molly.ps1 -Restart' },
+        data: {
+          dryRun: true,
+          would: currentBackend() === 'snowluma' ? 'schtasks /Run /TN SnowLuma-Boot' : 'start-molly.ps1 -Restart',
+        },
+      };
+    }
+    if (currentBackend() === 'snowluma') {
+      const r = await runTaskNow('SnowLuma-Boot', 60_000);
+      return {
+        ...r,
+        data: { backend: 'snowluma', hint: '已触发 SnowLuma-Boot：全量重启 SnowLuma + QQ，约 20~40 秒后 QQ 窗口弹出扫码。' },
       };
     }
     return runPowerShell(['-Restart'], 240_000);
@@ -1790,8 +1918,18 @@ const ACTIONS = {
       return {
         ok: false,
         status: 409,
-        error: '开发保护：拉起 NapCat 可能和现有进程抢端口。设 MOLLY_CONSOLE_LIVE=1 后重启控制台才允许执行。',
-        data: { dryRun: true, would: 'start-molly.ps1' },
+        error: '开发保护：拉起 QQ 进程可能和现有进程抢端口。设 MOLLY_CONSOLE_LIVE=1 后重启控制台才允许执行。',
+        data: {
+          dryRun: true,
+          would: currentBackend() === 'snowluma' ? 'schtasks /Run /TN SnowLuma-Boot' : 'start-molly.ps1',
+        },
+      };
+    }
+    if (currentBackend() === 'snowluma') {
+      const r = await runTaskNow('SnowLuma-Boot', 60_000);
+      return {
+        ...r,
+        data: { backend: 'snowluma', hint: '已触发 SnowLuma-Boot：拉起 SnowLuma + QQ，约 20~40 秒后等扫码。' },
       };
     }
     return runPowerShell([], 240_000);
@@ -1901,6 +2039,22 @@ const ACTIONS = {
 
   /** 拉起 / 检查 Molly。不带 -Restart：那个开关会先杀 QQ。 */
   'molly/start': async () => {
+    // SnowLuma 后端：控制台是普通权限，拉不起提权的 QQ；交给 SnowLuma-Boot 计划任务
+    if (currentBackend() === 'snowluma') {
+      const r = await runTaskNow('SnowLuma-Boot', 60_000);
+      appendConsoleLog(`[molly] 控制台启动 Molly（SnowLuma/计划任务）：ok=${r.ok}`);
+      return {
+        ok: Boolean(r.ok),
+        durationMs: r.durationMs,
+        data: {
+          backend: 'snowluma',
+          task: 'SnowLuma-Boot',
+          note: '已触发 SnowLuma-Boot（清 QQ → 起 SnowLuma → 起原生 QQ）；需要登录时 QQ 窗口会弹出等你扫码。',
+          taskResult: r,
+        },
+        error: r.error,
+      };
+    }
     // 不加 LIVE 闸：这个动作不破坏任何东西——start-molly.ps1 自己会跳过
     // 已经在跑的 NapCat，结尾只做一次状态检查。真正的破坏性动作是 stop / restart。
     const r = await runPowerShell([], 180_000);
@@ -1921,6 +2075,23 @@ const ACTIONS = {
 
   /** 只停 QQ + NapCat。DSH 宿主、网关、控制台自己都不碰。 */
   'molly/stop': async () => {
+    // SnowLuma 后端：QQ/SnowLuma 都是提权进程，普通权限杀不掉，走 SnowLuma-Stop 任务
+    if (currentBackend() === 'snowluma') {
+      const r = await runTaskNow('SnowLuma-Stop', 60_000);
+      appendConsoleLog(`[molly] 控制台停 Molly（SnowLuma/计划任务）：ok=${r.ok}`);
+      return {
+        ok: Boolean(r.ok),
+        status: r.ok ? undefined : 500,
+        durationMs: r.durationMs,
+        data: {
+          backend: 'snowluma',
+          task: 'SnowLuma-Stop',
+          note: '已触发 SnowLuma-Stop（温和关 QQ + 结束 SnowLuma）；DSH 宿主、网关、控制台本身没动。',
+          taskResult: r,
+        },
+        error: r.ok ? undefined : (r.error || '触发 SnowLuma-Stop 失败'),
+      };
+    }
     const r = stopMollyProcesses();
     const okAll = r.failed.length === 0;
     appendConsoleLog(
@@ -1943,6 +2114,24 @@ const ACTIONS = {
 
   /** 先停再起。中间留 3 秒让 NapCat 释放 6099 / 3001。 */
   'molly/restart': async () => {
+    // SnowLuma 后端：停 → 等 2 秒 → 起，全部走提权计划任务
+    if (currentBackend() === 'snowluma') {
+      const stopped = await runTaskNow('SnowLuma-Stop', 60_000);
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      const started = await runTaskNow('SnowLuma-Boot', 60_000);
+      appendConsoleLog(`[molly] 控制台重启 Molly（SnowLuma/计划任务）：停=${stopped.ok} 起=${started.ok}`);
+      return {
+        ok: Boolean(started.ok),
+        durationMs: (stopped.durationMs || 0) + 2000 + (started.durationMs || 0),
+        data: {
+          backend: 'snowluma',
+          note: '已触发 SnowLuma-Stop → SnowLuma-Boot；中间有约 20~40 秒空窗，需要登录时会弹 QQ 扫码窗。',
+          stopped,
+          started,
+        },
+        error: started.ok ? undefined : (started.error || '触发 SnowLuma-Boot 失败'),
+      };
+    }
     const stopped = stopMollyProcesses();
     await new Promise((resolve) => setTimeout(resolve, 3000));
     const started = await runPowerShell([], 180_000);
@@ -2155,6 +2344,41 @@ const ACTIONS = {
     };
   },
 };
+
+/**
+ * 触发一个提权计划任务（SnowLuma 的「重新登录 / 全量重启」都走它）。
+ * 为什么要绕一层计划任务：console-server 自己以 Limited 权限跑，直接调
+ * snowluma-start.ps1 注入不了提权的 QQ.exe；计划任务以 RunLevel Highest 跑，能注入。
+ * schtasks 在中文系统输出 GBK，这里只认退出码，不解析输出。
+ */
+async function runTaskNow(taskName, timeoutMs = 60_000) {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    let child;
+    try {
+      child = spawn('schtasks.exe', ['/Run', '/TN', taskName], { windowsHide: true });
+    } catch (err) {
+      return resolve({ ok: false, error: errText(err), durationMs: 0 });
+    }
+    let out = '';
+    let errOut = '';
+    let settled = false;
+    const done = (v) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ ...v, durationMs: Date.now() - t0, task: taskName });
+    };
+    const timer = setTimeout(() => {
+      try { child.kill(); } catch { /* ignore */ }
+      done({ ok: false, error: `schtasks /Run ${taskName} 超过 ${Math.round(timeoutMs / 1000)} 秒未返回` });
+    }, timeoutMs);
+    child.stdout.on('data', (d) => { out += d.toString('binary'); });
+    child.stderr.on('data', (d) => { errOut += d.toString('binary'); });
+    child.on('error', (e) => done({ ok: false, error: errText(e) }));
+    child.on('exit', (code) => done({ ok: code === 0, code, stdout: out.slice(-2000), stderr: errOut.slice(-2000) }));
+  });
+}
 
 /** 跑 start-molly.ps1（可能很久，输出也大） */
 async function runPowerShell(args, timeoutMs) {

@@ -17,6 +17,11 @@
 ' NOTE: this file is a THIN SHELL and should be treated as frozen. Change
 ' behaviour in console-server.mjs, not here. ASCII only, no BOM (wscript reads
 ' it with the system ANSI code page; a UTF-8 BOM would break the first line).
+'
+' 2026-10-22: set MOLLY_CONSOLE_LIVE=1 so the console's dangerous actions
+' (restart / relogin / stop) actually run instead of dry-run. The console is
+' bound to 127.0.0.1 and the buttons still ask for confirm in the UI, so this
+' is the intended operator surface for the SnowLuma backend.
 
 Option Explicit
 
@@ -31,7 +36,7 @@ On Error Resume Next
 Set sh = CreateObject("WScript.Shell")
 If Err.Number = 0 Then sh.CurrentDirectory = scriptDir
 
-cmd = """" & nodeExe & """ """ & scriptPath & """"
+cmd = "cmd.exe /c set MOLLY_CONSOLE_LIVE=1&& """ & nodeExe & """ """ & scriptPath & """"
 
 rc = sh.Run(cmd, 0, True)
 

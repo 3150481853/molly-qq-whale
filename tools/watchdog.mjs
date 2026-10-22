@@ -29,6 +29,8 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import http from 'node:http'
+import https from 'node:https'
 import { execFile } from 'node:child_process'
 
 // ── 路径 ────────────────────────────────────────────────────────────────────
@@ -58,6 +60,27 @@ const DEFAULT_CONFIG = {
   // 快速登录（SetQuickLogin）失败后的冷却分钟数。
   // login-doctor 手册铁律②：失败不要连试，会升级风控。
   quickLoginRetryMinutes: 30,
+  // ── 后端：'snowluma'（2026-10-22 起）还是 'napcat'（回滚用） ──────────
+  //
+  // 为什么要换：NapCat 的登录态被腾讯作废后仍然「假在线」——get_status 报
+  // online:true，WebUI 也报 isLogin:true，只有真正往服务端发请求（get_csrf_token）
+  // 才会暴露。watchdog 原来只查 login-doctor 的 isLogin，等于对这类掉线完全失明。
+  //
+  // SnowLuma 用同一套 OneBot v11 协议（HTTP 3000 / WS 3001），所以探测逻辑
+  // 可以走标准动作；回滚只需把 backend 改回 'napcat'，旧代码保留。
+  backend: 'snowluma',
+  snowluma: {
+    // SnowLuma 的 OneBot HTTP 服务（插件用的是 WS 3001，这里走 HTTP 3000 探测）
+    base: 'http://127.0.0.1:3000',
+    // accessToken：与 snowluma/config/onebot.json 里的 accessToken 一致
+    token: '',
+    // 掉线抢修脚本（整机：重启 SnowLuma + QQ）
+    startScript: 'snowluma-start.ps1',
+    // 抢修后等待多久再复查（秒）。QQ 启动 + hook 注入 + 登录态建立约 15~40 秒。
+    repairWaitSeconds: 25,
+    // 深度探测连续失败几次才判定「假在线」（一次网络抖动不该重启 QQ）
+    deepFailThreshold: 2,
+  },
   // 通知配置：可以同时开多个渠道，任何一个成功就算通知成功（不互斥）
   //
   //   toast     —— Windows 原生通知中心（零配置、离线可用、不需要账号）
@@ -130,9 +153,10 @@ function loadConfig() {
     return { ...DEFAULT_CONFIG }
   }
   const user = readJson(CONFIG_FILE, {})
-  // 浅合并：notify 单独处理，避免用户只写了 token 就把 type 冲掉
+  // 浅合并：notify / snowluma 单独处理，避免用户只写了 token 就把其余默认冲掉
   const cfg = { ...DEFAULT_CONFIG, ...user }
   cfg.notify = { ...DEFAULT_CONFIG.notify, ...(user.notify || {}) }
+  cfg.snowluma = { ...DEFAULT_CONFIG.snowluma, ...(user.snowluma || {}) }
   return cfg
 }
 
@@ -321,15 +345,162 @@ function runLoginDoctor(args) {
   })
 }
 
-async function checkStatus() {
+// ── 状态探测：按 backend 分派 ───────────────────────────────────────────────
+//
+// 2026-10-22 从 NapCat 迁到 SnowLuma（用户 m02092「取消观察期，直接全面拥抱
+// SnowLuma」）。回滚只需把 watchdog-config.json 的 backend 改回 'napcat'。
+//
+// SnowLuma 没有 NapCat 那套 WebUI（6099 + login-doctor），但它暴露标准
+// OneBot v11 HTTP（默认 127.0.0.1:3000），所以我们用标准动作探测。
+//
+// 为什么必须做 get_csrf_token（深度探测）：
+//   实测故障是「登录态被腾讯作废，但本地仍认为自己在线」——get_status 报
+//   online:true、get_login_info 也正常返回。只有真正向 QQ 服务端要 bkn
+//   （get_csrf_token）才会失败。这正是 STATE.md §4 #18 要求补的盲区。
+function httpPostJson(url, payload, headers = {}, timeoutMs = 8000) {
+  return new Promise((resolve, reject) => {
+    let u
+    try { u = new URL(url) } catch { return reject(new Error('探测地址不合法：' + url)) }
+    const mod = u.protocol === 'https:' ? https : http
+    const body = JSON.stringify(payload || {})
+    const req = mod.request({
+      protocol: u.protocol,
+      hostname: u.hostname,
+      port: u.port || (u.protocol === 'https:' ? 443 : 80),
+      path: u.pathname + u.search,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+        ...headers,
+      },
+      timeout: timeoutMs,
+    }, (res) => {
+      const chunks = []
+      res.on('data', (c) => chunks.push(c))
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8')
+        let parsed = null
+        try { parsed = JSON.parse(text) } catch { /* 保留原文用于报错 */ }
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          return reject(new Error(`HTTP ${res.statusCode} ${text.slice(0, 120)}`))
+        }
+        if (!parsed || typeof parsed !== 'object') {
+          return reject(new Error('应答不是 JSON：' + text.slice(0, 120)))
+        }
+        resolve(parsed)
+      })
+    })
+    req.on('timeout', () => req.destroy(new Error(`探测超时（${timeoutMs}ms）`)))
+    req.on('error', (e) => reject(e))
+    req.write(body)
+    req.end()
+  })
+}
+
+async function snowlumaAction(cfg, action, params = {}, timeoutMs = 8000) {
+  const sl = cfg.snowluma || {}
+  const base = String(sl.base || 'http://127.0.0.1:3000').replace(/\/+$/, '')
+  const token = String(sl.token || '')
+  const headers = token ? { Authorization: `Bearer ${token}` } : {}
+  const res = await httpPostJson(`${base}/${action}`, params, headers, timeoutMs)
+  return {
+    ok: res.retcode === 0,
+    retcode: res.retcode,
+    message: String(res.message || res.wording || ''),
+    data: res.data,
+  }
+}
+
+// 返回 { reachable, backend:'snowluma', status:{isLogin, loginPhase, loginError, deepOk, userId, nickname} }
+async function checkStatusSnowluma(cfg, state = {}) {
+  const threshold = Number((cfg.snowluma || {}).deepFailThreshold ?? 2)
+
+  // ① 进程/端口都没了 → 连接失败
+  let login
+  try {
+    login = await snowlumaAction(cfg, 'get_login_info', {}, 6000)
+  } catch (e) {
+    return { reachable: false, backend: 'snowluma', status: null, raw: String(e?.message || e) }
+  }
+
+  const st = {
+    backend: 'snowluma',
+    isLogin: false,
+    loginPhase: '',
+    loginError: '',
+    deepOk: false,
+    userId: '',
+    nickname: '',
+  }
+
+  if (!login.ok) {
+    st.loginPhase = '未登录'
+    st.loginError = login.message || `get_login_info retcode=${login.retcode}`
+    return { reachable: true, backend: 'snowluma', status: st }
+  }
+  st.userId = String(login.data?.user_id || '')
+  st.nickname = String(login.data?.nickname || '')
+
+  // ② get_status：SnowLuma 自己认为是否在线（它也可能谎报，不能只信它）
+  let online = null
+  try {
+    const gs = await snowlumaAction(cfg, 'get_status', {}, 6000)
+    if (gs.ok && gs.data && typeof gs.data.online === 'boolean') online = gs.data.online
+  } catch { /* 探测失败不致命，继续深度探测 */ }
+
+  if (online === false) {
+    st.loginPhase = '离线'
+    st.loginError = 'get_status 返回 online:false'
+    return { reachable: true, backend: 'snowluma', status: st }
+  }
+
+  // ③ 深度探测：真正向 QQ 服务端要 bkn
+  let deepErr = ''
+  try {
+    const csrf = await snowlumaAction(cfg, 'get_csrf_token', {}, 9000)
+    const d = csrf.data
+    const token = csrf.ok
+      ? (d && typeof d === 'object' ? String(d.token ?? d.bkn ?? d ?? '') : String(d ?? ''))
+      : ''
+    if (csrf.ok && token) st.deepOk = true
+    else deepErr = csrf.message || `get_csrf_token retcode=${csrf.retcode}`
+  } catch (e) {
+    deepErr = String(e?.message || e)
+  }
+
+  if (st.deepOk) {
+    state.deepFails = 0
+    st.isLogin = true
+    st.loginPhase = 'online'
+    return { reachable: true, backend: 'snowluma', status: st }
+  }
+
+  // 深度探测失败：连续 threshold 次才判掉线（一次抖动不折腾 QQ）
+  state.deepFails = Number(state.deepFails || 0) + 1
+  st.loginError = deepErr || 'get_csrf_token 失败'
+  if (state.deepFails < threshold) {
+    st.isLogin = true
+    st.loginPhase = `假在线？(${state.deepFails}/${threshold})`
+    log(`深度探测失败 ${state.deepFails}/${threshold} 次（暂不判掉线）：${st.loginError}`)
+  } else {
+    st.isLogin = false
+    st.loginPhase = '假在线（登录态已失效）'
+  }
+  return { reachable: true, backend: 'snowluma', status: st }
+}
+
+async function checkStatus(cfg = {}, state = {}) {
+  if ((cfg.backend || 'snowluma') === 'snowluma') return checkStatusSnowluma(cfg, state)
   const r = await runLoginDoctor(['status'])
-  if (r.parsed) return { reachable: true, status: r.parsed }
+  if (r.parsed) return { reachable: true, backend: 'napcat', status: r.parsed }
   // status 子命令一定会输出 JSON；解析失败说明 WebUI 真的不可达了
-  return { reachable: false, status: null, raw: r.out || r.err, exit: r.code }
+  return { reachable: false, backend: 'napcat', status: null, raw: r.out || r.err, exit: r.code }
 }
 
 // ── 通知文案 ────────────────────────────────────────────────────────────────
 function offlineText(info, cfg, extra) {
+  const sl = (cfg.backend || 'snowluma') === 'snowluma'
   const lines = []
   lines.push('Molly 掉线了。')
   lines.push('')
@@ -338,8 +509,14 @@ function offlineText(info, cfg, extra) {
   if (info.loginError) lines.push(`错误：${info.loginError}`)
   lines.push('')
   lines.push('怎么救：')
-  lines.push('1. 打开 DSH 跟我说「Molly 掉线了」')
-  lines.push('2. 我给你一张新二维码，你扫码')
+  if (sl) {
+    lines.push('1. 看屏幕上有没有 QQ 登录窗口（watchdog 会尝试重启 QQ，把它叫出来）')
+    lines.push('2. 用手机 QQ 扫码登录 111111111（二维码过期就再等一轮，别连扫）')
+    lines.push('3. 扫完跟我说一声，我确认是否恢复')
+  } else {
+    lines.push('1. 打开 DSH 跟我说「Molly 掉线了」')
+    lines.push('2. 我给你一张新二维码，你扫码')
+  }
   if (extra) { lines.push(''); lines.push(extra) }
   return lines.join('\n')
 }
@@ -431,27 +608,42 @@ async function captureOfflineSnapshot({ prev, current, state, cfg }) {
   try {
     const at = new Date()
     const file = path.join(OUT, `offline-${fileStamp(at)}.json`)
+    const backend = cfg.backend || 'snowluma'
 
-    const [p3001, p6099, qq] = await Promise.all([
-      portListening(3001),
-      portListening(6099),
-      qqProcessList(),
-    ])
+    // 取证要抓「这一刻」的现场：按当前后端决定探哪些端口、读哪份日志
+    const portsToProbe = backend === 'snowluma' ? [3000, 3001, 5099] : [3001, 6099]
+    const portProbes = await Promise.all(portsToProbe.map((p) => portListening(p)))
+    const ports = {}
+    portsToProbe.forEach((p, i) => { ports[p] = portProbes[i] })
 
-    let napcatLogTail
+    const qq = await qqProcessList()
+
+    let bootLogTail
     try {
-      napcatLogTail = tailLines(path.join(OUT, 'napcat-boot.log'), 60)
+      bootLogTail = tailLines(path.join(OUT, backend === 'snowluma' ? 'snowluma-boot.log' : 'napcat-boot.log'), 60)
     } catch (e) {
-      napcatLogTail = [`（读不到 napcat-boot.log：${e?.message || e}）`]
+      bootLogTail = [`（读不到启动日志：${e?.message || e}）`]
+    }
+
+    // SnowLuma 把运行日志打到控制台（snowluma-start.ps1 重定向到文件）
+    let runtimeLogTail = null
+    if (backend === 'snowluma') {
+      try {
+        runtimeLogTail = tailLines(path.join(OUT, 'snowluma-runtime.out.log'), 60)
+      } catch (e) {
+        runtimeLogTail = [`（读不到 snowluma-runtime.out.log：${e?.message || e}）`]
+      }
     }
 
     const snap = {
       at: at.toISOString(),
+      backend,
       from: prev,
       to: current,
-      ports: { 3001: p3001, 6099: p6099 },
+      ports,
       qqProcs: qq,
-      napcatLogTail,
+      bootLogTail,
+      ...(runtimeLogTail ? { runtimeLogTail } : {}),
       stateBefore: JSON.parse(JSON.stringify(state)),
       config: cfg,
     }
@@ -481,7 +673,7 @@ export async function checkOnce(cfg, opts = {}) {
     pendingQuietReport: false,   // 安静时段掉线，等白天补报
   })
 
-  const res = await checkStatus()
+  const res = await checkStatus(cfg, state)
   state.lastCheckAt = nowMs()
 
   let current
@@ -583,7 +775,29 @@ export async function checkOnce(cfg, opts = {}) {
     state.recoverAttempts = usedFast + 1
     state.lastRecoverAt = nowMs()
     log(`自动抢修第 ${state.recoverAttempts} 次` + (fastPhase ? '' : `（已进入降频阶段，每 ${cfg.slowRecoverMinutes || 30} 分钟一次）`))
-    if (current === 'unreachable') {
+    const backend = cfg.backend || 'snowluma'
+    if (backend === 'snowluma') {
+      // SnowLuma 路径（2026-10-22 迁移）：
+      //   unreachable = 进程没了 → 整机重启（重启 SnowLuma + QQ）
+      //   假在线/未登录 → 只温和重启 QQ，让登录窗口弹出来等扫码。
+      //   为什么不整机重启：SnowLuma 重启后设备指纹可能变化，等于逼用户再扫一次。
+      recoverNote = await repairSnowluma(cfg, { qqOnly: current !== 'unreachable' })
+      const again = await checkStatus(cfg, state)
+      if (again.reachable && again.status?.isLogin) {
+        log('抢修后复查：已在线')
+        state.lastState = 'online'
+        state.lastOnlineAt = nowMs()
+        state.offlineSince = 0
+        state.recoverAttempts = 0
+        if (cfg.notifyOnRecover && !quiet) {
+          await notifyAll(cfg, '【Molly】已恢复在线', `自动抢修成功（${backend}）。\n恢复时间：${stamp()}`)
+          state.lastNotifyAt = nowMs()
+        }
+        writeJson(STATE_FILE, state)
+        return { code: 0, current: 'online', prev, quiet, notified: false, recoverNote: recoverNote + '（复查已在线）' }
+      }
+      recoverNote += '（复查仍未上线，下一轮继续）'
+    } else if (current === 'unreachable') {
       // NapCat 进程/端口没了 → 拉起来
       recoverNote = await tryStartNapCat()
     } else {
@@ -644,7 +858,9 @@ export async function checkOnce(cfg, opts = {}) {
   let notified = false
   if (shouldNotify) {
     const info = res.status || { loginPhase: 'WebUI 不可达', loginError: '' }
-    const title = current === 'unreachable' ? '【Molly】NapCat 挂了' : '【Molly】掉线了'
+    const title = current === 'unreachable'
+      ? `【Molly】${(cfg.backend || 'snowluma') === 'snowluma' ? 'SnowLuma' : 'NapCat'} 挂了`
+      : '【Molly】掉线了'
     const r = await notifyAll(cfg, title, offlineText(info, cfg, recoverNote))
     notified = !!r.ok
     state.lastNotifyAt = now
@@ -683,6 +899,37 @@ async function tryStartNapCat() {
   })
 }
 
+// ── 抢修：SnowLuma ─────────────────────────────────────────────────────────
+//
+// 两种情形两条路：
+//  ① OneBot 3000 连不上（SnowLuma 进程没了）→ 整机脚本：重启 SnowLuma + QQ。
+//  ② 进程在但登录态失效（假在线/未登录）→ 只温和重启 QQ：
+//     SnowLuma 的 hook 会自动注入新 QQ 进程，QQ 登录窗口弹出来等用户扫码。
+//     为什么不整机重启：SnowLuma 重启后设备指纹可能变化，等于逼用户再扫一次码。
+async function repairSnowluma(cfg, { qqOnly = false } = {}) {
+  const sl = cfg.snowluma || {}
+  const script = path.join(HERE, sl.startScript || 'snowluma-start.ps1')
+  if (!fs.existsSync(script)) return '（snowluma-start.ps1 不存在，无法自动抢修）'
+  const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script]
+  if (qqOnly) args.push('-QQOnly')
+  const note = await new Promise((resolve) => {
+    execFile('powershell.exe', args, { timeout: 240000, windowsHide: true },
+      (err, stdout, stderr) => {
+        const tail = String(stdout || stderr || '').slice(-300)
+        log(`snowluma-start${qqOnly ? ' -QQOnly' : ''} 退出码`, err?.code ?? 0, tail)
+        resolve(err
+          ? `（自动抢修失败：${String(stderr || err.message).slice(0, 120)}）`
+          : (qqOnly ? '（已温和重启 QQ，等 SnowLuma 重新注入）' : '（已重启 SnowLuma + QQ）'))
+      })
+  })
+  const waitMs = Number(sl.repairWaitSeconds ?? 25) * 1000
+  if (waitMs > 0) {
+    log(`抢修后等待 ${Math.round(waitMs / 1000)} 秒再复查…`)
+    await sleep(waitMs)
+  }
+  return note
+}
+
 // ── 入口 ────────────────────────────────────────────────────────────────────
 async function main() {
   const arg = process.argv[2] || '--once'
@@ -694,9 +941,9 @@ async function main() {
   }
 
   if (arg === '--status') {
-    const res = await checkStatus()
     const state = readJson(STATE_FILE, {})
-    console.log(JSON.stringify({ now: stamp(), quiet: inQuietHours(cfg), check: res, state }, null, 2))
+    const res = await checkStatus(cfg, state)
+    console.log(JSON.stringify({ now: stamp(), backend: cfg.backend || 'snowluma', quiet: inQuietHours(cfg), check: res, state }, null, 2))
     process.exit(res.reachable && res.status?.isLogin ? 0 : 1)
   }
 

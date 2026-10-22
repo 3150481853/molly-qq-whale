@@ -81,6 +81,13 @@ const FILES = [
   ['tools/console-hidden.vbs', 'tools/console-hidden.vbs'],
   ['tools/heartbeat-hidden.vbs', 'tools/heartbeat-hidden.vbs'],
   ['tools/install-console-task.cmd', 'tools/install-console-task.cmd'],
+  // 2026-10-22：SnowLuma 迁移（P2）——启动/停止/校验/注册计划任务。
+  // 发布版没有这几个脚本就换不了后端，watchdog 的 snowluma 抢修分支也会指向不存在的文件。
+  ['tools/snowluma-start.ps1', 'tools/snowluma-start.ps1'],
+  ['tools/snowluma-stop.ps1', 'tools/snowluma-stop.ps1'],
+  ['tools/snowluma-verify.ps1', 'tools/snowluma-verify.ps1'],
+  ['tools/setup-snowluma-boot.ps1', 'tools/setup-snowluma-boot.ps1'],
+  ['tools/p2-enable-watchdog.ps1', 'tools/p2-enable-watchdog.ps1'],
   ['tools/open-console-window.ps1', 'tools/open-console-window.ps1'],
   ['tools/make-desktop-shortcut.ps1', 'tools/make-desktop-shortcut.ps1'],
   ['tools/build-exe.mjs', 'tools/build-exe.mjs'],

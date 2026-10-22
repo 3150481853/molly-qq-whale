@@ -520,15 +520,17 @@
 
     var np = $('#pillNapcat');
     if (np) {
+      /* SnowLuma 与 NapCat 都是"QQ 客户端"，但用户看到的品牌名要跟着当前后端走 */
+      var qcName = nc.backend === 'snowluma' ? 'SnowLuma' : 'NapCat';
       if (!nc.reachable) {
         np.className = 'pill pill-idle';
-        np.innerHTML = '<i class="dot"></i>NapCat 不可达';
+        np.innerHTML = '<i class="dot"></i>' + qcName + ' 不可达';
       } else if (nc.isLogin) {
         np.className = 'pill pill-ok';
-        np.innerHTML = '<i class="dot"></i>NapCat 已登录';
+        np.innerHTML = '<i class="dot"></i>' + qcName + ' 已登录';
       } else {
         np.className = 'pill pill-warn';
-        np.innerHTML = '<i class="dot"></i>NapCat 未登录';
+        np.innerHTML = '<i class="dot"></i>' + qcName + ' 未登录';
       }
     }
 
@@ -680,11 +682,19 @@
         kv('计划任务', wd.taskEnabled === false ? pill('warn', '已禁用') : '已启用')
       ].join('');
 
+      /* 当前 QQ 客户端后端（SnowLuma / NapCat）在配置里定，控制台跟着它换名字 */
+      var qcName = nc.backend === 'snowluma' ? 'SnowLuma' : 'NapCat';
       var ncRows = [
+        kv('后端', esc(qcName)),
         kv('登录', nc.reachable ? (nc.isLogin ? pill('ok', '已登录') : pill('warn', '未登录')) : pill('idle', '不可达')),
         kv('阶段', val(nc.loginPhase)),
         kv('QQ 号', (nc.uin || (p.bot && p.bot.userId)) ? '<span class="mono">' + esc(nc.uin || p.bot.userId) + '</span>' : '—'),
-        kv('核心', nc.coreReady ? '就绪' : '未就绪')
+        nc.backend === 'snowluma'
+          ? kv('昵称', nc.nickname ? esc(nc.nickname) : '—')
+          : '',
+        nc.backend === 'snowluma'
+          ? kv('深度探测', nc.deepOk === true ? pill('ok', '正常') : (nc.deepOk === false ? pill('warn', '假在线') : '—'))
+          : kv('核心', nc.coreReady ? '就绪' : '未就绪')
       ].join('');
 
       var learner = p.learner || {};
@@ -710,7 +720,7 @@
         card('连接与身份', identity),
         card('消息与响应', msgRows),
         card('守护', wdRows),
-        card('NapCat', ncRows),
+        card(qcName, ncRows),
         card('学习器', learnRows),
         card('数据服务', sideRows)
       ].join(''));
@@ -2085,31 +2095,53 @@
 
     var nc = ov.napcat || {};
     var bot = (ov.plugin && ov.plugin.bot) || {};
+    var name = nc.backend === 'snowluma' ? 'SnowLuma' : 'NapCat';
     if (!nc.reachable) {
-      setHtml(box, card('NapCat 不可达', '<p class="ar-error">' + esc(nc.error || 'WebUI 未响应') + '</p>'));
+      setHtml(box, card(name + ' 不可达', '<p class="ar-error">' + esc(nc.error || 'OneBot 未响应') + '</p>'));
       return;
     }
 
-    var qrBody = nc.qrcodeurl
-      ? '<p class="card-sub">当前二维码地址：<a href="' + esc(nc.qrcodeurl) + '" target="_blank" rel="noreferrer">打开</a></p>'
-      : '<p class="card-sub">当前没有待扫的二维码。已登录时不需要扫码。</p>';
+    var qrBody = nc.backend === 'snowluma'
+      ? '<p class="card-sub">SnowLuma 用 QQ 原生窗口扫码登录。点「重新登录」只会重启 QQ（SnowLuma 进程不动、设备指纹不变），约 10~25 秒后 QQ 窗口会弹出来，手机扫码即可；点「全量重启」则会连 SnowLuma 一起重启，只在进程卡死时用。</p>'
+      : (nc.qrcodeurl
+        ? '<p class="card-sub">当前二维码地址：<a href="' + esc(nc.qrcodeurl) + '" target="_blank" rel="noreferrer">打开</a></p>'
+        : '<p class="card-sub">当前没有待扫的二维码。已登录时不需要扫码。</p>');
+
+    var clientText = (nc.onlineClients || []).map(function (c) {
+      var n = c.name || c.kind || '未知设备';
+      if (c.name && c.kind && c.kind !== c.name) n += '（' + c.kind + '）';
+      return n;
+    }).join('、');
+
+    var svcRows = nc.backend === 'snowluma'
+      ? [
+          kv('OneBot', '<span class="mono">3000 / 3001</span>'),
+          kv('WebUI', nc.webui
+            ? '<a href="' + esc(nc.webui) + '" target="_blank" rel="noreferrer">' + esc(nc.webui) + '</a>'
+            : '—'),
+          kv('深度探测', nc.deepOk === true ? pill('ok', '正常') : (nc.deepOk === false ? pill('warn', '假在线') : '—')),
+          kv('在线设备', esc(clientText || '未返回'))
+        ]
+      : [
+          kv('WebUI', pill('ok', '可达')),
+          kv('端口', '<span class="mono">6099</span>'),
+          kv('OneBot', '<span class="mono">3001</span>')
+        ];
 
     setHtml(box, [
       card('登录态', [
+        kv('后端', esc(name)),
         kv('状态', nc.isLogin ? pill('ok', '已登录') : pill('warn', '未登录')),
         kv('阶段', val(nc.loginPhase)),
         /* NapCat 的 CheckLoginStatus 不返回 uin，退回插件侧的 bot.userId */
         kv('QQ 号', (nc.uin || bot.userId)
           ? '<span class="mono">' + esc(nc.uin || bot.userId) + '</span>'
           : '—'),
+        kv('昵称', nc.nickname ? esc(nc.nickname) : esc(bot.nickname || '—')),
         kv('核心就绪', nc.coreReady ? '是' : '否'),
         nc.loginError ? kv('错误', esc(nc.loginError), 'is-bad') : ''
       ].join('')),
-      card('服务', [
-        kv('WebUI', pill('ok', '可达')),
-        kv('端口', '<span class="mono">6099</span>'),
-        kv('OneBot', '<span class="mono">3001</span>')
-      ].join('')),
+      card('服务', svcRows.join('')),
       card('二维码', qrBody)
     ].join(''));
   }
@@ -2127,7 +2159,7 @@
   }
 
   function loginPhaseText(phase) {
-    var map = { ready: '就绪', waiting_qrcode: '等待扫码', waiting: '等待扫码', offline: '离线' };
+    var map = { ready: '就绪', online: '在线', waiting_qrcode: '等待扫码', waiting: '等待扫码', offline: '离线' };
     if (!phase) return '—';
     return map[phase] || String(phase);
   }
@@ -2143,6 +2175,7 @@
     var ov = state.overview;
     var lg = state.login;
     var nc = (ov && ov.napcat) || {};
+    var qcName = nc.backend === 'snowluma' ? 'SnowLuma' : 'NapCat';
     var kind = 'idle';
     var head = '正在读取…';
     var note = '';
@@ -2152,16 +2185,18 @@
       head = '正在连接控制台服务…';
     } else if (!nc.reachable) {
       kind = 'bad';
-      head = 'NapCat 不可达';
-      note = String(nc.error || 'WebUI 未响应');
+      head = qcName + ' 不可达';
+      note = String(nc.error || 'OneBot 未响应');
     } else if (nc.isLogin) {
       kind = 'ok';
       head = '已登录';
-      note = 'Molly ' + (uin || '（QQ 号未知）');
+      note = 'Molly ' + (uin || '（QQ 号未知）') + (nc.nickname ? '（' + nc.nickname + '）' : '');
     } else {
       kind = 'warn';
       head = '等待扫码';
-      note = lg.waiting ? '二维码已就绪，用手机 QQ 扫一下' : '还没登录：点下面的「生成二维码」';
+      note = nc.backend === 'snowluma'
+        ? '点下面的「重新登录」，约 10~25 秒后 QQ 窗口弹出，用手机 QQ 扫一下'
+        : (lg.waiting ? '二维码已就绪，用手机 QQ 扫一下' : '还没登录：点下面的「生成二维码」');
     }
 
     box.innerHTML = '<article class="card login-status-card is-' + kind + '">' +
@@ -2169,10 +2204,15 @@
         '<span class="login-status-note">' + esc(note) + '</span>' +
       '</div>' +
       '<div class="login-status-grid">' +
+        kv('后端', esc(qcName)) +
         kv('登录阶段', nc.reachable ? esc(loginPhaseText(nc.loginPhase)) : '—') +
-        kv('核心就绪', nc.reachable ? (nc.coreReady ? '是' : '否') : '—') +
+        (nc.backend === 'snowluma'
+          ? kv('深度探测', nc.deepOk === true ? pill('ok', '正常') : (nc.deepOk === false ? pill('warn', '假在线') : '—'))
+          : kv('核心就绪', nc.reachable ? (nc.coreReady ? '是' : '否') : '—')) +
         kv('QQ 号', uin ? '<span class="mono">' + esc(uin) + '</span>' : '—') +
-        kv('二维码', lg.png ? pill('warn', '已生成') : pill('idle', '未生成')) +
+        (nc.backend === 'snowluma'
+          ? kv('登录方式', 'QQ 原生窗口扫码')
+          : kv('二维码', lg.png ? pill('warn', '已生成') : pill('idle', '未生成'))) +
       '</div></article>';
   }
 
@@ -2599,13 +2639,15 @@
     },
     {
       id: 'napcat/qr',
-      title: '生成登录二维码',
-      desc: 'spawn make-qr.mjs，成功后把二维码显示在卡片里（最长等 45 秒）。'
+      title: '重新登录（扫码）',
+      /* 两种后端行为不同：SnowLuma 只重启 QQ（不重启 SnowLuma，设备指纹不变）；
+         NapCat 走 make-qr.mjs 出二维码。标题用中性的「重新登录」。 */
+      desc: 'SnowLuma 后端：触发计划任务 SnowLuma-Relogin（只重启 QQ，约 10~25 秒后 QQ 窗口弹出，手机扫码）；NapCat 后端：spawn make-qr.mjs 显示二维码。'
     },
     {
       id: 'napcat/restart',
-      title: '重启 NapCat 登录',
-      desc: 'spawn start-molly.ps1 -Restart，重新拉起 QQ 登录流程。',
+      title: '全量重启 QQ 客户端',
+      desc: 'SnowLuma 后端：触发计划任务 SnowLuma-Boot（连 SnowLuma 一起重启，只在进程卡死时用）；NapCat 后端：spawn start-molly.ps1 -Restart。',
       confirm: true,
       consequence: '会踢掉当前 QQ 登录：Molly 立刻掉线，必须重新扫码才能回来。'
     },
@@ -2642,10 +2684,10 @@
     },
     {
       id: 'process/start-napcat',
-      title: '启动 NapCat 进程',
-      desc: 'spawn start-molly.ps1（不带 -Restart），只拉起进程。',
+      title: '启动 QQ 客户端进程',
+      desc: 'SnowLuma 后端：触发计划任务 SnowLuma-Boot（拉起 SnowLuma + QQ）；NapCat 后端：spawn start-molly.ps1（不带 -Restart），只拉起进程。',
       confirm: true,
-      consequence: '会拉起一个新的 NapCat 进程；若已有进程在跑，可能端口冲突。'
+      consequence: '会拉起一个 QQ 客户端进程；若已有进程在跑，可能端口冲突。'
     }
   ];
 
@@ -3186,11 +3228,17 @@
         kv('昵称', pl.bot && pl.bot.nickname ? esc(pl.bot.nickname) : '—'),
         kv('今天消息', pl.metrics && pl.metrics.messages !== null ? mono(pl.metrics.messages) : '—')
       ].join('')),
-      card('NapCat', [
-        kv('WebUI', nc.reachable ? pill('ok', '可达') : pill('bad', '不可达')),
+      card((nc.backend === 'snowluma' ? 'SnowLuma' : 'NapCat'), [
+        nc.backend === 'snowluma'
+          ? kv('WebUI', nc.webui
+            ? '<a href="' + esc(nc.webui) + '" target="_blank" rel="noreferrer">' + esc(nc.webui) + '</a>'
+            : '—')
+          : kv('WebUI', nc.reachable ? pill('ok', '可达') : pill('bad', '不可达')),
         kv('登录态', nc.isLogin ? pill('ok', '已登录') : pill('warn', '未登录')),
         kv('阶段', val(nc.loginPhase)),
-        kv('核心就绪', nc.coreReady ? '是' : '否')
+        nc.backend === 'snowluma'
+          ? kv('深度探测', nc.deepOk === true ? pill('ok', '正常') : (nc.deepOk === false ? pill('warn', '假在线') : '—'))
+          : kv('核心就绪', nc.coreReady ? '是' : '否')
       ].join('')),
       card('守护', [
         kv('watchdog', wd.reachable ? pill('ok', '可达') : pill('bad', '不可达')),

@@ -302,6 +302,21 @@ export class WebWidget {
       if (s) out.stats = { ...s }
     } catch {}
     /*
+     * 逐条决策日志 + 最近一轮回复的耗时/降级（2026-10-21，真机验收用）。
+     *
+     * 用户报「还是@她了才回一句」时，从 QQ 外面只能看到"回/没回"。
+     * decisions 里每条都带意愿分、阈值、群热、自己最近说话条数、判定理由，
+     * lastReplyDiag 带这一轮的真实耗时和走没走降级通道 —— 下次"不回"能直接定位。
+     */
+    try {
+      if (Array.isArray(e?.decisionLog)) out.decisions = e.decisionLog.slice(-40)
+      if (e?.lastReplyDiag) out.lastReplyDiag = { ...e.lastReplyDiag }
+      // 回复流水：决策 yes 之后到底走到哪一步（2026-10-21 「@ 了不回」事故）
+      if (Array.isArray(e?.replyTrace)) out.replyTrace = e.replyTrace.slice(-30)
+      if (e?.lastError) out.lastError = { ...e.lastError }
+      if (e?.lastModelError) out.lastModelError = { ...e.lastModelError }
+    } catch {}
+    /*
      * 表情包学习统计。
      *
      * 这里必须区分**累计**和**本次进程**两个数：
@@ -1509,6 +1524,218 @@ export class WebWidget {
           })
         } catch (err) {
           sendJson(res, 500, { ok: false, error: String(err?.message || err) })
+        }
+      }),
+    })
+
+    /*
+     * POST /dsh-qq-whale/chat/simulate —— 空跑一轮「决策 + 生成」，**不发送**。
+     *
+     * 为什么要有：2026-10-21 晚「@ 了不回」事故里，决策日志明明是 yes，
+     * 但 stats.replies / lastReplyDiag / 网关请求三处都没有痕迹 —— 说明它
+     * 死在 scheduleReply 的 try 里、被 catch 吞了，而桌面版没有日志文件，
+     * 根本看不到那条 catch 打的是什么。这个路由直接把 generate() 拉出来跑，
+     * 抛错原样回传（stack 截断），并附上 replyTrace / lastError。
+     *
+     * 它**不调用** deliver()，不会往 QQ 发任何东西；只会消耗一次模型调用。
+     *
+     * body: { text, groupId?, userId?, scene? }
+     */
+    add({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/chat/simulate`,
+      ...wrap(async (req, res) => {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          return
+        }
+        const raw = await readBody(req)
+        let body
+        try {
+          body = JSON.parse(raw || '{}')
+        } catch {
+          sendJson(res, 400, { ok: false, error: 'bad json' })
+          return
+        }
+        const text = String(body?.text || '').trim()
+        if (!text) {
+          sendJson(res, 400, { ok: false, error: 'text 不能为空' })
+          return
+        }
+        const e = this.engineRef()
+        if (!e?.generate || !e?.getConversation) {
+          sendJson(res, 503, { ok: false, error: 'engine 还没就绪' })
+          return
+        }
+        const groupId = String(body?.groupId || 777777777)
+        const userId = String(body?.userId || 222222222)
+        const scene = String(body?.scene || 'group_bystander')
+        const ev = {
+          post_type: 'message',
+          message_type: 'group',
+          group_id: Number(groupId),
+          user_id: Number(userId),
+          message_id: Date.now() % 1000000,
+          time: Math.floor(Date.now() / 1000),
+          raw_message: text,
+          sender: { card: 'example' },
+          message: [{ type: 'text', data: { text } }],
+        }
+        const norm = { text, images: [], replyTo: null }
+        const started = Date.now()
+        try {
+          const conv = e.getConversation(e.conversationKey(ev))
+          const verdict = e.shouldRespond({ scene, ev, norm, conv })
+          const out = { ok: true, text, scene, verdict }
+          if (verdict?.yes) {
+            try {
+              const reply = await e.generate({
+                ev,
+                norm,
+                scene,
+                conv,
+                userName: 'example',
+                groupName: '示例测试群',
+                mood: null,
+                signal: new AbortController().signal,
+              })
+              out.replyOk = Boolean(reply)
+              out.parts = Array.isArray(reply?.parts) ? reply.parts : []
+              out.backend = String(reply?.backend || '')
+              out.degraded = Boolean(reply?.degraded)
+            } catch (err) {
+              out.generateThrew = String(err?.stack || err).slice(0, 1500)
+            }
+          }
+          out.replyTrace = Array.isArray(e.replyTrace) ? e.replyTrace.slice(-12) : []
+          out.lastError = e.lastError || null
+          out.lastModelError = e.lastModelError || null
+          out.ms = Date.now() - started
+          sendJson(res, 200, out)
+        } catch (err) {
+          sendJson(res, 500, { ok: false, error: String(err?.stack || err).slice(0, 1500) })
+        }
+      }),
+    })
+
+    /*
+     * POST /dsh-qq-whale/chat/schedule-test —— 空跑**完整 scheduleReply 链路**，
+     * 但把「发送」这一步换成假的（不会在群里冒出消息）。
+     *
+     * 和 chat/simulate 的区别：simulate 只跑 generate；这里连防抖、打断、排队、
+     * deliver、撒图、历史写入一起跑，用来复现「决策 yes 之后静默消失」。
+     *
+     * body: { text, twice?: true, gapMs?: 800 }
+     */
+    add({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/chat/schedule-test`,
+      ...wrap(async (req, res) => {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          return
+        }
+        const raw = await readBody(req)
+        let body
+        try {
+          body = JSON.parse(raw || '{}')
+        } catch {
+          sendJson(res, 400, { ok: false, error: 'bad json' })
+          return
+        }
+        const text = String(body?.text || '').trim()
+        if (!text) {
+          sendJson(res, 400, { ok: false, error: 'text 不能为空' })
+          return
+        }
+        const e = this.engineRef()
+        if (!e?.scheduleReply || !e?.getConversation) {
+          sendJson(res, 503, { ok: false, error: 'engine 还没就绪' })
+          return
+        }
+        const groupId = String(body?.groupId || 777777777)
+        const userId = String(body?.userId || 222222222)
+        const scene = String(body?.scene || 'group_bystander')
+        const makeEv = (i) => ({
+          post_type: 'message',
+          message_type: 'group',
+          group_id: Number(groupId),
+          user_id: Number(userId),
+          message_id: Date.now() % 1000000 + i,
+          time: Math.floor(Date.now() / 1000),
+          raw_message: text,
+          sender: { card: 'example' },
+          message: [{ type: 'text', data: { text } }],
+        })
+        const started = Date.now()
+        const conv = e.getConversation(e.conversationKey(makeEv(0)))
+        /*
+         * 空跑不许污染真实会话：deliver 会往 conv.history 里写 assistant 条目、
+         * 还会改 conv.lastSelfAt。第一次排查时没做还原，结果往真实群里空写了两条
+         * 「她说过的话」，下一轮真机回复会以为那些是她刚说的。这里先快照，finally 还原。
+         * trimTrailing 用来清理上一次没还原留下的尾巴（按条数从末尾删）。
+         */
+        const trimTrailing = Number(body?.trimTrailing || 0)
+        if (trimTrailing > 0 && Array.isArray(conv.history)) conv.history.splice(-trimTrailing)
+        const historyBefore = Array.isArray(conv.history) ? conv.history.slice() : []
+        const lastSelfBefore = conv.lastSelfAt
+        const client = e.client
+        const origSendGroup = client?.sendGroupMsg
+        const origSendPrivate = client?.sendPrivateMsg
+        const sent = []
+        const stub = async (target, payload) => {
+          sent.push({ target, payload })
+          return { ok: true, message_id: Date.now() }
+        }
+        try {
+          if (client) {
+            client.sendGroupMsg = stub
+            client.sendPrivateMsg = stub
+          }
+          const out = { ok: true, text, scene, runs: [] }
+          const runs = body?.twice ? 2 : 1
+          for (let i = 0; i < runs; i++) {
+            const ev = makeEv(i)
+            const norm = { text, images: [], replyTo: null }
+            const verdict = e.shouldRespond({ scene, ev, norm, conv })
+            const run = { verdict, trace: null }
+            if (verdict?.yes) {
+              try {
+                await e.scheduleReply({
+                  ev,
+                  norm,
+                  scene,
+                  conv,
+                  userName: 'example',
+                  groupName: '示例测试群',
+                  mood: null,
+                })
+              } catch (err) {
+                run.scheduleThrew = String(err?.stack || err).slice(0, 1200)
+              }
+            }
+            run.trace = Array.isArray(e.replyTrace) ? e.replyTrace.slice(-10) : []
+            run.lastError = e.lastError || null
+            run.lastModelError = e.lastModelError || null
+            out.runs.push(run)
+            if (i === 0 && runs > 1) await new Promise((r) => setTimeout(r, Number(body?.gapMs || 800)))
+          }
+          out.sentCount = sent.length
+          out.sentSummary = sent.map((s) => JSON.stringify(s.payload).slice(0, 160))
+          out.stats = { ...(e.stats || {}) }
+          out.lastReplyDiag = e.lastReplyDiag || null
+          out.ms = Date.now() - started
+          sendJson(res, 200, out)
+        } finally {
+          // 还原被空跑改过的会话状态
+          try {
+            conv.history = historyBefore
+            conv.lastSelfAt = lastSelfBefore
+          } catch {}
+          if (client) {
+            if (origSendGroup) client.sendGroupMsg = origSendGroup
+            if (origSendPrivate) client.sendPrivateMsg = origSendPrivate
+          }
         }
       }),
     })

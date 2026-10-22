@@ -205,13 +205,17 @@ export const QUOTE_TIMEOUT_MS = 3000
 export const QUOTE_FAIL_TEXT = '[引用：取不到内容]'
 
 /**
- * 把 get_msg 返回的 message 段压成一行纯文本。
+ * 把 get_msg 返回的 message 段压成一行纯文本，顺手把图收进 images。
  *
  * 和 normalizeMessage 的区别：这里不需要 isAtMe / images 这些元信息，
  * 只需要「这条被引用的话长什么样」；而且**不递归解析**，嵌套的 reply 段直接跳过
  * （引用里套引用没有额外信息量，反而容易来回取、越取越慢）。
+ *
+ * 2026-10-21 补：被引用的是图时，光给模型一个「[图片]」它看不见图 ——
+ * 这就是真机里她说「你引用的是图，图本身没跟着过来啊」的原因。
+ * 所以顺便把可下载的图片地址收集出来，交给上层挂到这一轮的图片里。
  */
-function quoteSegmentsToText(raw) {
+function quoteSegmentsToText(raw, images = []) {
   const segments = Array.isArray(raw) ? raw : typeof raw === 'string' ? legacyStringToSegments(raw) : []
   let out = ''
   for (const seg of segments) {
@@ -221,13 +225,37 @@ function quoteSegmentsToText(raw) {
       case 'text':
         out += String(data.text ?? '')
         break
-      case 'image':
+      case 'image': {
         out += '[图片]'
+        const url = String(data.url || data.file || '')
+        // get_msg 有时候只给文件名不给 url，那种取不到图，宁可不挂
+        if (/^https?:\/\//.test(url)) {
+          images.push({
+            url,
+            summary: String(data.summary || ''),
+            subType: data.sub_type ?? data.subType,
+            fromQuote: true,
+          })
+        }
         break
+      }
       case 'face':
-      case 'mface':
         out += '[表情]'
         break
+      case 'mface': {
+        out += '[表情]'
+        const url = String(data.url || '')
+        if (/^https?:\/\//.test(url)) {
+          images.push({
+            url,
+            summary: String(data.summary || ''),
+            isMface: true,
+            emojiId: String(data.emoji_id || data.emojiId || data.key || ''),
+            fromQuote: true,
+          })
+        }
+        break
+      }
       case 'record':
         out += '[语音]'
         break
@@ -281,7 +309,7 @@ function quoteIdForApi(id) {
  * 永远 resolve，永远不 reject —— 上层在消息主路径上直接用 await 即可。
  */
 export async function fetchQuoted(client, replyId) {
-  const fail = { ok: false, name: '', uid: '', body: '', text: QUOTE_FAIL_TEXT }
+  const fail = { ok: false, name: '', uid: '', body: '', images: [], text: QUOTE_FAIL_TEXT }
   const id = String(replyId ?? '').trim()
   if (!id) return fail
   if (!client || typeof client.call !== 'function') return fail
@@ -301,12 +329,13 @@ export async function fetchQuoted(client, replyId) {
     const uid = String(sender.user_id ?? data.user_id ?? '')
     // 群里优先用群名片（sender.card），私聊/无名片时退回昵称，再不行用号
     const name = String(sender.card || sender.nickname || data.nickname || '').trim() || (uid ? `QQ${uid}` : '某人')
-    let body = quoteSegmentsToText(data.message ?? data.raw_message ?? '')
+    const images = []
+    let body = quoteSegmentsToText(data.message ?? data.raw_message ?? '', images)
       .replace(/\s+/g, ' ')
       .trim()
     if (!body) body = '[空消息]'
     if (body.length > QUOTE_TEXT_MAX) body = `${body.slice(0, QUOTE_TEXT_MAX - 1)}…`
-    return { ok: true, name, uid, body, text: `[引用 @${name}：${body}]` }
+    return { ok: true, name, uid, body, images, text: `[引用 @${name}：${body}]` }
   } catch {
     // 结构不符合预期（NapCat 版本差异）也算取不到，别让脏数据把主流程带崩
     return fail

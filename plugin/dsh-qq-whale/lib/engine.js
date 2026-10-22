@@ -212,6 +212,32 @@ export class ChatEngine {
       sprinkled: 0,
     }
 
+    /**
+     * 逐条决策记录（2026-10-21，真机验收用）。
+     *
+     * 用户的反馈是「还是@她了才回一句」，但从外面只能看到"回/没回"，
+     * 看不到她当时算出来的意愿分。这里把每条群消息的决策参数留一份，
+     * `/state.decisions` 直接读 —— 下次再"不回"，能一眼看出是阈值卡住、
+     * 还是被限流/生成失败，不用再靠猜。环形缓冲，进程内。
+     */
+    this.decisionLog = []
+    /** 最近一轮回复的耗时与降级情况（`/state.lastReplyDiag`）。 */
+    this.lastReplyDiag = null
+    /*
+     * 回复流水（`/state.replyTrace`）：决策说「该回」之后，这一轮到底走到哪一步了。
+     *
+     * 2026-10-21 真机事故：用户在群里 @ 她，`decisions` 明明写着 yes，
+     * 但群里没有回复、`stats.replies` 是 0、`lastReplyDiag` 也是空的。
+     * 光看这两个字段分不清是「排到队里了」「abort 了」「模型返回空」
+     * 还是「生成完但发送失败」——那一轮就那么无声无息地消失了。
+     *
+     * 所以这里按阶段打点：queued / aborted / no-reply / empty-parts /
+     * model-null / delivered / error。环形 30 条，进程内。
+     */
+    this.replyTrace = []
+    /** 最近一次真出错的堆栈（`/state.lastError`），只有犯错时才更新。 */
+    this.lastError = null
+
     // 模型来源三选一：
     //   - 'wbai'（默认）：直连 WorkBuddy 免费额度，独立进程也能跑，不依赖宿主
     //   - 'wb-proxy'：走本地 8788 多账号池网关（抗限流），保留 wbai 直连做 429 回退
@@ -716,7 +742,59 @@ export class ChatEngine {
       willingness,
       now: () => this.now(),
       config: this.config,
+      // 「名字被叫」判定要用（callsMyName）
+      selfId: this.selfId,
+      nickname: this.client?.self?.nickname,
+      groupCardBases: this.groupCardBase,
     })
+  }
+
+  /**
+   * 记一条决策日志（`/state.decisions`）。
+   *
+   * 只留最近 40 条；字段都是"解释她为什么回/不回"需要的：
+   * 意愿分、阈值、群热、自己最近说话条数、以及判定理由。
+   */
+  logDecision({ ev, norm, scene, verdict }) {
+    try {
+      const text = String(norm?.text || '')
+        .replace(/\[CQ:[^\]]*\]/g, '[图]')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 60)
+      this.decisionLog.push({
+        at: new Date(this.now()).toLocaleString('sv-SE', { hour12: false }),
+        scene,
+        text,
+        yes: Boolean(verdict?.yes),
+        reason: String(verdict?.reason || ''),
+        w: verdict?.willingness === undefined ? null : Number(Number(verdict.willingness).toFixed(3)),
+        threshold: verdict?.threshold ?? null,
+        recentSelf: verdict?.recentSelf ?? null,
+        recentOthers: verdict?.recentOthers ?? null,
+        continuesMe: verdict?.continuesMe ?? null,
+      })
+      if (this.decisionLog.length > 40) this.decisionLog.splice(0, this.decisionLog.length - 40)
+    } catch {}
+  }
+
+  /**
+   * 回复流水打点（`/state.replyTrace`）。
+   *
+   * 只记「决策之后」的阶段，不重复记 decisionLog 已经有的意愿分。
+   * 任何一步抛错都不允许影响主流程——它是诊断，不是业务。
+   */
+  traceReply(convKey, stage, extra = null) {
+    try {
+      if (!Array.isArray(this.replyTrace)) this.replyTrace = []
+      this.replyTrace.push({
+        at: new Date(this.now()).toLocaleString('sv-SE', { hour12: false }),
+        key: String(convKey || ''),
+        stage,
+        ...(extra && typeof extra === 'object' ? extra : {}),
+      })
+      if (this.replyTrace.length > 30) this.replyTrace.splice(0, this.replyTrace.length - 30)
+    } catch {}
   }
 
   /**
@@ -1306,6 +1384,14 @@ export class ChatEngine {
       // 正文变成「[引用 @张三：…] [引用] 这个问题…」两个引用头。
       const body = String(norm.text || '').replace(/^\[引用\]\s*/, '')
       norm.text = `${q.text} ${body}`.trim()
+      /*
+       * 被引用的是一条图时，把图也挂到这一轮 —— 2026-10-21 真机：
+       * 用户引用一张图问「这张图你怎么看」，她只能看见「[图片]」字样，
+       * 于是回「你引用的是图，图本身没跟着过来啊」。图能取到就给它取到。
+       */
+      if (Array.isArray(q.images) && q.images.length > 0) {
+        norm.images.push(...q.images)
+      }
     }
     if (!norm.text && norm.images.length === 0) return
 
@@ -1463,6 +1549,7 @@ export class ChatEngine {
     }
 
     const verdict = this.shouldRespond({ scene, ev, norm, conv })
+    this.logDecision({ ev, norm, scene, verdict })
     /*
      * 三档反应（2026-10-21，用户：「我想让他能主动吐槽，而不是被@才会回话」）：
      *   1. 想说      → 正常回复
@@ -2283,6 +2370,7 @@ export class ChatEngine {
     } else if (existing?.phase === 'sending') {
       // 正在发：让新消息等这一轮结束（由 pending 队列驱动）
       this.logger('debug', `正在发送中，本轮消息排队（${key}）`)
+      this.traceReply(key, 'queued')
       existing.pending = existing.pending || []
       existing.pending.push({ ev, norm, scene, userName, groupName, mood })
       return
@@ -2301,19 +2389,23 @@ export class ChatEngine {
     if (isGroup) this.setGroupCardThinking(ev.group_id).catch(() => {})
 
     try {
+      this.traceReply(key, 'start', { scene })
       const delay = this.config.debounceMs ?? 1500
       await sleep(delay + Math.random() * 600)
       if (controller.signal.aborted) {
+        this.traceReply(key, 'aborted', { where: 'debounce' })
         if (isGroup) this.restoreGroupCard(ev.group_id).catch(() => {})
         return
       }
 
       const reply = await this.generate({ ev, norm, scene, conv, userName, groupName, mood, signal: controller.signal })
       if (controller.signal.aborted) {
+        this.traceReply(key, 'aborted', { where: 'generate' })
         if (isGroup) this.restoreGroupCard(ev.group_id).catch(() => {})
         return
       }
       if (!reply) {
+        this.traceReply(key, 'no-reply')
         if (isGroup) this.restoreGroupCard(ev.group_id).catch(() => {})
         return
       }
@@ -2332,10 +2424,38 @@ export class ChatEngine {
       await this.deliver({ ev, scene, conv, reply, signal: controller.signal })
       if (!controller.signal.aborted) {
         this.stats.replies++
+        /*
+         * 最近一轮的耗时与降级情况（/state.lastReplyDiag）。
+         * 2026-10-21 真机：用户 20:15:54 @ 她，20:16:49 才回 —— 55 秒。
+         * 光看"回了/没回"分不清是模型慢、429 重试、还是切了 trae，
+         * 这几个字段就是为这一次排查留下的。
+         */
+        this.lastReplyDiag = {
+          at: new Date(this.now()).toLocaleString('sv-SE', { hour12: false }),
+          ms: Date.now() - t0,
+          parts: Array.isArray(reply.parts) ? reply.parts.length : 0,
+          degraded: Boolean(reply.degraded),
+          backend: String(reply.backend || ''),
+          rateLimited: Boolean(reply.rateLimited),
+          text: String(reply.raw || '').replace(/\s+/g, ' ').slice(0, 60),
+        }
         try { this.metrics?.onReplied?.(Date.now() - t0) } catch {}
+        this.traceReply(key, 'delivered', {
+          ms: Date.now() - t0,
+          parts: Array.isArray(reply.parts) ? reply.parts.length : 0,
+          backend: String(reply.backend || ''),
+          degraded: Boolean(reply.degraded),
+        })
       }
     } catch (err) {
+      this.traceReply(key, 'error', { message: String(err?.message || err).slice(0, 200) })
       if (!controller.signal.aborted) {
+        this.lastError = {
+          at: new Date(this.now()).toLocaleString('sv-SE', { hour12: false }),
+          where: 'scheduleReply',
+          message: String(err?.message || err).slice(0, 300),
+          stack: String(err?.stack || '').slice(0, 600),
+        }
         this.logger('error', `回复流程出错: ${err?.stack || err}`)
       }
     } finally {
@@ -2513,7 +2633,16 @@ export class ChatEngine {
         ? (await this.callSpare({ system, messages, signal })) ||
           (await this.callDegraded({ system, messages, signal }))
         : await this.callWithFallback({ system, messages, signal })
-    if (!res) return null
+    if (!res) {
+      // 整条模型链都没接住（含非限流错误直接放弃），记一笔方便对账
+      this.traceReply(conv?.key, 'model-null', { degraded: Boolean(budgetOut) })
+      this.lastModelError = {
+        at: new Date(this.now()).toLocaleString('sv-SE', { hour12: false }),
+        degraded: Boolean(budgetOut),
+        text: String(norm?.text || '').slice(0, 60),
+      }
+      return null
+    }
 
     /*
      * P2：记账 + 兜底收口。
@@ -2541,10 +2670,18 @@ export class ChatEngine {
       maxStickersPerReply: this.config.maxStickersPerReply ?? 2,
     })
     if (parts.length === 0) {
+      this.traceReply(conv?.key, 'empty-parts', { raw: String(replyText || '').slice(0, 80) })
       this.logger('debug', '模型返回空内容，沉默')
       return null
     }
-    return { parts, raw: replyText, usage: res.usage, degraded: Boolean(res.degraded) }
+    return {
+      parts,
+      raw: replyText,
+      usage: res.usage,
+      degraded: Boolean(res.degraded),
+      backend: String(res.backend || ''),
+      rateLimited: Boolean(res.rateLimited),
+    }
   }
 
   /**
@@ -3194,6 +3331,11 @@ export class ChatEngine {
       client: this.client,
       pestMode: this.pest?.enabled === true,
       memberRoster: (conv) => this.memberRoster(conv),
+      // buildMessages 里遇到带图的历史条目会调 deps.loadImages(h.images)。
+      // 2026-10-21 事故：这一项漏了 → 只要历史里有图就 TypeError:
+      // "deps.loadImages is not a function"，被 scheduleReply 的 catch 吞掉，
+      // 表现就是"决策 yes 却一声不响"。补上时顺手绑好 this。
+      loadImages: (images) => this.loadImages(images),
       withDegradedNote: (sp) => this.withDegradedNote(sp),
       speakerLabel: (h) => this.speakerLabel(h),
       pickActivity,

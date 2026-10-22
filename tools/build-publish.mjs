@@ -71,6 +71,16 @@ const FILES = [
   ['tools/install-watchdog.cmd', 'tools/install-watchdog.cmd'],
   ['tools/start-console.ps1', 'tools/start-console.ps1'],
   ['tools/start-molly.ps1', 'tools/start-molly.ps1'],
+  // 2026-10-22：掉登录治理相关脚本 —— watchdog.mjs 会调 login-doctor.mjs，
+  // 漏了它发布版的自动恢复（快速登录/二维码）等于残废；heartbeat-push 与两个隐藏启动
+  // vbs 是控制台/心跳自启链路的一部分，一并带上（build-publish 会做脱敏替换）。
+  ['tools/login-doctor.mjs', 'tools/login-doctor.mjs'],
+  ['tools/heartbeat-push.mjs', 'tools/heartbeat-push.mjs'],
+  ['tools/setup-quicklogin.ps1', 'tools/setup-quicklogin.ps1'],
+  ['tools/fix-watchdog-task.ps1', 'tools/fix-watchdog-task.ps1'],
+  ['tools/console-hidden.vbs', 'tools/console-hidden.vbs'],
+  ['tools/heartbeat-hidden.vbs', 'tools/heartbeat-hidden.vbs'],
+  ['tools/install-console-task.cmd', 'tools/install-console-task.cmd'],
   ['tools/open-console-window.ps1', 'tools/open-console-window.ps1'],
   ['tools/make-desktop-shortcut.ps1', 'tools/make-desktop-shortcut.ps1'],
   ['tools/build-exe.mjs', 'tools/build-exe.mjs'],

@@ -55,6 +55,9 @@ const DEFAULT_CONFIG = {
   autoRecover: true,
   // 自动抢修最多连续尝试几次，超过就只提醒不再折腾
   maxAutoRecoverAttempts: 3,
+  // 快速登录（SetQuickLogin）失败后的冷却分钟数。
+  // login-doctor 手册铁律②：失败不要连试，会升级风控。
+  quickLoginRetryMinutes: 30,
   // 通知配置：可以同时开多个渠道，任何一个成功就算通知成功（不互斥）
   //
   //   toast     —— Windows 原生通知中心（零配置、离线可用、不需要账号）
@@ -584,6 +587,35 @@ export async function checkOnce(cfg, opts = {}) {
       // NapCat 进程/端口没了 → 拉起来
       recoverNote = await tryStartNapCat()
     } else {
+      // 进程在但没登录 → 先试「快速登录」，失败再抓二维码。
+      //
+      // 为什么加这一步（2026-10-22 掉线治理）：
+      //   以前这里直接刷二维码，等于每次掉线都必须有人扫码，实测平均每次离线 67 分钟。
+      //   NapCat 有 SetQuickLogin 能力，QQ 本地存了凭据时几秒就能自己恢复。
+      // 注意：login-doctor 手册铁律②——SetQuickLogin 失败不要连试（会升级风控），
+      //   所以失败后 quickLoginRetryMinutes（默认 30 分钟）内不再尝试，只刷二维码。
+      const quickCoolMs = (cfg.quickLoginRetryMinutes ?? 30) * 60000
+      const sinceQuick = nowMs() - (state.lastQuickLoginTryAt || 0)
+      if (sinceQuick >= quickCoolMs) {
+        state.lastQuickLoginTryAt = nowMs()
+        log('先试快速登录（SetQuickLogin）…')
+        const ql = await runLoginDoctor(['quicklogin'])
+        if (ql.code === 0) {
+          log('快速登录成功，无需扫码')
+          state.lastState = 'online'
+          state.lastOnlineAt = nowMs()
+          state.offlineSince = 0
+          state.recoverAttempts = 0
+          if (cfg.notifyOnRecover && !quiet) {
+            await notifyAll(cfg, '【Molly】已恢复在线', `快速登录自动恢复成功，没有打扰你扫码。\n恢复时间：${stamp()}`)
+            state.lastNotifyAt = nowMs()
+          }
+          writeJson(STATE_FILE, state)
+          return { code: 0, current: 'online', prev, quiet, notified: false, recoverNote: '（快速登录成功）' }
+        }
+        log('快速登录不可用（多半是 QQ 本地没凭据），改用二维码')
+        recoverNote = '（快速登录不可用，已刷二维码）'
+      }
       // 进程在但没登录 → 抓一张新二维码，通知里告诉用户去扫
       const qr = await runLoginDoctor(['qr', path.join(OUT, 'watchdog-qr.png')])
       if (/ALREADY_LOGGED_IN/.test(qr.out)) {
@@ -616,6 +648,15 @@ export async function checkOnce(cfg, opts = {}) {
     const r = await notifyAll(cfg, title, offlineText(info, cfg, recoverNote))
     notified = !!r.ok
     state.lastNotifyAt = now
+    // 把「通知没发出去」的原因留在 state 里：pushplus 未实名时会 HTTP 200 + code 905，
+    // 用户那边一条收不到，而日志翻起来才知道（2026-10-22 实测踩到）。
+    if (!notified) {
+      const firstFail = Object.values(r.results || {}).find((x) => x && !x.ok && x.reason)
+      state.lastNotifyFail = { at: stamp(), reason: String(firstFail?.reason || '未知').slice(0, 160) }
+      log('通知失败原因：', state.lastNotifyFail.reason)
+    } else {
+      state.lastNotifyFail = null
+    }
   } else if (quiet && changed) {
     // 安静时段发生了状态变化 → 记一笔，等白天补报
     state.pendingQuietReport = true

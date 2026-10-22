@@ -15,12 +15,9 @@
  * 免得以后改协议时两处漂移。
  */
 
-/** 文本里是不是在 @ 我（昵称 / 群名片基础名 / QQ 号三种写法）。 */
-export function looksLikeAtMe(text, deps) {
+/** 她的所有称呼（昵称 / 群名片基础名 / QQ 号），去重后返回。 */
+export function selfNames(deps) {
   const { selfId, nickname, groupCardBases } = deps
-  const t = String(text || '')
-  const at = t.indexOf('@')
-  if (at < 0) return false
   const names = []
   const push = (v) => {
     const s = String(v || '').trim()
@@ -32,6 +29,15 @@ export function looksLikeAtMe(text, deps) {
   try {
     for (const base of groupCardBases?.values?.() || []) push(base)
   } catch {}
+  return names
+}
+
+/** 文本里是不是在 @ 我（昵称 / 群名片基础名 / QQ 号三种写法）。 */
+export function looksLikeAtMe(text, deps) {
+  const t = String(text || '')
+  const at = t.indexOf('@')
+  if (at < 0) return false
+  const names = selfNames(deps)
   const rest = t.slice(at + 1)
   /*
    * 名字之后必须是「边界」——空白、标点、括号、结尾。
@@ -54,6 +60,30 @@ export function looksLikeAtMe(text, deps) {
   for (const n of names) {
     const base = n.replace(/[（(].*?[)）]$/, '').trim()
     if (base && base !== n && tryName(base)) return true
+  }
+  return false
+}
+
+/**
+ * 文本里直接叫了她的名字（没有 @ 段）。
+ *
+ * 2026-10-21 真机反馈：群友打「Molly在吗」「莫莉呢」，她一声不吭，只给个赞。
+ * 那条消息没有 at 段（NapCat 里用户手打名字），场景被判成「旁观」，
+ * 意愿分 0.44 卡在 0.42 阈值边缘，抖动一抖就不回。
+ *
+ * 「叫名字」在真人聊天里就是点名，不该按旁观算。这里只排除一种情况：
+ * 名字后面紧跟「的」——「Molly的粉丝」是在说第三人，不是叫她。
+ */
+export function callsMyName(text, deps) {
+  const t = String(text || '')
+  if (!t) return false
+  for (const n of selfNames(deps)) {
+    if (!n) continue
+    if (/^\d+$/.test(n)) continue // QQ 号容易误伤（CQ 码里就有），只认名字
+    const i = t.indexOf(n)
+    if (i < 0) continue
+    if (t.charAt(i + n.length) === '的') continue
+    return true
   }
   return false
 }
@@ -139,6 +169,14 @@ export function shouldRespond({ scene, ev, norm, conv }, deps) {
   if (researchVerdict.need) return { yes: true, reason: '明确请求（research）' }
 
   /*
+   * 名字被叫 = 点名（2026-10-21 用户：「还是@她了才回一句」）。
+   * 群里手打「Molly在吗」「莫莉呢」没有 at 段，场景落在旁观，
+   * 按意愿算只有 0.44 卡在阈值边缘 —— 这里直接放行。
+   */
+  const callingMyName = callsMyName(norm.text, deps)
+  if (callingMyName) return { yes: true, reason: '叫名字', willingness: 0.92 }
+
+  /*
    * 「她最近说过多少话 / 群里现在有多热」必须按**时间窗**算。
    *
    * 2026-10-21 修：原来 `recentSelf = conv.history.filter(assistant).length`
@@ -155,23 +193,41 @@ export function shouldRespond({ scene, ev, norm, conv }, deps) {
   const history = Array.isArray(conv.history) ? conv.history : []
   let recentSelf = 0
   let recentOthers = 0
+  let lastAssistantAt = 0
   for (const h of history) {
     const at = Number(h?.at) || 0
     if (!at) continue
+    if (h.role === 'assistant' && at > lastAssistantAt) lastAssistantAt = at
     const age = nowMs - at
     if (age < 0 || age > selfWindowMs) continue
     if (h.role === 'assistant') recentSelf += 1
     else if (age <= heatWindowMs) recentOthers += 1
   }
+  // 有人接着她上一句在说（2 分钟内）→ 这是对话，不是路过
+  const continuesMe = Boolean(lastAssistantAt) && nowMs - lastAssistantAt <= 120000
 
   const lastSelfSpeakMs = conv.lastSelfAt ? nowMs - conv.lastSelfAt : Infinity
+  /*
+   * 轮流说话（2026-10-21 二次真机：「你咋看这个图」还是没回）。
+   *
+   * 现场：她刚发完一张图，用户紧接着问「你咋看这个图」，判定 w=0.171 不回。
+   * 原因是她自己在 10 分钟内说过 4 次（-0.22）、且 15 秒内刚说过（-0.18），
+   * 两条罚分把分数压死了 —— 可这时候明明是**用户在接她的话**，
+   * 属于正常对话回合，不是她抢麦。
+   *
+   * 所以：她 2 分钟内说过话、且对方这条有实际内容（≥4 字，排除「嗯」「哦」）
+   * 时，不按"话太多"罚分；continuesMe 的 +0.10 仍然保留。
+   * 真正防刷屏的场景（她连说两句，没人接）不受影响。
+   */
+  const turnTaking = continuesMe && String(norm.text || '').trim().length >= 4
   const w = willingness({
     scene,
     text: norm.text,
     isAtMe: false,
-    recentSelfMessages: recentSelf,
+    recentSelfMessages: turnTaking ? 0 : recentSelf,
     recentOthers,
-    lastSelfSpeakMs,
+    lastSelfSpeakMs: turnTaking ? Infinity : lastSelfSpeakMs,
+    continuesMe,
   })
   /*
    * 阈值 0.62 → 0.42（2026-10-21）。0.62 是按旧公式配的：旧公式起手 0.18，
@@ -180,7 +236,7 @@ export function shouldRespond({ scene, ev, norm, conv }, deps) {
    * 想收回去就改配置里的 bystanderThreshold，不用动代码。
    */
   const threshold = deps.config?.bystanderThreshold ?? 0.42
-  return { yes: w >= threshold, willingness: w, threshold, recentSelf, recentOthers }
+  return { yes: w >= threshold, willingness: w, threshold, recentSelf, recentOthers, continuesMe }
 }
 
 /**

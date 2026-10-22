@@ -2,9 +2,9 @@
 
 > 本副本由 `tools/build-publish.mjs` 生成，**勿手改**；要改就改源仓库再重新生成。
 
-- 生成时间：2026-10-21T12:05:58.334Z
-- 文件数：**132**
-- 总体积：**2.13 MB**
+- 生成时间：2026-10-22T01:33:14.593Z
+- 文件数：**139**
+- 总体积：**2.23 MB**
 - 脱敏复检：**命中 0**
 
 ## 顶层结构
@@ -38,6 +38,8 @@
 ## 已就地替换成 `<REDACTED>` 的文件
 
 - tools/start-molly.ps1
+- tools/heartbeat-push.mjs
+- tools/setup-quicklogin.ps1
 - tools/scan-secrets.mjs
 - tools/build-publish.mjs
 - docs/INSTALL-AND-ROLLBACK.md

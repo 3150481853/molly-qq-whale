@@ -26,6 +26,11 @@ $ROOT    = Split-Path -Parent $PSScriptRoot          # qq-whale
 $NAPCAT  = Join-Path $ROOT 'napcat'
 $OUT     = Join-Path $ROOT 'out'
 $QQEXE   = '<REDACTED>\QQ\QQ.exe'
+# 快速登录：NapCat 启动器把「QQ 号」当第三个参数传进去，就会走 QQ 本地保存的
+# 登录凭据（launcher.bat 的 %* 原样透传，官方文档写法是 `launcher.bat 123456789`）。
+# 以前这里没传 → 每次启动都打印「没有 -q 指令指定快速登录，将使用二维码登录方式」，
+# 掉一次线就得人工扫一次码（2026-10-22 掉线治理）。
+$QQNUM   = '111111111'
 $WEBUI   = 'http://127.0.0.1:6099'
 $WEBTOKEN = '${NAPCAT_TOKEN}'                           # napcat\config\webui.json
 $ONEBOBOT_PORT = 3001
@@ -139,10 +144,10 @@ function Start-NapCat {
   $napcatBootErr = Join-Path $OutDir 'napcat-boot.err.log'
 
   Start-Process -FilePath $env:NAPCAT_LAUNCHER_PATH `
-    -ArgumentList @($QQEXE, $env:NAPCAT_INJECT_PATH) -WindowStyle Hidden `
+    -ArgumentList @($QQEXE, $env:NAPCAT_INJECT_PATH, $QQNUM) -WindowStyle Hidden `
     -RedirectStandardOutput $napcatBootLog `
     -RedirectStandardError $napcatBootErr
-  Write-Ok '已拉起，等它初始化…'
+  Write-Ok "已拉起（快速登录 QQ=$QQNUM），等它初始化…"
 
   # 等 WebUI 起来（最多 30 秒）
   for ($i = 0; $i -lt 15; $i++) {
@@ -158,9 +163,28 @@ function Start-NapCat {
 
 # ---------- 主流程 ----------
 if ($Restart) {
-  Write-Step '关闭现有 QQ'
-  Get-Process QQ -ErrorAction SilentlyContinue | Stop-Process -Force
-  Start-Sleep -Seconds 3
+  Write-Step '关闭现有 QQ（先温和关闭，避免强杀丢登录态）'
+  # 以前这里是 Stop-Process -Force 一把梭：QQNT 的登录态还没落盘就被杀掉，
+  # 下一次只能重新扫码，等于每次自动抢修都在给自己制造一次人工扫码（2026-10-22 掉线治理）。
+  # 现在先发关闭窗口消息，给 8 秒自己退；退不掉才强杀兜底。
+  $qqProcs = @(Get-Process QQ -ErrorAction SilentlyContinue)
+  if ($qqProcs.Count -gt 0) {
+    foreach ($p in $qqProcs) { try { $null = $p.CloseMainWindow() } catch { } }
+    $deadline = (Get-Date).AddSeconds(8)
+    while ((Get-Date) -lt $deadline -and @(Get-Process QQ -ErrorAction SilentlyContinue).Count -gt 0) {
+      Start-Sleep -Milliseconds 500
+    }
+    $left = @(Get-Process QQ -ErrorAction SilentlyContinue)
+    if ($left.Count -gt 0) {
+      Write-Warn "还有 $($left.Count) 个 QQ 进程没退出，强杀兜底"
+      $left | Stop-Process -Force
+    } else {
+      Write-Ok 'QQ 已温和退出'
+    }
+  } else {
+    Write-Ok '没有正在跑的 QQ'
+  }
+  Start-Sleep -Seconds 2
 }
 
 if (-not $Status) {

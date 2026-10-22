@@ -128,30 +128,54 @@ export function planDelivery(parts, scene, cfg = {}, rng = Math.random) {
  *   - 群聊围观要看"这话有没有钩子"：提问、情绪、叫名字、在聊吃的
  */
 export function willingness(
-  { scene, text, isAtMe, recentSelfMessages = 0, recentOthers = 0, lastSelfSpeakMs = Infinity },
+  {
+    scene,
+    text,
+    isAtMe,
+    recentSelfMessages = 0,
+    recentOthers = 0,
+    lastSelfSpeakMs = Infinity,
+    callingMyName = false,
+    continuesMe = false,
+  },
   rng = Math.random,
 ) {
   if (scene === 'private') return 1
   if (isAtMe) return 0.95
+  /*
+   * 名字被叫（不带 @）：2026-10-21 真机反馈「还是@她了才回一句」。
+   * 群友打「Molly在吗」没 @ 段、也没问号，按围观公式只有 0.44，
+   * 抖动一抖就掉到阈值以下。叫人名字 = 半个点名，直接给高分。
+   */
+  if (callingMyName) return 0.92
 
   /*
    * 2026-10-21 重写（用户：「我想让他能主动吐槽，而不是被@才会回话」）。
    *
    * 旧公式起手 0.18、被 @ 才 0.95，普通聊天要同时命中「问号 + 吃喝 + 情绪词」
    * 才可能碰到 0.62 的阈值 —— 真机上她的全部反应就是点个赞。
-   * 新公式起手 0.32，钩子给得更宽（吐槽/抽象/贵/限量也算钩子），
+   * 新公式起手 0.34（后调 0.36，见下），钩子给得更宽（吐槽/抽象/贵/限量也算钩子），
    * 并且把「自己刚说过话」的罚分从"整段历史条数"改成时间窗计数。
+   *
+   * 起手定 0.34：试过 0.36，普通一条「测试」也能过线，但那意味着任何一句
+   * 不带钩子的话都会接 —— 小群里像复读机。0.34 时「测试」0.41 差一点不回，
+   * 「Molly的粉丝」0.40 不回，而「你也是乐乐」0.50、「账号限量太恶心了」0.74、
+   * 「你们在干嘛」0.52 都能过。边界就该落在这里。
    */
-  let w = 0.32
+  let w = 0.34
   const s = String(text || '')
   if (/[?？]/.test(s)) w += 0.18
+  // 没有问号但有问句粒子：「Molly在吗」「你吃了吗」「真的假的呢」
+  else if (/(吗|呢|吧|嘛|么|咋|啥)[\s。.!！~～…]*$/.test(s)) w += 0.12
   if (/(白饭|吃|饿|投喂|token|肥鱼|鲸鱼|鱼|奶茶|咖啡|晚饭|午饭|早饭)/.test(s)) w += 0.2
   // 吐槽、情绪、梗 —— 这类话最容易让人忍不住接一句
   if (/(哈哈|草|笑死|绷|离谱|绝了|无语|抽象|逆天|恶心|烦|破防|服了|太贵|好贵|限量|烂|崩|坑|摆烂|吐了|气死)/.test(s)) {
     w += 0.22
   }
+  // 顶嘴/接梗（「你也是乐乐」「你可拉倒吧」）—— 别人在跟她掰扯，不该只点赞
+  if (/(也是|就是|确实|才怪|你可|你才|谁啊|啥啊|凭啥|真的假的)/.test(s)) w += 0.1
   if (s.length > 60) w += 0.06 // 有人认真说话，值得接
-  if (s.length < 6) w -= 0.05 // 太短的"嗯""哦"，接了显得傻
+  if (s.length < 4) w -= 0.05 // 「嗯」「哦」「测试」这种，接了显得傻
 
   // 群里正聊得热（90 秒内别人说过话）→ 更容易插嘴，最多 +0.18
   w += Math.min(0.18, (recentOthers || 0) * 0.06)
@@ -164,7 +188,11 @@ export function willingness(
   if (lastSelfSpeakMs < 15000) w -= 0.18
   else if (lastSelfSpeakMs < 60000) w -= 0.08
 
-  w += (rng() - 0.5) * 0.12
+  // 有人接着她上一句在说（2 分钟内）—— 这是对话，不是路过
+  if (continuesMe) w += 0.1
+
+  // 抖动 ±0.08：原来 ±0.12 会把 0.44 一抖抖到 0.38，同一句话一会儿回一会儿不回
+  w += (rng() - 0.5) * 0.16
   return Math.max(0, Math.min(1, w))
 }
 

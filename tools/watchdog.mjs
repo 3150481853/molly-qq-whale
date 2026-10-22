@@ -48,9 +48,17 @@ const LOGIN_DOCTOR = path.join(HERE, 'login-doctor.mjs')
 const DEFAULT_CONFIG = {
   enabled: true,
   // 检查间隔（分钟）。计划任务也按这个频率触发，两边要一致。
-  intervalMinutes: 10,
-  // 安静时段：这些小时整点内不推送通知（0 到 9 表示 00:00–09:59）
-  quietHours: [0, 9],
+  //
+  // 2026-10-22（主人 m03035）：10 分钟 → 1 分钟。
+  // 13:54:03 那次掉线只持续 2.5 分钟，10 分钟一查整段错过（没快照、没通知），
+  // 而验收要求「掉线 ≤2 分钟发现并自动恢复」。
+  intervalMinutes: 1,
+  // 安静时段：这些小时整点内不推送通知（0 到 8 表示 00:00–08:59）
+  // 主人要求「0–8 点除外都是高频」：白天 1 分钟一查，夜间降频到 5 分钟一查。
+  quietHours: [0, 8],
+  // 夜间降频：0–8 点没人扫码，按这个间隔（分钟）抽查即可。
+  // 计划任务仍是每分钟触发，脚本在夜间按分钟整除判断要不要真的检查。
+  nightIntervalMinutes: 5,
   // 掉线后重复提醒的最短间隔（分钟）；0 = 只在状态变化时提醒一次
   repeatMinutes: 60,
   // 掉线时自动尝试抢修（拉起进程 / 刷新二维码）
@@ -80,6 +88,8 @@ const DEFAULT_CONFIG = {
     repairWaitSeconds: 25,
     // 深度探测连续失败几次才判定「假在线」（一次网络抖动不该重启 QQ）
     deepFailThreshold: 2,
+    // SnowLuma 日志目录（session closed 即时检测用；空 = 默认 ${MOLLY_ROOT}\snowluma\logs）
+    logDir: '',
   },
   // 通知配置：可以同时开多个渠道，任何一个成功就算通知成功（不互斥）
   //
@@ -498,6 +508,70 @@ async function checkStatus(cfg = {}, state = {}) {
   return { reachable: false, backend: 'napcat', status: null, raw: r.out || r.err, exit: r.code }
 }
 
+// ── SnowLuma 日志实证：session closed / login detected ──────────────────────
+//
+// 为什么不能只靠 OneBot 探测（2026-10-22 13:54 事故）：
+//   `[Bridge] session closed: UIN=…` 是登录会话断掉的直接证据，但 OneBot 接口
+//   在短窗口里可能还能应答（缓存/正在 quiesce），等 HTTP 明确报错时已经过去几十秒。
+//   日志是本地文件、零成本，读一次就能把「何时断、有没有再登上」对上。
+//
+// 判定规则：closed 之后没有再出现 login detected / session started，
+// 且 closed 发生在最近 15 分钟内 → 登录态确实断了（接口自报 online 也要判掉线）。
+// 15 分钟窗口 + 恢复后 detectedAt > closedAt，天然避免拿旧日志反复报警。
+
+// SnowLuma 日志行示例（2026-10-22 实测格式：时间 + 级别列 + 模块 + 事件）：
+//   13:54:03 DEBUG              [Bridge] session closed: UIN=111111111
+//   13:56:35 OK                 [Hook] login detected: PID=106920 UIN=111111111
+const SNOWLUMA_LOG_RE = /^(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?\s+\w*\s*\[[^\]]+\]\s+(session closed.*|session started.*|login detected:.*)$/
+
+function snowlumaLogDir(cfg = {}) {
+  const custom = process.env.MOLLY_SNOWLUMA_LOG_DIR || cfg.snowluma?.logDir || ''
+  if (custom) return String(custom)
+  // ROOT = <repo>/qq-whale，SnowLuma 装在 <repo>/snowluma
+  return path.resolve(ROOT, '..', 'snowluma', 'logs')
+}
+
+function readSnowlumaLogEvents(cfg, state) {
+  try {
+    const dir = snowlumaLogDir(cfg)
+    const d = new Date()
+    const p = (n) => String(n).padStart(2, '0')
+    const file = path.join(dir, `snowluma-${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}.log`)
+    if (!fs.existsSync(file)) return { closedAt: 0, detectedAt: 0, file: '' }
+    const size = fs.statSync(file).size
+    const readLen = Math.min(size, 256 * 1024)
+    const buf = Buffer.alloc(readLen)
+    const fd = fs.openSync(file, 'r')
+    try {
+      fs.readSync(fd, buf, 0, readLen, size - readLen)
+    } finally {
+      fs.closeSync(fd)
+    }
+    const base = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+    let closedAt = 0
+    let detectedAt = 0
+    for (const line of buf.toString('utf8').split(/\r?\n/)) {
+      const m = SNOWLUMA_LOG_RE.exec(line)
+      if (!m) continue
+      const t = base + (Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3])) * 1000
+      if (m[4].startsWith('session closed')) closedAt = Math.max(closedAt, t)
+      else detectedAt = Math.max(detectedAt, t)
+    }
+    return { closedAt, detectedAt, file }
+  } catch (e) {
+    log('读 SnowLuma 日志失败（忽略）:', e?.message || e)
+    return { closedAt: 0, detectedAt: 0, file: '' }
+  }
+}
+
+/** 返回日志证据；fresh=true 表示「断了且没再登回来，且是最近 15 分钟内的事」 */
+function snowlumaLogEvidence(cfg = {}) {
+  const ev = readSnowlumaLogEvents(cfg)
+  const now = Date.now()
+  const fresh = ev.closedAt > ev.detectedAt && now - ev.closedAt <= 15 * 60000
+  return { ...ev, fresh, closedText: ev.closedAt ? new Date(ev.closedAt).toLocaleString('sv-SE') : '' }
+}
+
 // ── 通知文案 ────────────────────────────────────────────────────────────────
 function offlineText(info, cfg, extra) {
   const sl = (cfg.backend || 'snowluma') === 'snowluma'
@@ -675,6 +749,22 @@ export async function checkOnce(cfg, opts = {}) {
 
   const res = await checkStatus(cfg, state)
   state.lastCheckAt = nowMs()
+
+  // 日志实证优先于接口自报（2026-10-22 13:54 掉线：接口一度还能应答）。
+  // 只要日志里 session closed 之后没有新的 login detected，就判掉线，
+  // 走下面的抢修分支（温和重启 QQ → 登录窗 → 通知用户扫码）。
+  if ((cfg.backend || 'snowluma') === 'snowluma' && res.reachable && res.status?.isLogin) {
+    const ev = snowlumaLogEvidence(cfg)
+    if (ev.fresh) {
+      log(`日志实证：${ev.closedText} session closed 后再没登录（接口自报 ${res.status.loginPhase || 'online'}）→ 判掉线`)
+      res.status = {
+        ...res.status,
+        isLogin: false,
+        loginPhase: 'session closed（日志实证）',
+        loginError: `SnowLuma 日志见 session closed: ${ev.closedText}`,
+      }
+    }
+  }
 
   let current
   if (!res.reachable) current = 'unreachable'
@@ -943,7 +1033,8 @@ async function main() {
   if (arg === '--status') {
     const state = readJson(STATE_FILE, {})
     const res = await checkStatus(cfg, state)
-    console.log(JSON.stringify({ now: stamp(), backend: cfg.backend || 'snowluma', quiet: inQuietHours(cfg), check: res, state }, null, 2))
+    const logEvidence = (cfg.backend || 'snowluma') === 'snowluma' ? snowlumaLogEvidence(cfg) : null
+    console.log(JSON.stringify({ now: stamp(), backend: cfg.backend || 'snowluma', quiet: inQuietHours(cfg), check: res, logEvidence, state }, null, 2))
     process.exit(res.reachable && res.status?.isLogin ? 0 : 1)
   }
 
@@ -955,6 +1046,16 @@ async function main() {
 
   if (arg === '--once') {
     if (!cfg.enabled) { log('watchdog 已禁用（配置 enabled:false）'); process.exit(0) }
+    // 夜间降频（2026-10-22 m03035）：0–8 点按 nightIntervalMinutes（默认 5 分钟）抽查。
+    // 计划任务仍是每分钟触发，这里按分钟整除判断，跳过大部分夜间轮次。
+    const hour = new Date().getHours()
+    if (hour < 8) {
+      const ni = Math.max(1, Number(cfg.nightIntervalMinutes || 5))
+      if (new Date().getMinutes() % ni !== 0) {
+        log(`夜间降频（${hour} 点，每 ${ni} 分钟一查），本轮跳过`)
+        process.exit(0)
+      }
+    }
     const r = await checkOnce(cfg)
     process.exit(r.code)
   }

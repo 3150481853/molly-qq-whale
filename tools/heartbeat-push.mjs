@@ -4,15 +4,18 @@
  *
  * 为什么要有它：Molly 跑在家里这台电脑上。电脑合盖/断网/断电时，
  * 家里这边什么都发不出来（连"我掉线了"这句话都发不出去）。所以由
- * 服务器做看守：家里每 3 分钟推一次"我还活着"，服务器超时没收到就
+ * 服务器做看守：家里定时推一次"我还活着"，服务器超时没收到就
  * 用 PushPlus 推手机。**它的价值恰恰在家里死掉的时候体现。**
+ *
+ * 频率（2026-10-22 m03035 调整）：白天 8–24 点每分钟一次；夜间 0–8 点
+ * 每 3 分钟一次（夜间降频由脚本内判断实现，计划任务统一按 PT1M 触发）。
  *
  * 只做出站 HTTP：不需要公网 IP、不开任何端口、不动路由器。
  *
  * 宿主端口（DSH 桌面那一侧）**不写死**：auto 发现，见 resolvePluginBase()。
  * 每次运行往 out/heartbeat.log 追加一行，控制台运维页的「心跳」日志读的就是它。
  *
- * 用法（计划任务每 3 分钟调一次）：
+ * 用法（计划任务每 1 分钟调一次；夜间由脚本自行跳过 2/3）：
  *   node tools/heartbeat-push.mjs
  *   node tools/heartbeat-push.mjs --once --verbose
  *   node tools/heartbeat-push.mjs --dry-run     只打印要发的内容，不真发
@@ -74,6 +77,24 @@ const LOG_FILE = path.join(ROOT, 'out', 'heartbeat.log')
 const args = new Set(process.argv.slice(2))
 const VERBOSE = args.has('--verbose')
 const DRY = args.has('--dry-run')
+
+/* ── 夜间降频（2026-10-22 主人 m03035 定的节奏）─────────────────
+ * 白天（默认 8 点以后）计划任务每分钟跑一次 → 家里掉线服务器 1 分钟内就能发现；
+ * 夜间 0–8 点主人睡觉/合盖，掉了也没人扫码，改成每 3 分钟推一次，
+ * 只向服务器证明「整机还活着」，半夜不拿 pushplus 吵人。
+ * 计划任务按 PT1M 触发，靠这里跳过来实现两种频率（任务本身只配一个触发器）。
+ */
+const HIGH_FREQ_START_HOUR = Number(
+  process.env.MOLLY_HIGH_FREQ_START_HOUR || cfg.highFreqStartHour || 8
+)
+const NIGHT_SKIP_MOD = Math.max(1, Number(process.env.MOLLY_NIGHT_SKIP_MOD || cfg.nightSkipMod || 3))
+{
+  const d = new Date()
+  if (d.getHours() < HIGH_FREQ_START_HOUR && d.getMinutes() % NIGHT_SKIP_MOD !== 0) {
+    if (VERBOSE) console.log('[heartbeat] 夜间降频：', d.getHours(), '点，本次跳过')
+    process.exit(0)
+  }
+}
 
 function log(...a) {
   if (VERBOSE) console.log('[heartbeat]', ...a)

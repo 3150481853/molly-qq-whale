@@ -1424,10 +1424,28 @@ export class ChatEngine {
         : []
       if (forwardSegs.length > 0) {
         const texts = []
+        const fwdImages = []
         for (const seg of forwardSegs.slice(0, 2)) {
           const fid = seg.data.id || seg.data.resid
           const f = await fetchForward(this.client, fid)
-          if (f && f.ok) texts.push(f.text)
+          if (!f || !f.ok) continue
+          texts.push(f.text)
+          if (Array.isArray(f.images) && f.images.length > 0) fwdImages.push(...f.images)
+        }
+        /*
+         * 转发节点里的图也要挂到这一轮（2026-10-22 主人真机：「他看不了里面的图」）。
+         * 只挂文本时历史里只有「[图片]」，模型确实看不见。这里按 url 去重、
+         * 总数压到 4 张（loadImages 本来就只取前 4 张，多了纯浪费带宽）。
+         */
+        if (fwdImages.length > 0) {
+          const haveUrls = new Set(norm.images.map((img) => String(img?.url || '')))
+          for (const img of fwdImages) {
+            if (norm.images.length >= 4) break
+            const url = String(img?.url || '')
+            if (!url || haveUrls.has(url)) continue
+            haveUrls.add(url)
+            norm.images.push(img)
+          }
         }
         if (texts.length > 0) {
           const body = String(norm.text || '').replace(/\[聊天记录\]/g, '').trim()

@@ -369,11 +369,18 @@ export const FORWARD_NODE_MAX = 8
 /** 取不到时的统一降级文案。 */
 export const FORWARD_FAIL_TEXT = '[聊天记录：取不到内容]'
 
-/** 把转发节点里的一条消息压成一行纯文本。 */
-function forwardNodeBody(node) {
+/**
+ * 把转发节点里的一条消息压成一行纯文本。
+ *
+ * P4b：顺手把节点里的图片地址收进 images。2026-10-22 真机：主人转发了一条
+ * 三节点聊天记录（后两个节点是图），她只看见「[图片]」两个字，回的是
+ * 「看不了里面的图」——正文进来了，图没进来。节点的 image 段是带完整
+ * http url 的，跟普通消息一样能抓，所以这里和 fetchQuoted 一样收集。
+ */
+function forwardNodeBody(node, images = []) {
   const raw = node?.message ?? node?.content ?? node?.raw_message ?? ''
   try {
-    return quoteSegmentsToText(raw).replace(/\s+/g, ' ').trim()
+    return quoteSegmentsToText(raw, images).replace(/\s+/g, ' ').trim()
   } catch {
     return ''
   }
@@ -384,11 +391,12 @@ function forwardNodeBody(node) {
  *
  * @param {OneBotClient} client 已连接的客户端
  * @param {string} forwardId forward 段的 data.id
- * @returns {Promise<{ok:boolean, text:string, count:number}>}
- *   text 永远可以直接拼到消息正文里用（失败时是降级文案）。
+ * @returns {Promise<{ok:boolean, text:string, count:number, images:Array}>}
+ *   text 永远可以直接拼到消息正文里用（失败时是降级文案）；
+ *   images 是节点里能抓到的图片（engine 会挂到这一轮，模型才看得见图）。
  */
 export async function fetchForward(client, forwardId) {
-  const fail = { ok: false, text: FORWARD_FAIL_TEXT, count: 0 }
+  const fail = { ok: false, text: FORWARD_FAIL_TEXT, count: 0, images: [] }
   const id = String(forwardId ?? '').trim()
   if (!id) return fail
   if (!client || typeof client.call !== 'function') return fail
@@ -404,19 +412,30 @@ export async function fetchForward(client, forwardId) {
     const rawList = data?.messages ?? data?.nodes ?? data?.message
     const list = Array.isArray(rawList) ? rawList : []
     const lines = []
+    const images = []
+    const seenUrls = new Set()
     for (const node of list.slice(0, FORWARD_NODE_MAX)) {
       const sender = node?.sender || {}
       const uid = sender.user_id ?? node?.user_id
       const name = String(sender.card || sender.nickname || node?.nickname || node?.name || '').trim()
         || (uid ? `QQ${uid}` : '某人')
-      const body = forwardNodeBody(node)
+      const nodeImages = []
+      const body = forwardNodeBody(node, nodeImages)
+      // 图片最多挂 4 张（engine-context 的 loadImages 也只取前 4 张）
+      for (const img of nodeImages) {
+        if (images.length >= 4) break
+        const url = String(img?.url || '')
+        if (!url || seenUrls.has(url)) continue
+        seenUrls.add(url)
+        images.push(img)
+      }
       if (!body) continue
       lines.push(`@${name}：${body}`)
     }
-    if (lines.length === 0) return fail
+    if (lines.length === 0 && images.length === 0) return fail
     let text = `[聊天记录 ${list.length} 条 ${lines.join('；')}]`
     if (text.length > FORWARD_TEXT_MAX) text = `${text.slice(0, FORWARD_TEXT_MAX - 1)}…`
-    return { ok: true, text, count: list.length }
+    return { ok: true, text, count: list.length, images }
   } catch {
     return fail
   }

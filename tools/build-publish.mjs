@@ -88,6 +88,9 @@ const FILES = [
   ['tools/snowluma-verify.ps1', 'tools/snowluma-verify.ps1'],
   ['tools/setup-snowluma-boot.ps1', 'tools/setup-snowluma-boot.ps1'],
   ['tools/p2-enable-watchdog.ps1', 'tools/p2-enable-watchdog.ps1'],
+  // 2026-10-22：watchdog/心跳从 10 分钟/3 分钟提速到 1 分钟（含夜间降频），
+  // 这个提权脚本负责改计划任务触发器；发布版缺它就没法把恢复周期压进 2 分钟验收线。
+  ['tools/tune-ops-tasks.ps1', 'tools/tune-ops-tasks.ps1'],
   ['tools/open-console-window.ps1', 'tools/open-console-window.ps1'],
   ['tools/make-desktop-shortcut.ps1', 'tools/make-desktop-shortcut.ps1'],
   ['tools/build-exe.mjs', 'tools/build-exe.mjs'],

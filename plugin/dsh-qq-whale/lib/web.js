@@ -2076,6 +2076,154 @@ export class WebWidget {
       }),
     })
 
+    /*
+     * 发言开关（用户 m03759 / m03849 七条答复 / m03862 批准）。
+     *
+     * 为什么做成 HTTP 而不是只改 yml：这些开关是「临时改主意」型的——
+     * 半夜想让她闭嘴、开会时想让她别发表情包，改配置文件再重载插件太重。
+     * 这里直接改 SwitchBoard 的内存状态并落 data/qq-whale/switches.json，
+     * 控制台点一下 1 秒内生效，不用重载。
+     */
+    add({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/switches`,
+      ...wrap(async (req, res) => {
+        const e = this.engineRef()
+        const sb = e?.switches
+        if (!sb) {
+          sendJson(res, 503, { ok: false, error: '开关模块还没就绪' })
+          return
+        }
+        let gid = ''
+        try {
+          gid = String(new URL(req.url || '/', 'http://127.0.0.1').searchParams.get('gid') || '')
+        } catch {}
+        if (req.method === 'GET') {
+          const view = sb.view({ gid })
+          sendJson(res, 200, { ok: true, view, audit: view.audit })
+          return
+        }
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          return
+        }
+        const raw = await readBody(req)
+        let body
+        try {
+          body = JSON.parse(raw || '{}')
+        } catch {
+          sendJson(res, 400, { ok: false, error: 'bad json' })
+          return
+        }
+        try {
+          const path = String(body?.path || '')
+          const r = /^groups\.(\d+)$/.exec(path)
+          if (r && body?.value === null) {
+            // 整组清掉某个群的覆盖（值传 null 表示删除，不走 set）
+            sb.removeGroup(r[1], {
+              actor: 'console',
+              ip: req.socket?.remoteAddress || '',
+            })
+          } else {
+            sb.set(path, body?.value, {
+              actor: 'console',
+              ip: req.socket?.remoteAddress || '',
+            })
+          }
+          sendJson(res, 200, { ok: true, view: sb.view({ gid: String(body?.gid || gid) }) })
+        } catch (err) {
+          sendJson(res, 400, { ok: false, error: String(err?.message || err) })
+        }
+      }),
+    })
+
+    add({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/switches/mute`,
+      ...wrap(async (req, res) => {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          return
+        }
+        const sb = this.engineRef()?.switches
+        if (!sb) {
+          sendJson(res, 503, { ok: false, error: '开关模块还没就绪' })
+          return
+        }
+        const raw = await readBody(req)
+        let body
+        try {
+          body = JSON.parse(raw || '{}')
+        } catch {
+          sendJson(res, 400, { ok: false, error: 'bad json' })
+          return
+        }
+        try {
+          sb.addMute(
+            String(body?.scope || ''),
+            Number(body?.minutes) || 0,
+            String(body?.note || ''),
+            { actor: 'console', ip: req.socket?.remoteAddress || '' },
+          )
+          sendJson(res, 200, { ok: true, view: sb.view({}) })
+        } catch (err) {
+          sendJson(res, 400, { ok: false, error: String(err?.message || err) })
+        }
+      }),
+    })
+
+    add({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/switches/unmute`,
+      ...wrap(async (req, res) => {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          return
+        }
+        const sb = this.engineRef()?.switches
+        if (!sb) {
+          sendJson(res, 503, { ok: false, error: '开关模块还没就绪' })
+          return
+        }
+        const raw = await readBody(req)
+        let body
+        try {
+          body = JSON.parse(raw || '{}')
+        } catch {
+          sendJson(res, 400, { ok: false, error: 'bad json' })
+          return
+        }
+        try {
+          sb.removeMute(String(body?.scope || ''), { actor: 'console', ip: req.socket?.remoteAddress || '' })
+          sendJson(res, 200, { ok: true, view: sb.view({}) })
+        } catch (err) {
+          sendJson(res, 400, { ok: false, error: String(err?.message || err) })
+        }
+      }),
+    })
+
+    add({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/switches/reset`,
+      ...wrap(async (req, res) => {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          return
+        }
+        const sb = this.engineRef()?.switches
+        if (!sb) {
+          sendJson(res, 503, { ok: false, error: '开关模块还没就绪' })
+          return
+        }
+        try {
+          sb.reset({ actor: 'console', ip: req.socket?.remoteAddress || '' })
+          sendJson(res, 200, { ok: true, view: sb.view({}) })
+        } catch (err) {
+          sendJson(res, 400, { ok: false, error: String(err?.message || err) })
+        }
+      }),
+    })
+
     add({
       kind: 'exact',
       path: `${ROUTE_PREFIX}/widget.js`,

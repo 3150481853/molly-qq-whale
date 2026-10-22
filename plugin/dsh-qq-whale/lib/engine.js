@@ -66,6 +66,9 @@ const engineText = await import(sub('./engine-text.js'))
 const engineContext = await import(sub('./engine-context.js'))
 // Stage 3 Step 2：决策层（要不要理 / 要不要查 / 要不要停）。纯规则，状态全走 deps 注入。
 const engineDecision = await import(sub('./engine-decision.js'))
+// 发言开关（2026-10-22，用户 m03759/m03849）：控制台点一下立即生效，重启保持。
+// 状态落在 data/qq-whale/switches.json；旧 noLikeGroups 在构造时迁移成群级 like=false。
+const { SwitchBoard, sanitizeGroupText } = await import(sub('./switches.js'))
 
 const SCENE_PRIVATE = 'private'
 const SCENE_MENTION = 'group_mention'
@@ -169,6 +172,14 @@ export class ChatEngine {
     // maxFileSizeMB 对齐控制台上传契约的 8 MB（构造器默认 5 MB，否则 6 MB 的图
     // 能传进来却被 scan() 当超大文件跳过：控制台看得见、斗图时选不到）。
     this.stickers = new StickerLibrary({ dir: config.stickerDir, logger, maxFileSizeMB: 8 })
+    // 发言开关（2026-10-22）：运行时热切换。旧 noLikeGroups 迁移成群级 like=false。
+    // 放在这里的原因：后面的所有发言路径（回复/表情/轻回应/点赞/主动搭话）都要查它。
+    this.switches = new SwitchBoard({
+      file: path.join(config.dataDir || config.memoryDir, 'switches.json'),
+      auditFile: path.join(config.dataDir || config.memoryDir, 'switches-audit.log'),
+      logger,
+      noLikeGroups: config.noLikeGroups || [],
+    })
     this.memory = new MemoryStore({ dir: config.memoryDir, logger })
 
     /**
@@ -1383,6 +1394,33 @@ export class ChatEngine {
     if (!ev || ev.post_type === 'message_sent') return
     if (String(ev.user_id) === String(this.selfId)) return
 
+    /*
+     * 2026-10-22 修：入站去重（同一问题被回答很多遍的根因之一）。
+     *
+     * 真机证据：15:45:25 群 666666666 问了一句沙箱，接下来 5 分钟里
+     * 她朝 777777777 发了 12 条「正在查，稍等…」+ 3 条近似答案。
+     * SnowLuma 的 WS 每半小时左右会 ECONNRESET 重连一次，重连期间
+     * 断开的消息 OneBot 侧可能补发；同一条消息被喂进来 N 次，
+     * 就会触发 N 次「决定开口 → 生成 → 发送」。
+     *
+     * 用 (会话类型 + 群号 + message_id) 做 120 秒内存去重：真重复丢弃，
+     * 不同人发的相同文字 message_id 不同，不会被误杀。
+     */
+    const mid = ev.message_id == null ? '' : `${ev.message_type}:${String(ev.group_id || '')}:${String(ev.message_id)}`
+    if (mid) {
+      if (!this._seenMsgIds) this._seenMsgIds = new Map()
+      const nowMs = Date.now()
+      const seenAt = this._seenMsgIds.get(mid)
+      if (seenAt && nowMs - seenAt < 120000) {
+        this.logger('debug', `跳过重复入站消息 ${mid}（${Math.round((nowMs - seenAt) / 1000)}s 内已处理）`)
+        return
+      }
+      this._seenMsgIds.set(mid, nowMs)
+      if (this._seenMsgIds.size > 800) {
+        for (const [k, v] of this._seenMsgIds) if (nowMs - v > 300000) this._seenMsgIds.delete(k)
+      }
+    }
+
     const norm = normalizeMessage(ev.message, this.selfId)
     /*
      * P3：引用消息要把被引用那条的正文取回来。
@@ -1624,7 +1662,34 @@ export class ChatEngine {
      * 节流（replyMinGapSeconds / replyMaxPer10Min）默认 0 = 不限制，命中时
      * 同样降级成轻回应/点赞，而不是硬憋着什么都不做。
      */
-    if (!verdict.yes || !this.replyRateOk(conv)) {
+    /*
+     * 发言开关（2026-10-22，用户 m03759 / m03849）：运行时热切换，控制台点一下立即生效。
+     * 优先级见 switches.js：总开关 → 临时静音 → 群级覆盖 → 群/私聊默认。
+     * 用户第 2 条：@ / 叫名字能穿透群静音，但回复要带状态前缀。
+     * 用户第 3 条：总开关关掉时连 @ 都不回（replyDecision 里已处理）。
+     */
+    const swMeta = { scene, gid: ev.group_id ? String(ev.group_id) : null }
+    const mentioned = scene === SCENE_MENTION || verdict.reason === '叫名字'
+    const swDecision = this.switches.replyDecision({ ...swMeta, mention: mentioned })
+    if (!swDecision.allowed && !swDecision.penetrate) {
+      this.traceReply(conv.key, 'disabled-reply', { scene, reason: swDecision.reason })
+      this.logger('debug', `不回（开关）：${swDecision.reason}`)
+
+      // 关掉「回复」不等于全哑：轻回应/点赞各自有开关（用户第 1 条：五项分开管）
+      if (this.switches.allow('light', swMeta) && (await this.maybeLightReaction(ev, norm, scene, conv))) return
+      if (
+        this.switches.allow('like', swMeta) &&
+        scene !== SCENE_PRIVATE &&
+        !this.likeBlocked(ev) &&
+        this.config.tapEmoji !== false &&
+        shouldTapEmoji({ tapEmojiProbability: this.config.tapEmojiProbability })
+      ) {
+        this.tapEmoji(ev.message_id).catch(() => {})
+      }
+      return
+    }
+
+    if ((!verdict.yes || !this.replyRateOk(conv)) && !swDecision.penetrate) {
       if (!verdict.yes) {
         this.logger('debug', `不回：${verdict.reason || `意愿 ${verdict.willingness?.toFixed(2)} < ${verdict.threshold}`}`)
 
@@ -1642,11 +1707,12 @@ export class ChatEngine {
         this.logger('debug', '不回：触发回复节流（replyMinGapSeconds / replyMaxPer10Min）')
       }
 
-      // 第二档：不开口，但甩张图（比单纯点赞更像人）
-      if (await this.maybeLightReaction(ev, norm, scene, conv)) return
+      // 第二档：不开口，但甩张图（比单纯点赞更像人）；light 开关关掉就跳过
+      if (this.switches.allow('light', swMeta) && (await this.maybeLightReaction(ev, norm, scene, conv))) return
 
-      // 第三档：已读回应，偶尔点个表情赞而不是彻底消失
+      // 第三档：已读回应，偶尔点个表情赞而不是彻底消失（like 开关分开管）
       if (
+        this.switches.allow('like', swMeta) &&
         scene !== SCENE_PRIVATE &&
         !this.likeBlocked(ev) &&
         this.config.tapEmoji !== false &&
@@ -1659,7 +1725,11 @@ export class ChatEngine {
 
     // 睡觉时间里私聊被叫醒：带情绪地回一句（这是活人感的重要细节）
     const rest = inRestWindow(this.config.restWindows, new Date())
-    const mood = rest ? { text: `现在是 ${new Date().getHours()} 点，你被吵醒了，很不爽很想继续睡。语气简短、带起床气，但别真的凶。` } : null
+    let mood = rest ? { text: `现在是 ${new Date().getHours()} 点，你被吵醒了，很不爽很想继续睡。语气简短、带起床气，但别真的凶。` } : null
+    // 静音/回复关但被点名：先交代状态再回，别装没事人（用户 m03849 第 2 条）
+    if (swDecision.penetrate) {
+      mood = { text: `你本来不该说话的（${swDecision.reason}），但对方 @ 你/叫了你的名字。先用一句话交代状态：${swDecision.prefix}然后正常回他。` }
+    }
 
     await this.scheduleReply({ ev, norm, scene, conv, userName, groupName, mood })
   }
@@ -1713,6 +1783,8 @@ export class ChatEngine {
    */
   async maybeLightReaction(ev, norm, scene, conv) {
     if (scene === SCENE_PRIVATE) return false
+    // 开关：控制台「轻回应」关掉就一张图都不甩（用户 m03759 五项分开管）
+    if (!this.switches.allow('light', { scene, gid: ev.group_id ? String(ev.group_id) : null })) return false
     if (this.config.stickerLightReaction === false) return false
     const chance = Number(this.config.stickerLightReactionChance ?? 0.25)
     if (!(Math.random() < chance)) return false
@@ -3605,6 +3677,61 @@ export class ChatEngine {
     const key = ev.message_type === 'group' ? ev.group_id : ev.user_id
     const isGroup = ev.message_type === 'group'
 
+    /*
+     * 2026-10-22 修：串群保险丝（跨群发送的兜底）。
+     *
+     * 真机证据：15:45:25 群 666666666 问的「dsh 沙箱权限」，
+     * 15:45:46 起进度句和答案全部发到了测试群 777777777，
+     * 而那段时间测试群没有任何入站。deliver 的目标只看 ev，
+     * 说明调用方传进来的 ev 和 conv 不是同一个会话（会话复用了）。
+     *
+     * 与其去赌调用链每一层都不出错，不如在最后一道出口对账：
+     * conv.key 必须等于由 ev 推导出来的会话键，不等就拒发并留证据。
+     * 代价是极少数真出错的回复发不出去（用户看到的是"没回"，
+     * 比"跑到别的群"轻得多）。
+     */
+    const expectKey = conv && conv.key ? String(conv.key) : ''
+    const evKey = isGroup ? `group:${String(key)}` : `private:${String(key)}`
+    if (expectKey && expectKey !== evKey) {
+      this.traceReply(expectKey, 'dropped-cross-conv', {
+        evKey,
+        text: String(reply?.raw || '').replace(/\s+/g, ' ').slice(0, 60),
+      })
+      const where = String(new Error().stack || '').split('\n').slice(2, 5).map((s) => s.trim()).join(' <- ')
+      this.logger('warn', `丢弃串会话回复：conv=${expectKey} ev=${evKey} 栈=${where}`)
+      return
+    }
+
+    /*
+     * 2026-10-22 修：重叠回复去重（同一问题被回答多遍的第二道保险）。
+     *
+     * 真机证据：测试群 15:45:51–15:46:42 每 5 秒一条「正在查，稍等…」共 12 条，
+     * 15:46:54 起 3 条近似答案；大便问题又是 5 条近似答案。
+     * 去重规则只针对"进度类短句"和"45 秒内完全相同的整句"，
+     * 不碰正常聊天里正常的连发。
+     */
+    const rawText = String(reply?.raw || '').replace(/\s+/g, ' ').trim()
+    const keyStr = String(key)
+    if (!this._recentSent) this._recentSent = new Map()
+    const prevSent = this._recentSent.get(keyStr)
+    const nowMs2 = Date.now()
+    const PROGRESS_RE = /^(正在查|稍等|马上|查到了|我查一下|稍等片刻|好的，稍等)/
+    if (prevSent && nowMs2 - prevSent.at < 45000) {
+      const same = rawText && prevSent.text && rawText === prevSent.text
+      const bothProgress = PROGRESS_RE.test(rawText || '') && PROGRESS_RE.test(prevSent.text || '')
+      if (same || bothProgress) {
+        this.traceReply(String(conv?.key || keyStr), 'dropped-dup', { why: same ? 'same-text' : 'progress-flood' })
+        this.logger('debug', `跳过重复/进度刷屏回复（${String(conv?.key || keyStr)}）：${rawText.slice(0, 30)}`)
+        return
+      }
+    }
+    if (rawText) {
+      this._recentSent.set(keyStr, { at: nowMs2, text: rawText.slice(0, 120) })
+      if (this._recentSent.size > 200) {
+        for (const [k, v] of this._recentSent) if (nowMs2 - v.at > 600000) this._recentSent.delete(k)
+      }
+    }
+
     const plan = planDelivery(reply.parts, scene, this.config, Math.random)
     const startedAt = this.now()
 
@@ -3631,6 +3758,8 @@ export class ChatEngine {
       let payload = null
 
       if (part.type === 'sticker') {
+        // 开关：表情包关掉就跳过这一段（不退化文字，免得答非所问）
+        if (!this.switches.allow('sticker', { scene, gid: ev.group_id ? String(ev.group_id) : null })) continue
         payload = await this.resolveSticker(part.query)
         if (!payload) {
           this.stats.stickerFallback++
@@ -3642,6 +3771,22 @@ export class ChatEngine {
         }
       } else {
         let text = part.text
+        /*
+         * 群聊内容过滤（用户 m03846：群里别贴代码/日志长文）。
+         * 触发条件在 switches.js：命中 2 行以上代码/日志特征，或长度超 maxChars。
+         * drop 模式整条不发；shorten 模式截成前一两句 + 「细节私聊」后缀。
+         */
+        if (isGroup) {
+          const filtered = sanitizeGroupText(text, this.switches.contentFilterCfg())
+          if (filtered.changed) {
+            this.traceReply(String(conv.key || ''), filtered.dropped ? 'dropped-content' : 'shrunk-content', { reason: filtered.reason })
+            if (filtered.dropped) {
+              this.logger('info', '群聊内容过滤：整条丢弃（日志/代码味太重）')
+              continue
+            }
+            text = filtered.text
+          }
+        }
         /*
          * 群聊里「回谁 @ 谁」——把原来那行什么都不做的占位补成实现。
          *
@@ -4180,6 +4325,8 @@ export class ChatEngine {
   async maybeProactive() {
     if (this.config.blindMode) return
     if (!this.config.proactiveEnabled) return
+    // 开关：控制台「主动搭话」关掉就彻底不主动找人（用户 m03759 五项分开管）
+    if (!this.switches.allow('proactive', { scene: 'private' })) return
     const now = this.now()
 
     // 闸门 0：省着用模式下不许主动找人。

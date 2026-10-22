@@ -258,6 +258,29 @@ async function jget(url, timeoutMs = 1500) {
   }
 }
 
+// 发 JSON 的 POST（宿主插件的写接口统一走这个）
+async function jpost(url, body, timeoutMs = 6000) {
+  try {
+    const r = await fetch(url, {
+      method: 'POST',
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: { accept: 'application/json', 'content-type': 'application/json' },
+      body: JSON.stringify(body ?? {}),
+    });
+    let data = null;
+    try {
+      data = await r.json();
+    } catch {
+      data = null;
+    }
+    if (!r.ok) return { ok: false, error: (data && data.error) || `HTTP ${r.status}`, data };
+    return { ok: true, data };
+  } catch (err) {
+    const msg = err && err.name === 'TimeoutError' ? `超时 ${timeoutMs}ms` : `${(err && err.message) || err}`;
+    return { ok: false, error: msg };
+  }
+}
+
 // ── 宿主端口探测（不写死 7053；DSH 重启会换端口）───────────────────────────
 // 前端 4 秒轮询，绝不能每次都遍历端口：结果（含"没探到"）统一缓存 30 秒。
 const HOST_PROBE_TTL = 30_000;
@@ -1154,6 +1177,41 @@ async function route(req, res) {
   // 表情包原图（契约 §3.6）
   if (p.startsWith('/api/sticker/')) {
     return serveSticker(res, p.slice('/api/sticker/'.length));
+  }
+
+  // 发言开关（2026-10-22）—— 透传宿主插件 /dsh-qq-whale/switches*
+  // GET  /api/plugin/switches                → 读全部状态（含审计/静音/生效值）
+  // POST /api/plugin/switches/set            {path,value}
+  // POST /api/plugin/switches/mute           {scope,minutes,note}
+  // POST /api/plugin/switches/unmute         {scope}
+  // POST /api/plugin/switches/reset          {}
+  if (p === '/api/plugin/switches' || p.startsWith('/api/plugin/switches/')) {
+    const base = await resolveHostBase();
+    if (!base) return sendJson(res, 200, { ok: false, reachable: false, error: '宿主（DSH）没探到端口' });
+    if (req.method === 'GET' && p === '/api/plugin/switches') {
+      const r = await jget(base + '/dsh-qq-whale/switches', 6000);
+      if (!r.ok) return sendJson(res, 200, { ok: false, reachable: false, error: r.error });
+      return sendJson(res, 200, Object.assign({ ok: true, reachable: true }, r.data || {}));
+    }
+    if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: 'use POST' });
+    let body = {};
+    try {
+      body = await readJsonBody(req);
+    } catch (err) {
+      if (err && err.code === 'BODY_TOO_LARGE') {
+        return sendJson(res, 413, { ok: false, error: err.message });
+      }
+      return sendJson(res, 400, { ok: false, error: '请求体不是合法 JSON：' + errText(err) });
+    }
+    const sub = p.slice('/api/plugin/switches'.length) || '/';
+    if (!['/set', '/mute', '/unmute', '/reset'].includes(sub)) {
+      return sendJson(res, 404, { ok: false, error: '未知的开关接口 ' + sub });
+    }
+    /* /set 对应插件侧 POST /switches（同一个接口，省得插件再开一个别名路由） */
+    const targetPath = sub === '/set' ? '/dsh-qq-whale/switches' : ('/dsh-qq-whale/switches' + sub);
+    const r = await jpost(base + targetPath, body, 6000);
+    if (!r.ok) return sendJson(res, 200, { ok: false, reachable: true, error: r.error });
+    return sendJson(res, 200, Object.assign({ ok: true }, r.data || {}));
   }
 
   // 动作执行（契约 §4.2）

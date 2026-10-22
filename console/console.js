@@ -16,7 +16,7 @@
   var QR_TTL_MS = (typeof window !== 'undefined' && typeof window.__QR_TTL_MS__ === 'number' && window.__QR_TTL_MS__ > 0)
     ? window.__QR_TTL_MS__
     : 120000;
-  var PAGES = ['overview', 'chats', 'memory', 'pending', 'stickers', 'budget', 'work', 'watchdog', 'ops', 'external', 'napcat', 'login', 'exec', 'settings'];
+  var PAGES = ['overview', 'chats', 'memory', 'pending', 'stickers', 'switches', 'budget', 'work', 'watchdog', 'ops', 'external', 'napcat', 'login', 'exec', 'settings'];
 
   /* 记忆类型：顺序即页面分组顺序。值和插件端 lib/memory.js 的 kind 枚举一一对应，
      中文标签只在前端出现，不参与任何写请求。 */
@@ -95,6 +95,8 @@
       hb: null, hbError: null,
       at: 0, loading: false
     },
+    /* 发言开关：data 是 /api/plugin/switches 返回的整包（master/private/group/groups/contentFilter/temporaryMutes/audit） */
+    sw: { data: null, error: '', loading: false, group: '', busy: false },
     reloading: false   /* 前端版本不一致时只自动 reload 一次 */
   };
 
@@ -3522,6 +3524,278 @@
     }
   }
 
+  /* ---------------- 发言开关（运行时热切换，不用重载插件） ---------------- */
+
+  var SW_CAPS = ['reply', 'sticker', 'light', 'like', 'proactive'];
+  var SW_CAP_LABEL = {
+    reply: '回话',
+    sticker: '发表情包',
+    light: '轻回应（单独甩图/表情）',
+    like: '点赞',
+    proactive: '主动搭话'
+  };
+  var SW_CAP_HINT = {
+    reply: '关掉后只有 @ 或叫名字能让她开口（会带一句状态前缀）',
+    sticker: '关掉后回复里不再夹表情包',
+    light: '关掉后不会单独发一张图或一个表情就完事',
+    like: '关掉后不再给群消息点赞',
+    proactive: '关掉后不会自己找话说'
+  };
+
+  function swFetch(url, opt) {
+    return fetch(url, opt || {}).then(function (r) {
+      return r.json().catch(function () {
+        return { ok: false, error: '服务端返回非 JSON（HTTP ' + r.status + '）' };
+      });
+    }).catch(function (err) {
+      return { ok: false, error: '请求失败：' + ((err && err.message) ? err.message : String(err)) };
+    });
+  }
+
+  function swPost(path, body) {
+    return swFetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify(body || {})
+    });
+  }
+
+  function loadSwitches() {
+    if (state.sw.loading) return;
+    state.sw.loading = true;
+    state.sw.error = '';
+    var gid = String(state.sw.group || '').replace(/[^0-9]/g, '');
+    var url = '/api/plugin/switches' + (gid ? ('?gid=' + encodeURIComponent(gid)) : '');
+    swFetch(url, { headers: { Accept: 'application/json' } }).then(function (res) {
+      state.sw.loading = false;
+      if (!res || !res.ok) {
+        state.sw.error = (res && res.error) || '拉取开关失败';
+      } else {
+        state.sw.data = res.view || res.data || null;
+      }
+      if (state.page === 'switches') safe(renderSwitches);
+    });
+  }
+
+  function swApplyResult(res) {
+    state.sw.busy = false;
+    if (!res || !res.ok) {
+      toast('保存失败：' + ((res && res.error) || '未知错误'));
+      if (state.page === 'switches') safe(renderSwitches);
+      return;
+    }
+    if (res.view) state.sw.data = res.view;
+    state.sw.error = '';
+    safe(renderSwitches);
+  }
+
+  function swSet(path, value) {
+    if (state.sw.busy) return;
+    state.sw.busy = true;
+    swPost('/api/plugin/switches/set', { path: path, value: value, gid: state.sw.group || '' }).then(swApplyResult);
+  }
+
+  function swToggleBtn(path, on) {
+    var attrs = 'data-sw-act="set" data-path="' + esc(path) + '" data-value="' + (on ? '0' : '1') + '"';
+    return '<button class="btn btn-xs ' + (on ? 'btn-primary' : 'btn-ghost') + '" type="button" ' + attrs + '>'
+      + (on ? '开' : '关') + '</button>';
+  }
+
+  function swRow(label, valueHtml, hint) {
+    return '<div class="kv"><span class="kv-k"' + (hint ? ' title="' + esc(hint) + '"' : '') + '>'
+      + esc(label) + '</span><span class="kv-v">' + valueHtml + '</span></div>';
+  }
+
+  function swCapRows(prefix, caps) {
+    return SW_CAPS.map(function (cap) {
+      var on = !caps || caps[cap] !== false;
+      return swRow(SW_CAP_LABEL[cap], swToggleBtn(prefix + '.' + cap, on), SW_CAP_HINT[cap]);
+    }).join('');
+  }
+
+  function swMuteRow(m) {
+    var until = Number(m && m.until) || 0;
+    var left = '';
+    if (until > 0) {
+      var mins = Math.max(0, Math.round((until - Date.now() / 1000) / 60));
+      left = mins > 0 ? (mins + ' 分钟后到期') : '已到期';
+    }
+    return '<div class="kv"><span class="kv-k mono">' + esc(String(m.scope || '')) + '</span><span class="kv-v">'
+      + esc(left) + (m.note ? ' · ' + esc(String(m.note)) : '')
+      + ' <button class="btn btn-xs btn-ghost" type="button" data-sw-act="unmute" data-scope="'
+      + esc(String(m.scope || '')) + '">解除</button></span></div>';
+  }
+
+  function swAuditItem(a) {
+    var v = a.value === null ? '（清除）' : (a.value === true ? '开' : (a.value === false ? '关' : String(a.value)));
+    return '<div class="kv"><span class="kv-k mono">' + esc(fmtStamp(a.at)) + '</span><span class="kv-v">'
+      + '<span class="mono">' + esc(String(a.path || '')) + '</span> → ' + esc(v)
+      + (a.actor ? ' · ' + esc(String(a.actor)) : '') + '</span></div>';
+  }
+
+  function onSwAction(ev) {
+    var target = ev.target;
+    var el = target && target.closest ? target.closest('[data-sw-act]') : null;
+    if (!el) return;
+    var act = el.getAttribute('data-sw-act');
+    if (act === 'set') {
+      swSet(el.getAttribute('data-path'), el.getAttribute('data-value') === '1');
+      return;
+    }
+    if (act === 'group-open') {
+      var input = $('#swGroupInput');
+      var gid = String((input && input.value) || el.getAttribute('data-gid') || '').replace(/[^0-9]/g, '');
+      if (!gid) { toast('先填群号'); return; }
+      state.sw.group = gid;
+      safe(renderSwitches);
+      loadSwitches();
+      return;
+    }
+    if (act === 'group-remove') {
+      var rid = String(el.getAttribute('data-gid') || state.sw.group || '').replace(/[^0-9]/g, '');
+      if (!rid) return;
+      if (!confirm('清除群 ' + rid + ' 的所有覆盖？')) return;
+      state.sw.busy = true;
+      swPost('/api/plugin/switches/set', { path: 'groups.' + rid, value: null, gid: rid }).then(function (res) {
+        if (res && res.ok) state.sw.group = '';
+        swApplyResult(res);
+      });
+      return;
+    }
+    if (act === 'cf-mode') {
+      swSet('contentFilter.mode', el.getAttribute('data-mode'));
+      return;
+    }
+    if (act === 'cf-max') {
+      var mc = $('#swMaxChars');
+      var n = mc ? Number(mc.value) : 180;
+      if (!n || n < 60 || n > 2000) { toast('字数上限要在 60–2000 之间'); return; }
+      swSet('contentFilter.maxChars', n);
+      return;
+    }
+    if (act === 'mute') {
+      var scopeEl = $('#swMuteScope');
+      var scope = String((scopeEl && scopeEl.value) || '').trim().replace(/^group:/, '');
+      if (!scope) { toast('先填 private 或群号'); return; }
+      var minEl = $('#swMuteMinutes');
+      var noteEl = $('#swMuteNote');
+      var minutes = Number((minEl && minEl.value) || 30) || 30;
+      var note = String((noteEl && noteEl.value) || '');
+      state.sw.busy = true;
+      swPost('/api/plugin/switches/mute', { scope: scope, minutes: minutes, note: note }).then(swApplyResult);
+      return;
+    }
+    if (act === 'unmute') {
+      var sc = String(el.getAttribute('data-scope') || '');
+      if (!sc) return;
+      state.sw.busy = true;
+      swPost('/api/plugin/switches/unmute', { scope: sc }).then(swApplyResult);
+      return;
+    }
+    if (act === 'reset') {
+      if (!confirm('恢复默认：所有开关都打开，清空群级覆盖和临时静音？')) return;
+      state.sw.busy = true;
+      swPost('/api/plugin/switches/reset', {}).then(swApplyResult);
+    }
+  }
+
+  function renderSwitches() {
+    var box = $('#swCards');
+    if (!box) return;
+    var err = $('#swErr');
+    if (err) {
+      var msg = state.sw.error || '';
+      err.hidden = !msg;
+      err.textContent = msg;
+    }
+    var auditBox = $('#swAudit');
+    var auditSub = $('#swAuditSub');
+    if (!state.sw.data) {
+      box.innerHTML = '<div class="card card-block"><p class="card-sub">'
+        + (state.sw.loading ? '正在加载开关…' : '还没有数据，点右上角「重新加载」。') + '</p></div>';
+      if (auditBox) auditBox.innerHTML = '<p class="card-sub">—</p>';
+      return;
+    }
+    var d = state.sw.data;
+    var sw = d.switches || {};
+    var cards = [];
+
+    cards.push(card('总开关', [
+      swRow('全部发言', swToggleBtn('master', sw.master !== false),
+        '关掉 = 全局静音：不回话、不发图、不点赞、不主动搭话'),
+      '<p class="card-sub">审批、命令回复、重要通知不受影响。群聊被关时，@ 她或叫名字仍然会回一句（带状态前缀）。</p>',
+      '<div class="row-actions" style="margin-top:6px"><button class="btn btn-sm btn-danger" type="button" data-sw-act="reset">恢复默认（全部打开）</button></div>'
+    ].join('')));
+    cards.push(card('私聊', swCapRows('private', sw.private)));
+    cards.push(card('群聊（默认）', swCapRows('group', sw.group)));
+
+    var groups = (sw.groups && typeof sw.groups === 'object') ? sw.groups : {};
+    var gids = Object.keys(groups).sort();
+    var gid = String(state.sw.group || '').replace(/[^0-9]/g, '');
+    var gh = '';
+    if (gids.length) {
+      gh += '<div class="chips" style="margin-bottom:10px">' + gids.map(function (g) {
+        return '<button class="chip ' + (g === gid ? 'is-active' : '') + '" type="button" data-sw-act="group-open" data-gid="'
+          + esc(g) + '">群 ' + esc(g) + '</button>';
+      }).join('') + '</div>';
+    } else {
+      gh += '<p class="card-sub">还没有群级覆盖，所有群都跟随「群聊（默认）」。</p>';
+    }
+    gh += '<div class="field"><div class="field-label">群号</div><div class="row-actions">'
+      + '<input class="input input-sm" id="swGroupInput" inputmode="numeric" placeholder="例如 666666666" value="'
+      + esc(gid) + '">'
+      + '<button class="btn btn-sm" type="button" data-sw-act="group-open">打开</button>'
+      + (gid ? '<button class="btn btn-sm btn-ghost" type="button" data-sw-act="group-remove" data-gid="'
+        + esc(gid) + '">清除该群覆盖</button>' : '')
+      + '</div></div>';
+    if (gid) {
+      var eff = (d.effectiveGroup && typeof d.effectiveGroup === 'object') ? d.effectiveGroup : {};
+      gh += '<p class="card-sub mono">群 ' + esc(gid) + ' 实际生效：' + SW_CAPS.map(function (cap) {
+        return SW_CAP_LABEL[cap] + '=' + (eff[cap] !== false ? '开' : '关');
+      }).join(' / ') + '</p>';
+      gh += swCapRows('groups.' + gid, groups[gid] || {});
+    }
+    cards.push(card('群级覆盖', gh));
+
+    var cf = sw.contentFilter || {};
+    cards.push(card('群聊内容过滤', [
+      swRow('过滤长日志/代码/路径', swToggleBtn('contentFilter.enabled', cf.enabled !== false),
+        '群聊里把大段日志、代码、文件路径压短或直接不发'),
+      '<div class="field"><div class="field-label">超长时怎么办</div><div class="row-actions">'
+        + '<button class="btn btn-sm ' + (cf.mode === 'drop' ? 'btn-ghost' : 'btn-primary')
+        + '" type="button" data-sw-act="cf-mode" data-mode="shorten">压成短句</button>'
+        + '<button class="btn btn-sm ' + (cf.mode === 'drop' ? 'btn-primary' : 'btn-ghost')
+        + '" type="button" data-sw-act="cf-mode" data-mode="drop">直接不发</button>'
+        + '</div></div>',
+      '<div class="field"><div class="field-label">压短后的字数上限（60–2000，默认 180）</div><div class="row-actions">'
+        + '<input class="input input-sm" id="swMaxChars" type="number" min="60" max="2000" value="'
+        + (Number(cf.maxChars) || 180) + '">'
+        + '<button class="btn btn-sm" type="button" data-sw-act="cf-max">保存</button>'
+        + '</div></div>'
+    ].join('')));
+
+    var mutes = Array.isArray(d.mutes) ? d.mutes : [];
+    var mh = mutes.length ? mutes.map(swMuteRow).join('')
+      : '<p class="card-sub">现在没有临时静音。</p>';
+    mh += '<div class="field"><div class="field-label">加临时静音（到点自动恢复）</div><div class="row-actions">'
+      + '<input class="input input-sm" id="swMuteScope" placeholder="private 或 群号" style="width:150px">'
+      + '<input class="input input-sm" id="swMuteMinutes" type="number" min="1" max="10080" value="30" style="width:90px"> 分钟'
+      + '<input class="input input-sm" id="swMuteNote" placeholder="备注（可选）" style="width:160px">'
+      + '<button class="btn btn-sm" type="button" data-sw-act="mute">静音</button>'
+      + '</div><p class="field-hint">scope 写 private（私聊）或群号（群聊），例如 666666666。</p></div>';
+    cards.push(card('临时静音', mh));
+
+    box.innerHTML = cards.join('');
+
+    var audit = Array.isArray(d.audit) ? d.audit : [];
+    if (auditBox) {
+      auditBox.innerHTML = audit.length
+        ? audit.slice().reverse().map(swAuditItem).join('')
+        : '<p class="card-sub">还没有改动记录。</p>';
+    }
+    if (auditSub) auditSub.textContent = '文件：' + (d.file || '—');
+  }
+
   /* ---------------- 路由 ---------------- */
 
   function currentPage() {
@@ -3541,6 +3815,7 @@
       case 'napcat': renderNapcat(); break;
       case 'login': renderLogin(); break;
       case 'settings': renderSettings(); break;
+      case 'switches': renderSwitches(); break;
       default: break;
     }
   }
@@ -3562,6 +3837,7 @@
     /* 运维 / 外部服务：进页各拉一次，别让 4 秒轮询拖着外部请求走 */
     if (name === 'ops') loadOpsHeartbeat();
     if (name === 'external') loadExternal();
+    if (name === 'switches') loadSwitches();
     /* 登录页只在等待扫码时轮询，离开就停，别在后台空转 */
     if (name === 'login') enterLoginPage();
     else stopLoginPoll();
@@ -3573,6 +3849,14 @@
     window.addEventListener('hashchange', function () {
       setPage(currentPage());
     });
+
+    /* 发言开关：重新加载 + 页内所有按钮走事件委托（列表重绘不用重绑） */
+    var swReload = $('#swReload');
+    if (swReload) swReload.addEventListener('click', function () { loadSwitches(); });
+    var swCards = $('#swCards');
+    if (swCards) swCards.addEventListener('click', onSwAction);
+    var swAudit = $('#swAudit');
+    if (swAudit) swAudit.addEventListener('click', onSwAction);
 
     var btnRefresh = $('#btnRefresh');
     if (btnRefresh) btnRefresh.addEventListener('click', function () { poll(); });

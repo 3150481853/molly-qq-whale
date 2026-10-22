@@ -24,6 +24,7 @@
       <a class="nav-item" href="#/memory" data-page="memory">记忆</a>
       <a class="nav-item" href="#/pending" data-page="pending">待核实<span class="nav-badge" id="pendBadge" hidden>0</span></a>
       <a class="nav-item" href="#/stickers" data-page="stickers">表情包</a>
+      <a class="nav-item" href="#/switches" data-page="switches">发言开关</a>
       <a class="nav-item" href="#/budget" data-page="budget">预算</a>
       <a class="nav-item" href="#/work" data-page="work">干活</a>
       <a class="nav-item" href="#/watchdog" data-page="watchdog">守护</a>
@@ -328,6 +329,24 @@
             <button class="btn btn-primary" id="setCopyDiag" type="button">复制诊断信息</button>
             <button class="btn btn-ghost" id="setOpenLogs" type="button">打开日志抽屉</button>
           </div>
+        </div>
+      </section>
+
+      <!-- 发言开关 -->
+      <section class="page" data-page="switches" hidden>
+        <div class="page-head page-head-row">
+          <div>
+            <h1>发言开关</h1>
+            <p class="page-sub">运行时控制：私聊 / 群聊的「回话、表情包、轻回应、点赞、主动搭话」各自开关。改完立即生效，不用重载插件。</p>
+          </div>
+          <button class="btn btn-ghost btn-sm" id="swReload" type="button">重新加载</button>
+        </div>
+        <div class="notice" id="swErr" hidden></div>
+        <div class="card-grid" id="swCards"></div>
+        <div class="card card-block">
+          <h2 class="card-title">最近改了啥（审计，最近 20 条）</h2>
+          <p class="card-sub" id="swAuditSub">改动会记在这里，同时写进 out/switches-audit.log。</p>
+          <div id="swAudit"></div>
         </div>
       </section>
 

@@ -103,8 +103,10 @@ const FILES = [
   ['tools/scan-secrets.mjs', 'tools/scan-secrets.mjs'],
   ['tools/build-publish.mjs', 'tools/build-publish.mjs'],
   // README 顶部主图：assets/ 走 DIRS 递归也能带走，这里再显式列一次保证主图一定在；
-  // copyFile 对同一「源 → 目标」去重，不会重复计数
-  ['publish-assets/assets/hero.svg', 'assets/hero.svg'],
+  // copyFile 对同一「源 → 目标」去重，不会重复计数。
+  // 2026-10-23 改名 hero.svg → hero-v1.svg：GitHub 的图片代理按 URL 缓存，同名更新不生效，
+  // 换文件名让新图立刻渲染（README 引用同步改成 assets/hero-v1.svg）。
+  ['publish-assets/assets/hero-v1.svg', 'assets/hero-v1.svg'],
 ]
 
 /** 文档白名单：只发「讲怎么装、怎么用」的，运维流水账一律不发 */

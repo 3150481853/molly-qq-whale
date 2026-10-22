@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/hero.svg" width="880" alt="Molly QQ Whale">
+<img src="assets/hero-v1.svg" width="880" alt="Molly QQ Whale">
 
 基于 **DeepSeek Harness** 的 QQ 通道插件：稳定的人设、长期记忆、表情包习惯、会发语音，
 以及一个能看懂她此刻在干什么的控制台。

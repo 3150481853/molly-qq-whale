@@ -164,11 +164,10 @@ const REPLACEMENTS = [
   [/示例用户/g, '示例用户'],
   [/D\.X\.ExampleUser\.Yzymdy/g, '示例用户B'],
   [/ExampleUser/g, 'ExampleUser'],
-  // 小写/片段形态：scan-secrets 的 personal 规则里是 `ExampleUser`，
+  // 小写/片段形态：scan-secrets 的 personal 规则里带小写词与三字母片段，
   // 上面 /ExampleUser/g 区分大小写，漏掉它们（2026-10-23 复检发现）。
-  // 先整段替换（保持规则可读），再兜底单独的小写词。
-  [/ExampleUser\|ExampleUser/gi, 'ExampleUser'],
   [/ExampleUser/gi, 'ExampleUser'],
+  [/ExampleUser/g, 'ExampleUser'],
   // 2026-10-23 复检：主人/群成员的称呼与真实群名——出现在默认 ownerTitle、
   // 注释真机记录、控制台示例与测试夹具里。统一换成中性说法，规则一致的
   // 前提下测试断言也跟着变，不会挂。
@@ -179,7 +178,8 @@ const REPLACEMENTS = [
   [/测试10\.18/g, '示例测试群'],
   [/某地/g, '某地'],
   // 2026-10-23 复检补漏：真实群成员昵称（relations.json 里真人）与好友昵称，
-  // 出现在测试夹具与真机事故注释里。示例好友 只替换全角括号包裹的形态，避免误伤 base64。
+  // 出现在测试夹具与真机事故注释里。两字母好友昵称只替换全角括号包裹的形态，
+  // 避免误伤 SVG 的 base64 文本。
   [/示例成员E/g, '示例成员E'],
   [/（示例好友）/g, '（示例好友）'],
   [/测试内容/g, '测试内容'],

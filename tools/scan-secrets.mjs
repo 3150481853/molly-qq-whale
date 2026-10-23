@@ -45,7 +45,7 @@ const CATS = [
   { id: 'secretkw', name: 'secret 赋值', re: /(token|secret|password|api[_-]?key|jwt)\s*[:=]\s*["']?([^\s"',}]{6,})/gi, classify: () => '配置里硬编码的凭据' },
   { id: 'path', name: '本机绝对路径', re: /([A-Za-z]:[\\/](?:Users|Molly|Documents|workbuddy|APP|Program Files)[^\s"'`),;]{0,120})/gi, classify: () => '本机路径（含用户名/盘符）' },
   { id: 'net', name: '网络地址', re: /\b((?:(?:10|127|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\.\d{1,3}(?::\d{2,5})?)|(?:(?:\d{1,3}\.){3}\d{1,3}(?::\d{2,5})?))\b/g, classify: (v) => (/^127\.|^10\.|^192\.168|^172\./.test(v) ? '私有/回环地址' : '公网 IP') },
-  { id: 'personal', name: '真实个人内容', re: /([\u4e00-\u9fa5]{2,8}<REDACTED>|示例用户|ExampleUser|群名片)/g, classify: () => '个人/群昵称描述' },
+  { id: 'personal', name: '真实个人内容', re: /([\u4e00-\u9fa5]{2,8}<REDACTED>|示例用户|ExampleUser|ExampleUser|群名片)/g, classify: () => '个人/群昵称描述' },
 ]
 
 const counts = Object.fromEntries(CATS.map((c) => [c.id, 0]))

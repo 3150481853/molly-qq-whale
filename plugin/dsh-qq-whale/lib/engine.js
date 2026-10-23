@@ -29,6 +29,21 @@ const sub = (spec) => {
 const { PersonaStore } = await import(sub('./persona.js'))
 const { StickerLibrary } = await import(sub('./stickers.js'))
 const { MemoryStore, MEMORY_WINDOW } = await import(sub('./memory.js'))
+// 白名单运行时管理（2026-10-23 主人 m00608）：主人一句「把群 X 加进白名单」当场
+// 生效，存 <dataDir>/allowlist-overrides.json —— 不去改会被 plugin_manager 整份
+// 重写的 cordis.patch.yml，也不丢给干活会话（那边没有改宿主配置的权限）。
+const {
+  ALLOWLIST_FILE,
+  loadOverrides,
+  saveOverrides,
+  parseAllowlistCommand,
+  applyChange,
+  mergedConfigView,
+  reportAllowlist,
+  describeMembership,
+  describeChange,
+  describeAsk,
+} = await import(sub('./allowlist.js'))
 // 入库质量闸门 + 待核实区（2026-10-19）：所有「学习」路径落库前都过一遍 judge()，
 // 拦下来的进 pending.json 等人工过目。见 remember()。
 const { judge } = await import(sub('./memory-quality.js'))
@@ -183,7 +198,28 @@ export class ChatEngine {
       logger,
       noLikeGroups: config.noLikeGroups || [],
     })
-    this.memory = new MemoryStore({ dir: config.memoryDir, logger })
+    /*
+     * 记忆池上限（2026-10-23 主人 m00608 → m00709 升级）。
+     *
+     * 原来的坑：MemoryStore 的 `limit = 400` 写死在库里，engine 连 config 都没传，
+     * `memoryLimit: 800` 那个老键根本没人读（死配置）→ 池子永远是 400 条。
+     * 现在：初始 2000 条（memoryPoolLimit），记满了自动扩到 10000（memoryPoolMax），
+     * 扩容状态写在 memory-pool.json（重启不缩回），真到 10000 才按 weight/时间淘汰。
+     *
+     * 加密（m00709 第 3 条）：memoryEncrypt !== false 时整池 AES-256-GCM 落盘，
+     * 密钥在 memoryKeyFile（默认 ${MOLLY_ROOT}\keys\memory.key，**不在记忆目录里**，
+     * 故意和密文分开放，理由见 lib/memcrypt.js 顶部注释）。
+     */
+    this.memory = new MemoryStore({
+      dir: config.memoryDir,
+      logger,
+      limit: Number(config.memoryPoolLimit) || 2000,
+      growTo: Number(config.memoryPoolMax) || 0,
+      crypt:
+        config.memoryEncrypt === false
+          ? null
+          : { keyFile: String(config.memoryKeyFile || '').trim() || undefined },
+    })
 
     /**
      * 语音合成（2026-10-22，用户 m04697/m04855）。
@@ -211,6 +247,8 @@ export class ChatEngine {
       pitch: config.voicePitch,
       timeoutMs: config.voiceTimeoutMs,
       maxChars: config.voiceMaxChars,
+      // 2026-10-23：QQ 语音条硬上限 60 秒，超过的音频不发（voice.js 按 wav 头核对真实时长）。
+      maxSeconds: config.voiceMaxSeconds,
       maxKeep: config.voiceMaxKeep,
     })
 
@@ -318,11 +356,14 @@ export class ChatEngine {
     } else if (backend === 'wb-proxy') {
       // 主链路：本地多账号池网关。网关是本地单进程，崩了 Molly 不能跟着哑，
       // 所以再单独留一份 wbai 直连（this.wbai）做网关 429/宕机时的回退。
+      // gatewayRealm（yml）：把整条链路钉到某个出口（如 intl 被封时钉 'cn'）。
+      // 留空则按模型名自动（flash→intl 免费优先），恢复后删配置即可。
       this.gateway = new WbProxyGateway({
         logger,
         model: config.model,
         baseUrl: config.gatewayBaseUrl,
         apiKey: config.gatewayApiKey,
+        realm: config.gatewayRealm,
       })
       this.wbai = new WorkBuddyGateway({ logger, model: config.model })
       this.model = null
@@ -553,6 +594,20 @@ export class ChatEngine {
     for (const a of approverUins) if (!ownerList.includes(a)) ownerList.push(a)
     /** 有审批权的人（含主主人），顺序即通知顺序 */
     this.ownerList = ownerList
+
+    /*
+     * 白名单运行时覆盖层（2026-10-23 主人 m00608）。
+     *
+     * 主人实测：私聊发「把群 123456789 加进白名单」（哪怕加 #code）她不执行，
+     * 因为 QQ 侧压根没有改白名单的指令，消息被当成通用指令转给干活会话，
+     * 干活会话又改不了宿主配置 → 只能回绝。
+     *
+     * 现在：运行时增删写 <dataDir>/allowlist-overrides.json，启动时 merge 回
+     * config（yml 只当出厂默认，运行时的加减不会互相覆盖，也不用重启宿主）。
+     */
+    this.allowlistFile = path.join(config.dataDir || config.memoryDir || '.', ALLOWLIST_FILE)
+    this.allowlistOverrides = loadOverrides(this.allowlistFile)
+    this.applyAllowlistOverrides()
     this.gatekeeper = new Gatekeeper({
       dir: config.memoryDir,
       logger,
@@ -1967,7 +2022,12 @@ export class ChatEngine {
     if (!this.switches.allow('voice', { scene, gid: ev?.group_id })) return
 
     const text = cleanVoiceText(textParts.join(''))
-    const maxChars = Number(this.config.voiceMaxChars ?? 42)
+    /*
+     * 2026-10-23 用户要求「语音尽量接近 60 秒」：42 字（≈11 秒）太短，放到 220 字
+     * （Dania 实测约 3.9 字/秒 ⇒ 约 56 秒）。真正卡死时长的是 voice.js 里的
+     * voiceMaxSeconds 闸门——这里只做「值得读」的粗筛，避免把长文当语音念。
+     */
+    const maxChars = Number(this.config.voiceMaxChars ?? 220)
     if (!text || text.length < 2 || text.length > maxChars) return
 
     const chance = Number(this.config.voiceChance ?? 0.2)
@@ -1981,11 +2041,13 @@ export class ChatEngine {
     if (this.inVoiceQuietHours()) return
 
     let file = null
+    let seconds = 0
     try {
-      // synthesize() 返回的是 {file, bytes, ms, cached} 结果对象，不是路径字符串。
+      // synthesize() 返回的是 {file, bytes, ms, cached, seconds} 结果对象，不是路径字符串。
       // 2026-10-22 集成测试踩过：把整个对象塞进 part.file，发出去成了 [object Object]。
       const res = await this.voice.synthesize(text, { signal })
       file = res?.file || null
+      seconds = Number(res?.seconds || 0)
     } catch (err) {
       this.logger('warn', `语音合成异常，退回文字: ${err?.message || err}`)
     }
@@ -1996,7 +2058,7 @@ export class ChatEngine {
     // 语音在前、表情包在后：先说话再甩图，表情包段原样保留，不丢内容。
     reply.parts = [{ type: 'voice', file, text }, ...stickerParts]
     this.stats.voiceSent = (this.stats.voiceSent || 0) + 1
-    this.logger('debug', `语音：${scene} 转成一条语音（${text.length} 字）`)
+    this.logger('debug', `语音：${scene} 转成一条语音（${text.length} 字，${seconds.toFixed(1)} 秒）`)
   }
 
   /**
@@ -2277,6 +2339,79 @@ export class ChatEngine {
     return answer
   }
 
+  /** 白名单运行时覆盖：把 overrides merge 进 config（启动时 + 每次改动后，幂等） */
+  applyAllowlistOverrides() {
+    const view = mergedConfigView(this.config, this.allowlistOverrides)
+    this.config.allowedUsers = view.users
+    this.config.allowedGroups = view.groups
+    this.config.commandGroups = view.commandGroups
+  }
+
+  /**
+   * 白名单管理指令（主人专属，2026-10-23 主人 m00608）。
+   *
+   * 只接管**主主人私聊**里的「白名单」指令；其它人 / 群聊一律返回 null，
+   * 消息照常走会话路由 —— 群友聊到「白名单」不该被抢话。
+   *
+   * @returns {Promise<{handled:true, reply:string}|null>}
+   */
+  async maybeAllowlistCommand({ ev, text, send = true }) {
+    const parsed = parseAllowlistCommand(text)
+    if (!parsed) return null
+    const actor = String(ev?.user_id ?? '')
+    const owner = String(this.ownerList?.[0] || '')
+    if (!owner || actor !== owner) return null
+    if (ev?.message_type && ev.message_type !== 'private') return null
+    const say = async (reply) => {
+      if (send) {
+        await this.sendTextTo(ev, reply).catch((err) =>
+          this.logger('warn', `白名单回话发送失败：${err?.message || err}`),
+        )
+      }
+      return { handled: true, reply, parsed }
+    }
+    if (parsed.action === 'ask') return say(describeAsk(parsed))
+    if (parsed.action === 'list') return say(reportAllowlist(this.config, this.allowlistOverrides))
+    if (parsed.action === 'check') {
+      return say(describeMembership(this.config, this.allowlistOverrides, parsed.ids))
+    }
+    // add / del：写盘 + 立刻合并进运行中的 config（下一条消息就生效，不用重载插件）
+    const next = applyChange(this.allowlistOverrides, parsed)
+    const saved = saveOverrides(this.allowlistFile, next)
+    if (saved) {
+      this.allowlistOverrides = next
+      this.applyAllowlistOverrides()
+    }
+    this.logger(
+      'info',
+      `白名单运行时${parsed.action === 'add' ? '增加' : '移除'}：${parsed.kind} ${parsed.ids.join(',')}（落盘=${saved ? 'ok' : 'fail'}）`,
+    )
+    return say(describeChange({ ...parsed, ok: saved }))
+  }
+
+  /**
+   * 白名单指令干跑（控制台探针用：不写盘、不发消息）。
+   * 返回「这句话会被解析成什么 / 会不会真执行 / 现在三份名单长什么样」。
+   */
+  previewAllowlistCommand(text) {
+    const parsed = parseAllowlistCommand(text)
+    if (!parsed) return { matched: false }
+    let reply
+    if (parsed.action === 'ask') reply = describeAsk(parsed)
+    else if (parsed.action === 'list') reply = reportAllowlist(this.config, this.allowlistOverrides)
+    else if (parsed.action === 'check') reply = describeMembership(this.config, this.allowlistOverrides, parsed.ids)
+    else reply = describeChange({ ...parsed, ok: true })
+    return {
+      matched: true,
+      parsed,
+      wouldRun: parsed.action === 'add' || parsed.action === 'del',
+      reply,
+      lists: mergedConfigView(this.config, this.allowlistOverrides),
+      overrides: this.allowlistOverrides,
+      file: this.allowlistFile,
+    }
+  }
+
   /**
    * 路由 + 分派（task-46）。
    *
@@ -2289,6 +2424,14 @@ export class ChatEngine {
     // 先摘开头 @我：@Molly 命令 xxx 在 normalizeMessage 里会变成「@我 命令 xxx」
     const text = raw.replace(/^(?:@我|@全体成员)\s*/u, '').trim()
     if (!text) return { handled: false }
+    /*
+     * 白名单管理（主人 m00608）：必须排在会话路由之前。
+     * 主人带 `#code` / `#work` / `命令 ` 前缀说「把群 X 加进白名单」时，
+     * 以前会被转给干活会话 → 那边没有改宿主配置的权限，只能回绝（就是他报的 bug）。
+     * 这里当场落地，顺带把「不是白名单指令」判成 null 交还给原流程，不抢别人的话。
+     */
+    const allowlist = await this.maybeAllowlistCommand({ ev, text })
+    if (allowlist) return { handled: true, allowlist: true, reply: allowlist.reply }
     const prefixes = this.config.commandPrefixes || ['命令 ']
     const route = await routeMessage({
       text,

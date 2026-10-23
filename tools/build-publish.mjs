@@ -102,6 +102,9 @@ const FILES = [
   ['tools/build-exe.mjs', 'tools/build-exe.mjs'],
   ['tools/scan-secrets.mjs', 'tools/scan-secrets.mjs'],
   ['tools/build-publish.mjs', 'tools/build-publish.mjs'],
+  ['tools/backup-memory.ps1', 'tools/backup-memory.ps1'],
+  ['tools/install-memory-backup-task.cmd', 'tools/install-memory-backup-task.cmd'],
+  ['tools/uninstall-memory-backup-task.cmd', 'tools/uninstall-memory-backup-task.cmd'],
   // README 顶部主图：assets/ 走 DIRS 递归也能带走，这里再显式列一次保证主图一定在；
   // copyFile 对同一「源 → 目标」去重，不会重复计数。
   // 2026-10-23 改名 hero.svg → hero-v1.svg：GitHub 的图片代理按 URL 缓存，同名更新不生效，

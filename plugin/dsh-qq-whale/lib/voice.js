@@ -15,6 +15,12 @@
  * 失败策略：任何一步出错都返回 null。语音属于加分项，不能因为它把整条
  * 回复吞掉——调用方（engine.deliver）拿到 null 会原样发文字。
  * backend='sovits' 时若本机服务不可用，会自动退回 edge-tts（可关）。
+ *
+ * 时长上限（2026-10-23，用户要求「接近 60 秒的语音」）：QQ 语音条硬上限 60 秒。
+ * 文本侧由 engine 的 voiceMaxChars 把关（Dania 实测约 3.9 字/秒，220 字 ≈ 56 秒），
+ * 这里再加一道**产物时长闸门** `maxSeconds`：从 wav 头算出真实时长，超限就返回
+ * null 让调用方退回文字——不能把一条 60 秒以上的音频丢给 SnowLuma，上传失败
+ * 会连整条回复一起吞掉。
  */
 import path from 'node:path'
 import fs from 'node:fs'
@@ -58,6 +64,7 @@ export class VoiceMaker {
     pitch = '+15Hz',
     timeoutMs = 20000,
     maxChars = 160,
+    maxSeconds = 0,
     maxKeep = 200,
     logger = () => {},
   } = {}) {
@@ -74,11 +81,14 @@ export class VoiceMaker {
     this.pitch = pitch
     this.timeoutMs = Number(timeoutMs) || 20000
     this.maxChars = Number(maxChars) || 160
+    // 0 / 非正数 = 不限时长（老行为）；配了值就按秒卡（QQ 硬上限 60，默认配 58）。
+    this.maxSeconds = Number(maxSeconds) || 0
     this.maxKeep = Number(maxKeep) || 200
     this.logger = logger
     this._python = ''
     this._ready = false
-    this.stats = { ok: 0, fail: 0, cached: 0, lastMs: 0, lastError: '', lastBackend: '' }
+    // over：产物超时长的次数（不是失败，是主动放弃发语音）
+    this.stats = { ok: 0, fail: 0, over: 0, cached: 0, lastMs: 0, lastError: '', lastBackend: '' }
   }
 
   /** 探测 python（edge-tts 兜底时用）：优先配置值，其次本机候选路径，最后 PATH。 */
@@ -125,9 +135,12 @@ export class VoiceMaker {
     try {
       const st = await fsp.stat(file)
       if (st.size > 1000) {
+        // 缓存命中也过时长闸门：配置调小 maxSeconds 之后，老缓存同样不能再发。
+        const cachedSeconds = await this._durationGuard(file)
+        if (cachedSeconds === -1) return null
         this.stats.cached++
         this.stats.lastBackend = useBackend
-        return { file, bytes: st.size, ms: 0, cached: true, backend: useBackend }
+        return { file, bytes: st.size, ms: 0, cached: true, backend: useBackend, seconds: cachedSeconds }
       }
     } catch {
       /* 没缓存，继续合成 */
@@ -173,11 +186,67 @@ export class VoiceMaker {
       this.logger('warn', `语音合成产物异常（${bytes}B），丢弃`)
       return null
     }
+    // 时长闸门：超限就当没合成出来（engine 会原样发文字），别让 60+ 秒的音频去撞 QQ 上限。
+    const seconds = await this._durationGuard(file)
+    if (seconds === -1) return null
     this.stats.ok++
     this.stats.lastMs = Date.now() - startedAt
     this.stats.lastBackend = backend
     this.prune().catch(() => {})
-    return { file, bytes, ms: this.stats.lastMs, cached: false, backend }
+    return { file, bytes, ms: this.stats.lastMs, cached: false, backend, seconds }
+  }
+
+  /**
+   * 读音频时长（秒）：只解析 wav 的 RIFF 头（fmt 的 byteRate + data 大小）。
+   * 不是 wav（比如 edge 退回的 mp3）或头不全时返回 null —— 调用方按「不限」处理。
+   */
+  async _probeSeconds(file) {
+    let fh = null
+    try {
+      fh = await fsp.open(file, 'r')
+      const buf = Buffer.alloc(4096)
+      const { bytesRead } = await fh.read(buf, 0, buf.length, 0)
+      const b = buf.subarray(0, bytesRead)
+      if (b.length < 44) return null
+      if (b.toString('ascii', 0, 4) !== 'RIFF' || b.toString('ascii', 8, 12) !== 'WAVE') return null
+      let byteRate = 0
+      let dataSize = 0
+      // 遍历 chunk：fmt 里取 byteRate（fmt 负载第 8 字节处），data 里取字节数。
+      for (let pos = 12; pos + 8 <= b.length; ) {
+        const id = b.toString('ascii', pos, pos + 4)
+        const size = b.readUInt32LE(pos + 4)
+        if (id === 'fmt ' && pos + 20 <= b.length) {
+          byteRate = b.readUInt32LE(pos + 16)
+        } else if (id === 'data') {
+          dataSize = size
+          break
+        }
+        pos += 8 + size + (size & 1)
+      }
+      if (!byteRate || !dataSize) return null
+      return dataSize / byteRate
+    } catch {
+      return null
+    } finally {
+      await fh?.close().catch(() => {})
+    }
+  }
+
+  /**
+   * 时长闸门。返回：
+   *   - 大于 0：时长（秒），放行；
+   *   - null：读不出时长（mp3 / 头不全），按不限放行；
+   *   - -1：超限，调用方必须退回文字。
+   */
+  async _durationGuard(file) {
+    const cap = Number(this.maxSeconds) || 0
+    if (cap <= 0) return null
+    const seconds = await this._probeSeconds(file)
+    if (seconds == null) return null
+    if (seconds <= cap + 0.05) return seconds
+    this.stats.over++
+    this.logger('warn', `语音 ${seconds.toFixed(1)}s 超过上限 ${cap}s，这条改发文字`)
+    return -1
   }
 
   /** GPT-SoVITS 本地 HTTP（api_v2.py）：文字 → wav。返回 Error 或 null。 */

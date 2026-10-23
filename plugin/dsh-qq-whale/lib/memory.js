@@ -18,6 +18,13 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import { localDateKey, localDateTime } from './budget.js'
+import {
+  DEFAULT_KEY_FILE,
+  decryptText,
+  isEnvelope,
+  loadKey,
+  writeEncryptedFile,
+} from './memcrypt.js'
 
 /**
  * 记忆召回窗口（P5 起点，task-55 定档）。
@@ -106,37 +113,166 @@ export function isValidQq(value) {
   return s === '' || QQ_PATTERN.test(s)
 }
 export class MemoryStore {
-  constructor({ dir, logger, limit = 400 }) {
+  /**
+   * @param {object} options
+   * @param {string} options.dir 记忆目录
+   * @param {Function} [options.logger] (level, msg) => void
+   * @param {number} [options.limit] 初始容量（2026-10-23 主人 m00709：默认 2000）
+   * @param {number} [options.growTo] 记满后自动扩到的上限（主人要求 10000；0=不自动扩）
+   * @param {{keyFile?: string}|null} [options.crypt] 传了就加密落盘（生产用）；null=明文（测试/迁移工具）
+   * @param {string} [options.poolFile] 扩容状态落盘位置，默认 dir/memory-pool.json
+   */
+  constructor({ dir, logger, limit = 2000, growTo = 0, crypt = null, poolFile = '' }) {
     this.dir = dir
     this.logger = logger || (() => {})
-    this.limit = limit
+    this.crypt = crypt || null
+    this.broken = false
+    this.migrated = false
+    this.deduped = 0
+    this.mergedCount = 0
+    this.baseLimit = Math.max(1, Number(limit) || 2000)
+    this.maxLimit = Math.max(this.baseLimit, Number(growTo) || 0)
     this.file = path.join(dir, 'memory.json')
     this.mdFile = path.join(dir, 'memory.md')
+    this.mdEncFile = path.join(dir, 'memory.md.enc')
+    this.poolFile = poolFile || path.join(dir, 'memory-pool.json')
     this.entries = []
+    this.limit = this.readGrownLimit() || this.baseLimit
+    if (this.crypt) {
+      const info = loadKey({ keyFile: this.crypt.keyFile || DEFAULT_KEY_FILE, create: true })
+      this.key = info.key
+      this.keyFile = info.file
+      this.keySource = info.source
+    }
     this.load()
   }
 
-  load() {
+  /** 是否加密落盘 */
+  get encrypted() {
+    return Boolean(this.crypt)
+  }
+
+  /** 读回「已经自动扩容过」的容量：记满之后重启不该缩回 2000 */
+  readGrownLimit() {
     try {
-      const raw = fs.readFileSync(this.file, 'utf8')
-      const parsed = JSON.parse(raw)
+      const parsed = JSON.parse(fs.readFileSync(this.poolFile, 'utf8'))
+      const n = Math.round(Number(parsed?.limit))
+      if (!Number.isFinite(n) || n <= 0) return 0
+      if (this.maxLimit && n > this.maxLimit) return 0
+      return n >= this.baseLimit ? n : 0
+    } catch {
+      return 0
+    }
+  }
+
+  /** 扩容状态落盘（只在真正扩容时写一次，不是每条记忆都写） */
+  writeGrownLimit() {
+    try {
+      fs.mkdirSync(this.dir, { recursive: true })
+      fs.writeFileSync(
+        this.poolFile,
+        `${JSON.stringify(
+          { version: 1, base: this.baseLimit, limit: this.limit, grownAt: new Date().toISOString() },
+          null,
+          2,
+        )}\n`,
+        'utf8',
+      )
+    } catch (err) {
+      this.logger('warn', `记忆池扩容状态写入失败（下次重启会退回 ${this.baseLimit} 条）: ${err.message}`)
+    }
+  }
+
+  load() {
+    let raw
+    try {
+      raw = fs.readFileSync(this.file, 'utf8')
+    } catch (err) {
+      if (err.code !== 'ENOENT') this.logger('warn', `memory.json 读取失败: ${err.message}`)
+      this.entries = []
+      return
+    }
+    let text = raw
+    if (this.crypt) {
+      let outer = null
+      try {
+        outer = JSON.parse(raw)
+      } catch {
+        outer = null
+      }
+      if (outer && isEnvelope(outer)) {
+        try {
+          text = decryptText(outer, this.key)
+        } catch (err) {
+          // 解不开就是解不开：宁可让整个池子停止读写，也不能覆盖唯一一份密文
+          this.broken = true
+          this.entries = []
+          this.logger('error', `记忆池解密失败（密钥不对或文件损坏，已停止读写以免覆盖）: ${err.message}`)
+          return
+        }
+      } else {
+        // 历史明文文件：标记迁移，下面会先去重再整体加密
+        this.needsMigration = true
+      }
+    }
+    try {
+      const parsed = JSON.parse(text)
       const list = Array.isArray(parsed?.entries) ? parsed.entries : []
       // 老条目没有 qq：这里补空串而不是补一个猜出来的号——
       // 猜错等于把两个人的记忆挂到同一个人身上，比"没号"更糟。
       // 只补在内存里，不写盘（下次 save() 自然会带出去）。
       this.entries = list.map((e) => ({ ...e, qq: normalizeQq(e.qq) }))
     } catch (err) {
-      if (err.code !== 'ENOENT') this.logger('warn', `memory.json 读取失败: ${err.message}`)
+      this.broken = true
       this.entries = []
+      this.logger('error', `记忆池内容不是合法 JSON（已停止写回以免覆盖）: ${err.message}`)
+      return
+    }
+    if (this.needsMigration && this.crypt) this.migrate()
+  }
+
+  /**
+   * 明文 → 密文迁移：先去重（主人 m00709 第 2 条，历史重复一次性清掉），
+   * 再整体加密写回；旧的 memory.md 转成 memory.md.enc 后删掉。
+   * 不留明文副本——真要回滚，用 D:\MollyBackup 里的历史快照。
+   */
+  migrate() {
+    const before = this.entries.length
+    const rep = this.dedupeAll()
+    this.deduped = rep.removed
+    try {
+      this.save()
+      this.migrated = true
+      this.logger(
+        'info',
+        `记忆池已加密迁移：${before} 条 → ${this.entries.length} 条（去重合并 ${rep.removed} 条）→ ${this.file}`,
+      )
+    } catch (err) {
+      this.broken = true
+      this.logger('error', `记忆池加密迁移失败（保留原明文文件，等修好再重试）: ${err.message}`)
     }
   }
 
   /** @returns {boolean} 是否真的写成功了（控制台 CRUD 要据此回 500，不能报假成功） */
   save() {
+    if (this.broken) {
+      this.logger('error', '记忆池处于 broken 状态（解密/迁移失败），拒绝写回以免覆盖唯一一份数据')
+      return false
+    }
     try {
       fs.mkdirSync(this.dir, { recursive: true })
-      fs.writeFileSync(this.file, JSON.stringify({ version: 1, entries: this.entries }, null, 2), 'utf8')
-      fs.writeFileSync(this.mdFile, this.renderMarkdown(), 'utf8')
+      const md = this.renderMarkdown()
+      if (this.crypt) {
+        writeEncryptedFile(this.file, JSON.stringify({ version: 2, entries: this.entries }, null, 2), this.key)
+        writeEncryptedFile(this.mdEncFile, md, this.key)
+        // 明文 md 已经加密存了，顺手删掉（否则「加密了但旁边还有一份明文」等于没加密）
+        try {
+          if (fs.existsSync(this.mdFile)) fs.unlinkSync(this.mdFile)
+        } catch {}
+      } else {
+        fs.writeFileSync(this.file, JSON.stringify({ version: 1, entries: this.entries }, null, 2), 'utf8')
+        fs.writeFileSync(this.mdFile, md, 'utf8')
+      }
       return true
     } catch (err) {
       this.logger('error', `记忆写入失败: ${err.message}`)
@@ -149,19 +285,20 @@ export class MemoryStore {
     if (!t) return null
     const q = normalizeQq(qq)
     const name = String(who || '').trim()
-    // 去重：同一个人 + 几乎同样的话，不重复记。
-    // 「同一个人」优先看 qq（唯一身份）；老条目还没号时才退回比名字。
-    const dup = this.entries.find((e) => {
-      const eQq = normalizeQq(e.qq)
-      const samePerson = q ? eQq === q || (!eQq && name && e.who === name) : e.who === name
-      return samePerson && e.kind === kind && similarity(e.text, t) > 0.8
-    })
+    // 去重（2026-10-23 主人 m00709 第 2 条）：
+    //   1. 比"人"：优先 qq（唯一身份），老条目没号时才退回比名字；
+    //   2. 比"话"：**不再看 kind**——「喜欢猫」记成 fact 还是 preference 都是同一件事；
+    //   3. 新的覆盖旧的：文字/时间用新的，权重取高的。
+    const dup = this.findDuplicate({ who: name, qq: q, text: t, kind })
     if (dup) {
+      dup.text = t
       dup.at = Date.now()
-      dup.weight = Math.max(dup.weight || 3, weight)
+      dup.weight = Math.max(dup.weight || 3, Math.max(1, Math.min(5, weight)))
+      if (kind && kind !== dup.kind) dup.kind = kind
       // 老条目这次带了号，顺手把身份补上（下次就能按 qq 找到了）
       if (q && !normalizeQq(dup.qq)) dup.qq = q
       if (name && !dup.who) dup.who = name
+      this.mergedCount += 1
       this.save()
       return dup
     }
@@ -178,6 +315,92 @@ export class MemoryStore {
     this.prune()
     this.save()
     return entry
+  }
+
+  /**
+   * 找「同一个人 + 同一件事」的老条目（找到就由调用方用新内容覆盖旧内容）。
+   * @param {{who?: string, qq?: string, text?: string}} probe
+   * @returns {object|null}
+   */
+  findDuplicate({ who = '', qq = '', text = '', kind = '' } = {}) {
+    const q = normalizeQq(qq)
+    const name = String(who || '').trim()
+    const key = normalizeForDup(text)
+    if (!key) return null
+    let best = null
+    let bestScore = 0
+    for (const e of this.entries) {
+      if (!sameIdentity({ who: name, qq: q }, e)) continue
+      const exact = normalizeForDup(e.text) === key
+      const score = exact ? 1 : similarity(e.text, text)
+      if (score >= dupThreshold(kind, e.kind) && score > bestScore) {
+        best = e
+        bestScore = score
+      }
+    }
+    return best
+  }
+
+  /**
+   * 全量去重（迁移时跑一次；也留给控制台/工具手动跑）。
+   * 规则与 add() 完全一致：同一个人 + 文本相似 → 只留一条，**新的覆盖旧的**。
+   * @param {{threshold?: number}} [options]
+   * @returns {{kept: number, removed: number}}
+   */
+  dedupeAll({ threshold = 0.7 } = {}) {
+    const kept = []
+    let removed = 0
+    for (const e of this.entries) {
+      const q = normalizeQq(e.qq)
+      const key = normalizeForDup(e.text)
+      if (!key) {
+        kept.push(e)
+        continue
+      }
+      let merged = false
+      for (const k of kept) {
+        if (!sameIdentity(e, k)) continue
+        const exact = normalizeForDup(k.text) === key
+        const score = exact ? 1 : similarity(k.text, e.text)
+        const min = k.kind === 'sticker' || e.kind === 'sticker' ? 1 : threshold
+        if (score < min) continue
+        // 新的覆盖旧的：at 更大的算新
+        const newer = e.at >= k.at ? e : k
+        const older = newer === e ? k : e
+        older.text = newer.text
+        older.at = newer.at
+        older.weight = Math.max(older.weight || 3, newer.weight || 3)
+        if (newer.kind && newer.kind !== older.kind) older.kind = newer.kind
+        if (normalizeQq(newer.qq) && !normalizeQq(older.qq)) older.qq = newer.qq
+        if (newer.who && !older.who) older.who = newer.who
+        removed += 1
+        merged = true
+        break
+      }
+      if (!merged) kept.push(e)
+    }
+    this.entries = kept
+    return { kept: kept.length, removed }
+  }
+
+  /**
+   * 给 /state 用的容量与加密状态。
+   * 主人和挂件都要能一眼看到「现在多大 / 上限多少 / 加密没有 / 钥匙在哪」。
+   */
+  status() {
+    return {
+      count: this.entries.length,
+      limit: this.limit,
+      baseLimit: this.baseLimit,
+      maxLimit: this.maxLimit,
+      encrypted: Boolean(this.crypt),
+      keyFile: this.crypt ? this.keyFile : '',
+      keySource: this.crypt ? this.keySource : '',
+      broken: this.broken,
+      deduped: this.deduped,
+      merged: this.mergedCount,
+      migrated: this.migrated,
+    }
   }
 
   /**
@@ -228,9 +451,22 @@ export class MemoryStore {
     return 1
   }
 
-  /** 超量时先删低权重 + 旧的，保住高权重 */
+  /**
+   * 超量时才剪：先删低权重 + 旧的，保住高权重。
+   *
+   * 2026-10-23 主人 m00709 第 1 条：满了**别直接剪**，先自动扩容一次
+   * （2000 → 10000，扩容状态写 memory-pool.json，重启不缩回）。
+   * 换句话说：正常态是 2000，真记满了才升到 10000，升完之后才按老规则淘汰。
+   */
   prune() {
     if (this.entries.length <= this.limit) return
+    if (this.maxLimit > this.limit) {
+      const before = this.limit
+      this.limit = this.maxLimit
+      this.writeGrownLimit()
+      this.logger('info', `记忆池已满（${before} 条）→ 自动扩容到 ${this.limit} 条`)
+      if (this.entries.length <= this.limit) return
+    }
     this.entries.sort((a, b) => (b.weight - a.weight) || (b.at - a.at))
     this.entries = this.entries.slice(0, this.limit)
   }
@@ -507,6 +743,13 @@ function tokenize(q) {
   return [...out].filter((w) => w.length >= 1)
 }
 
+/** 去重前先抹平"格式差异"：空白、标点、emoji、大小写都不该让同一句话变成两条 */
+function normalizeForDup(text) {
+  return String(text ?? '')
+    .toLowerCase()
+    .replace(/[\s\p{P}\p{S}]+/gu, '')
+}
+
 /** 粗糙相似度：字符 trigram 重合率。够用来去重，不用上编辑距离。 */
 function similarity(a, b) {
   const A = String(a || '')
@@ -524,4 +767,37 @@ function similarity(a, b) {
   let inter = 0
   for (const g of ga) if (gb.has(g)) inter++
   return inter / Math.max(ga.size, gb.size)
+}
+
+/**
+ * 两条记忆是不是「同一个人」。
+ *
+ * 为什么单独抽出来：2026-10-23 主人要求「每一条记忆都去重，新的覆盖旧的」，
+ * 而原来的判断只认「两条都有 qq 且相等」或「两条都有名字且相等」，
+ * 两边都没有身份的条目（群里没登记的陌生人，who 为空、qq 为空）永远判「不是同一人」，
+ * 于是 dedupeAll 在生产上一次只能合 0 条——主人听到的「去重没生效」就是这个。
+ * 现在的规则：
+ *   1) 两边都有 qq → 只认 qq；
+ *   2) 否则两边都有名字 → 认名字；
+ *   3) 只有一边有身份 → 不敢说同一人（名字对不上就不合）；
+ *   4) 两边都没有身份 → 只能靠文本判重（和无名条目合并要保守，靠 similarity 阈值兜底）。
+ */
+function sameIdentity(a, b) {
+  const aQq = normalizeQq(a?.qq)
+  const bQq = normalizeQq(b?.qq)
+  if (aQq && bQq) return aQq === bQq
+  const aWho = String(a?.who ?? '').trim()
+  const bWho = String(b?.who ?? '').trim()
+  if (aWho && bWho) return aWho === bWho
+  if (aQq || bQq || aWho || bWho) return false
+  return true
+}
+
+/**
+ * 去重阈值。
+ * 表情包是「一张图一条」，名字差一个字就是另一张图（生产里 0.72 相似的两条其实是不同图），
+ * 所以 sticker **只认去掉格式后完全一样**；其余语义文本给 0.70 的模糊阈值。
+ */
+function dupThreshold(kindA, kindB) {
+  return kindA === 'sticker' || kindB === 'sticker' ? 1 : 0.7
 }

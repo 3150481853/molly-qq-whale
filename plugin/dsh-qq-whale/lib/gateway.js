@@ -38,6 +38,17 @@ const CHAT_URL = 'http://127.0.0.1:8788/v1/chat/completions'
  *
  * 不这么做的后果不是报错，而是「悄悄地花钱」——最难受的一类 bug。
  */
+/*
+ * 2026-10-23：国际版两个号（29a68e73 / 8be7823e）都被上游判 11140
+ * 「账号存在异常行为，已被限制」，intl 出口整组不可用 —— 网关对显式
+ * X-Realm: intl 直接 503「no usable account for realm 'intl'」，Molly 于是
+ * 「听得到消息、不回话」（replyTrace 里 stage=model-null）。
+ *
+ * 现在的规矩：**配置里的 gatewayRealm 优先于下面的模型名自动策略**。
+ * yml 钉 `gatewayRealm: "cn"` 就把整条链路压到国内积分池（flash 变收费
+ * x0.11/M，但能用）；国际版账号恢复后把那一行配置删掉，就自动回到下面
+ * 这套「flash→intl 免费优先」的老策略，不用再改代码。
+ */
 const MODEL_REALM = [
   // flash 系列：国际版免费，国内版收费 x0.11 → 必须走 intl
   [/^deepseek-v4\.1-flash/i, 'intl'],
@@ -62,7 +73,7 @@ export class WbProxyGateway {
    *   用户 m15210 的定案是「主脑先榨**国外版免费的** flash」，见 realmForModel。
    * @param {string} [opts.baseUrl] 网关地址，默认 8788
    * @param {string} [opts.apiKey] 占位 Authorization，网关 api_key_required:false
-   * @param {string} [opts.realm] 兜底 realm（模型名推不出来时才用）
+   * @param {string} [opts.realm] 钉死的 realm（非空则压过模型名推断；空=按模型名自动）
    */
   constructor({ logger, model = 'deepseek-v4.1-flash', baseUrl = CHAT_URL, apiKey = 'wb-proxy-local', realm = '' } = {}) {
     this.logger = logger || (() => {})
@@ -95,7 +106,8 @@ export class WbProxyGateway {
    * 不传模型就用实例默认模型。
    */
   realmOf(model) {
-    return realmForModel(model || this.model) || this.realm || ''
+    // 与 request() 同优先级：钉死的 realm 压过模型名推断
+    return this.realm || realmForModel(model || this.model) || ''
   }
 
   /**
@@ -164,7 +176,7 @@ export class WbProxyGateway {
         this.lastError = new Error(`网关不可用：HTTP ${resp.status} ${txt.slice(0, 200)}`)
         return { ok: false, error: this.lastError.message, code: `HTTP_${resp.status}` }
       }
-      return { ok: true, baseUrl: this.baseUrl, model: this.model }
+      return { ok: true, baseUrl: this.baseUrl, model: this.model, realm: this.realm || realmForModel(this.model) || '' }
     } catch (e) {
       this.lastError = e
       return { ok: false, error: `网关连不上：${e.message}`, code: 'NETWORK' }
@@ -177,8 +189,13 @@ export class WbProxyGateway {
    */
   async request({ messages, maxTokens = 1024, temperature = 0.85, signal, onDelta, model, realm }) {
     const useModel = model || this.model
-    // 显式给的 realm 优先；没给就按模型名推（flash→intl / v4pro→cn）；都推不出来才放开
-    const useRealm = realm !== undefined ? realm : (realmForModel(useModel) || this.realm || '')
+    /*
+     * 优先级：调用方显式给 > 实例钉死的 realm（配置 gatewayRealm）> 按模型名推断
+     * （flash→intl / v4pro→cn）> 放开让网关自己决定。
+     * 2026-10-23 把「实例钉死」提到「模型名推断」之前：intl 账号被封期间必须能用
+     * 配置一键把整条链路压到 cn 池，而不是被 flash 的 intl 硬钉抵消掉。
+     */
+    const useRealm = realm !== undefined ? realm : (this.realm || realmForModel(useModel) || '')
     const body = {
       model: useModel,
       messages,

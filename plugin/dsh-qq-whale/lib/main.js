@@ -167,6 +167,9 @@ export const DEFAULTS = {
   // —— 网关（wb-proxy 后端）——
   gatewayBaseUrl: 'http://127.0.0.1:8788/v1/chat/completions',
   gatewayApiKey: 'wb-proxy-local',
+  // 钉死网关出口（'cn' / 'intl' / ''）。2026-10-23：国际版账号全被上游限制，
+  // 用 'cn' 把整条链路压到国内积分池；留空=按模型名自动（flash→intl 免费优先）。
+  gatewayRealm: '',
   gatewayToWbaiFallback: true,
 
   /**
@@ -375,6 +378,18 @@ export const DEFAULTS = {
 
   // —— 记忆 ——
   memoryLimit: 800,  // 除了规则匹配（"我叫X""我喜欢Y"），每隔一阵子让模型自己判断该记什么。
+  // 记忆池容量（2026-10-23 主人 m00608：400 条已经满了，要求扩到 2000）。
+  // 跟上面那个「抽取节流」是两回事：这个是 memory.json 里最多存多少条，
+  // 满了才会按 weight/时间剪老记忆。engine 里传给 MemoryStore，不传就退回 400。
+  memoryPoolLimit: 2000,
+  // 记满后自动扩容的上限（2026-10-23 主人 m00709：先扩到 2000，真记满了再扩到 1w）。
+  // 0 = 不自动扩。扩容状态落在 data/memory/memory-pool.json，重启不会缩回。
+  memoryPoolMax: 10000,
+  // 记忆池加密（m00709 第 3 条）：整池 AES-256-GCM 落盘，memory.md 也转成 memory.md.enc。
+  // 只有排查问题才该关掉——加密是主人明确要求的行为，默认开。
+  memoryEncrypt: true,
+  // 密钥位置：故意**不在记忆目录里**——密文和钥匙分开放，备份外泄也解不开。
+  memoryKeyFile: 'G:\\Molly\\keys\\memory.key',
   // 这是"聊着聊着就忘了我"的真正解法：人能记住的从来不只是自我介绍。
   // 节流两道：攒够 MinLines 条、且距上次抽取超过 MinGapMinutes 才调一次，
   // 否则每轮多烧一次调用，额度扛不住。
@@ -502,11 +517,16 @@ export const DEFAULTS = {
 
   // —— 语音（2026-10-22，用户 m04697/m04855）——
   // 「时不时发一句语音代替说话」：默认开着，但只有一部分回复会转语音（voiceChance）。
-  // 太长的回复不转——语音条超过十几秒没人听，长内容还是文字更合适。
+  // 太长的回复不转——2026-10-23 用户要求「尽量接近 60 秒」，门槛从 42 字放到 220 字，
+  // 再长还是文字更合适（语音条本身也不适合长篇）。
   // 音色/语速/音高是用户试听后拍板的（样本 I）：晓晓、-5%、+15Hz。
   voiceEnabled: true,
   voiceChance: 0.35,
-  voiceMaxChars: 42,
+  // 2026-10-23：42 字（≈11 秒）→ 220 字。Dania 实测约 3.9 字/秒 ⇒ 220 字 ≈ 56 秒。
+  voiceMaxChars: 220,
+  // 语音条时长硬闸门（秒）：合成完先按 wav 头量真实时长，超了就退回文字——
+  // QQ 语音硬上限 60 秒，超了上传会失败并吞掉整条回复。0 = 不限。
+  voiceMaxSeconds: 58,
   // 2026-10-22 22:5x 用户拍板（m05352）：语音改用社区音色 Dania
   // （本机 GPT-SoVITS v2ProPlus + villia/dania 权重，HTTP 9880）。
   // backend='edge' 可退回 edge-tts（晓晓）；本地服务挂了会按 voiceFallbackEdge 自动退。
@@ -524,7 +544,8 @@ export const DEFAULTS = {
   voiceName: 'zh-CN-XiaoxiaoNeural',
   voiceRate: '-5%',
   voicePitch: '+15Hz',
-  voiceTimeoutMs: 20000,
+  // 长文本合成很慢（Dania 195 字实测 41.7 秒），20 秒超时会把长语音全掐掉。
+  voiceTimeoutMs: 90000,
   // 语音文件保留数量上限（按文件数淘汰最旧的），避免音频缓存无限涨。
   voiceMaxKeep: 200,
   // 2026-10-22 用户 m05352 拍板：**取消同会话冷却**（0 = 不限制）。
@@ -635,6 +656,7 @@ function _configShapeReference(Schema) {
     modelBackend: s.union([s.const('wbai'), s.const('wb-proxy'), s.const('dsh')]).default('wbai').description('wbai=直连 WorkBuddy 免费额度（独立运行）；wb-proxy=走本地 8788 多账号池网关（抗限流，保留 wbai 回退）；dsh=走宿主 ctx.llm'),
     gatewayBaseUrl: s.string().default(DEFAULTS.gatewayBaseUrl).description('wb-proxy 后端用的网关地址'),
     gatewayApiKey: s.string().default(DEFAULTS.gatewayApiKey).description('wb-proxy 网关的占位 Authorization（api_key_required:false 时任意值即可）'),
+  gatewayRealm: s.string().default(DEFAULTS.gatewayRealm).description("钉死网关出口（'cn' / 'intl'）；留空=按模型名自动（flash→intl 免费优先）。国际版账号被限制时填 'cn' 把链路切回国内积分池"),
     gatewayToWbaiFallback: s.boolean().default(DEFAULTS.gatewayToWbaiFallback).description('wb-proxy 网关限流/宕机时是否回退 wbai 直连'),
     provider: s.string().default(DEFAULTS.provider).description('DSH provider（modelBackend=dsh 时生效）'),
     model: s.string().default(DEFAULTS.model).description('模型 id'),
@@ -706,6 +728,10 @@ function _configShapeReference(Schema) {
     progressMaxItems: s.natural().default(DEFAULTS.progressMaxItems),
     progressMaxItemChars: s.natural().default(DEFAULTS.progressMaxItemChars),
     memoryLimit: s.natural().default(DEFAULTS.memoryLimit),
+    memoryPoolLimit: s.natural().default(DEFAULTS.memoryPoolLimit),
+    memoryPoolMax: s.natural().default(DEFAULTS.memoryPoolMax),
+    memoryEncrypt: s.boolean().default(DEFAULTS.memoryEncrypt),
+    memoryKeyFile: s.string().default(DEFAULTS.memoryKeyFile),
     blindMode: s.boolean().default(DEFAULTS.blindMode),
     logLevel: s.string().default(DEFAULTS.logLevel),
     // task-41：干活会话目录。workCwd 显式配了就用它；否则用 workSandboxDir。
@@ -737,7 +763,8 @@ function _configShapeReference(Schema) {
     stickerLearnMaxPerDay: s.natural().default(DEFAULTS.stickerLearnMaxPerDay),
     voiceEnabled: s.boolean().default(DEFAULTS.voiceEnabled).description('语音：偶尔把一条回复换成语音发出去（默认用本机 GPT-SoVITS 的社区音色 Dania）'),
     voiceChance: s.number().min(0).max(1).default(DEFAULTS.voiceChance).description('每条回复转语音的概率（0~1，默认 0.35）'),
-    voiceMaxChars: s.natural().default(DEFAULTS.voiceMaxChars).description('超过这个字数的回复不转语音（太长没人听）'),
+    voiceMaxChars: s.natural().default(DEFAULTS.voiceMaxChars).description('超过这个字数的回复不转语音（默认 220 字 ≈ 56 秒；时长硬上限见 voiceMaxSeconds）'),
+    voiceMaxSeconds: s.natural().default(DEFAULTS.voiceMaxSeconds).description('语音条时长上限（秒，默认 58；QQ 硬上限 60，超过就退回文字；0 = 不限）'),
     voiceBackend: s.string().default(DEFAULTS.voiceBackend).description('语音后端：sovits（本地 GPT-SoVITS，默认）或 edge（edge-tts 的晓晓）'),
     voiceSovitsUrl: s.string().default(DEFAULTS.voiceSovitsUrl).description('GPT-SoVITS api_v2 地址（默认 http://127.0.0.1:9880）'),
     voiceRefAudio: s.string().default('').description('GPT-SoVITS 参考音频路径（Dania 模型自带的那条 wav）'),
@@ -749,7 +776,7 @@ function _configShapeReference(Schema) {
     voiceName: s.string().default(DEFAULTS.voiceName).description('edge-tts 音色（backend=edge 或 sovits 失败退回时用，默认 zh-CN-XiaoxiaoNeural）'),
     voiceRate: s.string().default(DEFAULTS.voiceRate).description('edge-tts 语速（如 -5%）'),
     voicePitch: s.string().default(DEFAULTS.voicePitch).description('edge-tts 音高（如 +15Hz）'),
-    voiceTimeoutMs: s.natural().default(DEFAULTS.voiceTimeoutMs).description('单次合成超时（毫秒）'),
+    voiceTimeoutMs: s.natural().default(DEFAULTS.voiceTimeoutMs).description('单次合成超时（毫秒；长文本合成要 40 秒以上，默认 90000）'),
     voiceMaxKeep: s.natural().default(DEFAULTS.voiceMaxKeep).description('语音缓存保留文件数上限'),
     voiceCooldownSeconds: s.natural().default(DEFAULTS.voiceCooldownSeconds).description('已废弃（用户 2026-10-22 取消冷却，保留字段兼容旧配置）'),
   })
@@ -980,7 +1007,17 @@ export function apply(root, rawConfig = {}) {
       const h = await engine.gateway.health()
       if (h.ok) {
         if (config.modelBackend === 'wb-proxy') {
-          state.model = { ok: true, note: '网关后端', baseUrl: h.baseUrl || '', model: modelId, fallback: fb }
+          // realm 要露出来：intl 出口整组不可用时会「在线但回不出话」（stage=model-null），
+          // 靠这个字段一眼分辨是出口问题还是别的问题。
+          state.model = {
+            ok: true,
+            note: config.gatewayRealm ? `网关后端（realm 已钉 ${config.gatewayRealm}）` : '网关后端',
+            baseUrl: h.baseUrl || '',
+            model: modelId,
+            fallback: fb,
+            realm: h.realm || config.gatewayRealm || '',
+            realmPinned: Boolean(config.gatewayRealm),
+          }
           return state.model
         }
         logger('info', `wbai 凭据就绪：uid=${h.uid || '?'} 到期=${h.expiresAt ? new Date(h.expiresAt).toLocaleString('zh-CN') : '?'}`)

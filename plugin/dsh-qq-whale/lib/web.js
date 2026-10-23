@@ -287,6 +287,29 @@ export class WebWidget {
     } catch {
       out.windows = null
     }
+    /*
+     * 语音生效值（2026-10-23）：此前 /state 完全看不到 voice 配置，改完
+     * voiceMaxChars / voiceMaxSeconds / voiceTimeoutMs 没法确认到底吃上了没有，
+     * 只能靠猜。这里直接回读 engine.config，改完 GET /dsh-qq-whale/state 一眼核。
+     */
+    try {
+      const c = e?.config
+      if (c) {
+        out.voice = {
+          enabled: c.voiceEnabled !== false,
+          chance: Number(c.voiceChance ?? 0),
+          maxChars: Number(c.voiceMaxChars ?? 0),
+          maxSeconds: Number(c.voiceMaxSeconds ?? 0),
+          timeoutMs: Number(c.voiceTimeoutMs ?? 0),
+          backend: String(c.voiceBackend || ''),
+          quietStart: String(c.voiceQuietStart || ''),
+          quietEnd: String(c.voiceQuietEnd || ''),
+          // VoiceMaker 没建出来（voiceEnabled=false）时 ready=false
+          ready: Boolean(e?.voice),
+          stats: e?.voice?.stats ? { ...e.voice.stats } : null,
+        }
+      }
+    } catch {}
     // 这些统计都包在 try 里：任何一项挂掉都不该让整个挂件变空白
     try {
       const m = e?.metrics
@@ -365,8 +388,9 @@ export class WebWidget {
       }
     } catch {}
     try {
-      const mem = e?.memory?.entries
-      if (Array.isArray(mem)) out.memory = { count: mem.length }
+      const mem = e?.memory
+      if (mem && typeof mem.status === 'function') out.memory = mem.status()
+      else if (Array.isArray(mem?.entries)) out.memory = { count: mem.length, limit: Number(mem?.limit) || null }
     } catch {}
     // 今日免费积分用量。挂件上要能直接看到剩多少——
     // 用户是看着这个数字决定要不要关掉限制的。
@@ -830,6 +854,57 @@ export class WebWidget {
       const w = Number(v)
       return Number.isInteger(w) && w >= 1 && w <= 5 ? w : null
     }
+
+    /*
+     * POST /allowlist/test —— 白名单指令探针（2026-10-23 主人 m00608）。
+     *
+     * body: {"text":"把群 123456789 加进白名单", "apply": false}
+     * 不开 QQ 也能验证「主人这句话会被解析成什么、会不会真的落地」：
+     *   - 默认 dry-run（apply 缺省）：只回解析结果 + 当前三份名单，不写任何文件；
+     *   - apply:true 才真的跑一次（等价于主人私聊发了这句话），
+     *     执行后的回话不发到 QQ，只从接口返回，方便对账。
+     */
+    add({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/allowlist/test`,
+      ...wrap(async (req, res) => {
+        if (req.method !== 'POST') return sendFail(res, 405, 'method not allowed')
+        const body = await readJson(req, res)
+        if (!body) return
+        const e = engineOr503(res)
+        if (!e) return
+        const text = String(body?.text || '').trim()
+        if (!text) return sendFail(res, 400, 'text 不能为空')
+        const owner = String(e.ownerList?.[0] || '')
+        if (!owner) return sendFail(res, 409, '还没配置主人号（ownerUin），白名单指令没人能下')
+        const preview = e.previewAllowlistCommand(text)
+        if (!preview?.matched) {
+          sendJson(res, 200, { ok: true, matched: false, note: '不是白名单指令，会走普通会话路由' })
+          return
+        }
+        if (body?.apply !== true) {
+          sendJson(res, 200, { ok: true, matched: true, applied: false, preview })
+          return
+        }
+        if (!preview.wouldRun) {
+          sendJson(res, 200, { ok: true, matched: true, applied: false, preview, note: '这条只查不改，无需 apply' })
+          return
+        }
+        const run = await e.maybeAllowlistCommand({
+          ev: { user_id: owner, message_type: 'private' },
+          text,
+          send: false,
+        })
+        sendJson(res, 200, {
+          ok: true,
+          matched: true,
+          applied: true,
+          reply: run?.reply || '',
+          preview,
+          lists: e.previewAllowlistCommand(text)?.lists || null,
+        })
+      }),
+    })
 
     // GET /memory/list —— 按 at 倒序，条数与磁盘 memory.json 一致
     add({

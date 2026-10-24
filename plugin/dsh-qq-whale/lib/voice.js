@@ -34,8 +34,15 @@ const PY_CANDIDATES = [
   'D:\\Python3.10\\Python\\python.exe',
 ]
 
-/** GPT-SoVITS 参考音频的固定参考文本（Dania 模型 readme.txt 指定）。 */
-export const DANIA_PROMPT_TEXT = '怎么啊？如果有你在也不放心，那就干脆给我也装个限制器或者炸弹喽。'
+/**
+ * GPT-SoVITS 参考音频的固定参考文本。
+ * 2026-10-24：音色换成「用户自己录的 54 句微调」出来的 molly_own 模型，
+ * 参考音频同步换成用户本人那句（voice-ref\molly-ref.wav）。
+ */
+export const MOLLY_PROMPT_TEXT = '想的美，今天本鱼才是老大，你喝白开水去！'
+
+/** 兼容旧名字：历史代码/测试里仍可能引用 DANIA_PROMPT_TEXT。 */
+export const DANIA_PROMPT_TEXT = MOLLY_PROMPT_TEXT
 
 /** 语音文本清洗：去掉 CQ 码、尖括号标签、表情符号、多余空白。 */
 export function cleanVoiceText(text) {
@@ -55,7 +62,7 @@ export class VoiceMaker {
     backend = 'sovits',
     sovitsUrl = 'http://127.0.0.1:9880',
     refAudio = '',
-    promptText = DANIA_PROMPT_TEXT,
+    promptText = MOLLY_PROMPT_TEXT,
     promptLang = 'zh',
     fallbackEdge = true,
     pythonPath = '',
@@ -72,7 +79,7 @@ export class VoiceMaker {
     this.backend = String(backend || 'sovits').toLowerCase() === 'edge' ? 'edge' : 'sovits'
     this.sovitsUrl = String(sovitsUrl || 'http://127.0.0.1:9880').replace(/\/+$/, '')
     this.refAudio = String(refAudio || '').trim()
-    this.promptText = String(promptText || DANIA_PROMPT_TEXT)
+    this.promptText = String(promptText || MOLLY_PROMPT_TEXT)
     this.promptLang = promptLang || 'zh'
     this.fallbackEdge = fallbackEdge !== false
     this.pythonPath = String(pythonPath || process.env.MOLLY_VOICE_PYTHON || '').trim()

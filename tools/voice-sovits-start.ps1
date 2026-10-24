@@ -1,14 +1,15 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    拉起 / 保活 GPT-SoVITS 的 api_v2 服务（Molly 的 Dania 音色后端）。
+    拉起 / 保活 GPT-SoVITS 的 api_v2 服务（Molly 的专属音色后端）。
 
 .DESCRIPTION
-    2026-10-22 用户拍板（m05352）：Molly 的语音改用社区音色 Dania
-    （本机 GPT-SoVITS v2ProPlus + ModelScope villia/dania 权重）。
+    2026-10-22 用户拍板（m05352）：Molly 的语音改用本机 GPT-SoVITS。
+    2026-10-24 用户拍板（本条会话）：音色从社区 Dania 换成**用户自己录 54 句
+    微调出来的 molly_own 模型**（v2ProPlus，训练脚本 ${MOLLY_ROOT}\data\video\run_train.py）。
     这个脚本由计划任务 Molly-Voice 每 5 分钟调一次，做三件事：
       1) 端口 9880 没在听 -> 隐藏启动 api_v2.py（首次加载约 20~40 秒）
-      2) 服务就绪后把 Dania 的 GPT/SoVITS 权重和参考音频切上去（幂等，可重复调）
+      2) 服务就绪后把 molly_own 的 GPT/SoVITS 权重和参考音频切上去（幂等，可重复调）
       3) 把结果写进 out\voice-sovits-status.json，日志写 out\voice-sovits-start.log
 
     -Restart：先杀掉旧的 api_v2 进程再重启（换权重/换模型后用）。
@@ -31,9 +32,9 @@ $Port = 9880
 $Log = Join-Path $Root 'out\voice-sovits-start.log'
 $StatusFile = Join-Path $Root 'out\voice-sovits-status.json'
 
-$GptWeights = Join-Path $GptRoot 'GPT_SoVITS\dania-e15.ckpt'
-$SoVitsWeights = Join-Path $GptRoot 'GPT_SoVITS\dania_e16_s2192.pth'
-$RefAudio = '${MOLLY_ROOT}\data\qq-whale\voice-ref\dania-ref.wav'
+$GptWeights = Join-Path $GptRoot 'GPT_weights_v2ProPlus\molly_own-e10.ckpt'
+$SoVitsWeights = Join-Path $GptRoot 'SoVITS_weights_v2ProPlus\molly_own_e16_s864.pth'
+$RefAudio = '${MOLLY_ROOT}\data\qq-whale\voice-ref\molly-ref.wav'
 
 function Write-Log([string]$msg) {
     $line = ('{0} {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $msg)
@@ -104,8 +105,8 @@ function Exit-Script([int]$code) {
 # —— 0. 依赖检查 ————————————————————————————————
 if (-not (Test-Path $Python)) { Write-Log "✗ python 不存在：$Python"; Exit-Script 3 }
 if (-not (Test-Path $Api)) { Write-Log "✗ api_v2.py 不存在：$Api"; Exit-Script 3 }
-if (-not (Test-Path $GptWeights)) { Write-Log "✗ Dania GPT 权重不存在：$GptWeights"; Exit-Script 3 }
-if (-not (Test-Path $SoVitsWeights)) { Write-Log "✗ Dania SoVITS 权重不存在：$SoVitsWeights"; Exit-Script 3 }
+if (-not (Test-Path $GptWeights)) { Write-Log "✗ molly_own GPT 权重不存在：$GptWeights"; Exit-Script 3 }
+if (-not (Test-Path $SoVitsWeights)) { Write-Log "✗ molly_own SoVITS 权重不存在：$SoVitsWeights"; Exit-Script 3 }
 if (-not (Test-Path $RefAudio)) { Write-Log "✗ 参考音频不存在：$RefAudio"; Exit-Script 3 }
 
 $status = Get-Status
@@ -148,7 +149,7 @@ if (-not $status.listening) {
     Exit-Script 2
 }
 
-# —— 3. 切到达尼亚权重 + 参考音频（幂等）—————————
+# —— 3. 切到 molly_own 权重 + 参考音频（幂等）—————————
 $gpt = Invoke-Api ('/set_gpt_weights?weights_path=' + [uri]::EscapeDataString($GptWeights))
 $status.weights = ($null -ne $gpt)
 $sv = Invoke-Api ('/set_sovits_weights?weights_path=' + [uri]::EscapeDataString($SoVitsWeights))

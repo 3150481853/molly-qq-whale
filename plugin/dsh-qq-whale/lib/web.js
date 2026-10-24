@@ -350,6 +350,36 @@ export class WebWidget {
       }
     } catch {}
     /*
+     * 撤回（2026-10-24，主人 m00480 需求②）：/state 回读配置 + 最近一次处理详情。
+     * 排查「她为什么还回了撤回那条」时，需要知道：事件进没进来、清了什么、
+     * 在途任务有没有被中止、轻回有没有被拦（chance/有新消息/正在回别的）。
+     */
+    try {
+      if (e) {
+        out.recall = {
+          whisperEnabled: e.config?.recallWhisperEnabled !== false,
+          whisperChance: Number(e.config?.recallWhisperChance ?? 0.45),
+          whisperDelaySeconds: Number(e.config?.recallWhisperDelaySeconds ?? 20),
+          count: Number(e.recallState?.count || 0),
+          tracked: Number(e.recalled?.size || 0),
+          last: e.recallState?.last || null,
+        }
+        /*
+         * 群发豁免（2026-10-24，主人 m00480 需求①，v1.1.2）：
+         * 对方明确要求/第二次坚持「就在群里发」时命中了几次、最近一次是什么场景。
+         * 只做观察窗口，不参与发送逻辑。
+         */
+        out.groupEcho = {
+          enabled: e.config?.groupEchoEnabled !== false,
+          repeatWindowSeconds: Number(e.config?.groupEchoRepeatWindowSeconds ?? 300),
+          maxBubbleChars: Number(e.config?.groupEchoMaxBubbleChars ?? 400),
+          maxTotalChars: Number(e.config?.groupEchoMaxTotalChars ?? 1200),
+          count: Number(e.groupEchoState?.count || 0),
+          last: e.groupEchoState?.last || null,
+        }
+      }
+    } catch {}
+    /*
      * 逐条决策日志 + 最近一轮回复的耗时/降级（2026-10-21，真机验收用）。
      *
      * 用户报「还是@她了才回一句」时，从 QQ 外面只能看到"回/没回"。
@@ -1614,6 +1644,70 @@ export class WebWidget {
     })
 
     /*
+     * POST /dsh-qq-whale/chat/recall-test（2026-10-24，验收用）—— 伪造一条撤回通知。
+     *
+     * 为什么要这个口子：撤回是 QQ 侧行为，真机复现要"发一条→撤回→让她正在生成"
+     * 卡时序，很难稳定。这里直接把 engine.onRecall 的完整链路跑一遍：
+     * history 剔除 / pending 过滤 / 在途任务中止 / 轻回判定，结果同时留在
+     * /state.recall.last，能对照排查「她为什么还回了撤回那条」。
+     *
+     * body: { groupId?, userId?, messageId, noticeType?, whisper? }
+     *   - noticeType 默认：有 groupId 用 group_recall，否则 friend_recall
+     *   - messageId 必填：要匹配 conv.history / job.pending 里的那条
+     *   - whisper 默认 false：不真发「轻回一句」（避免测试在别人群里冒泡）
+     * 只监听 127.0.0.1，不算对外接口。
+     */
+    add({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/chat/recall-test`,
+      ...wrap(async (req, res) => {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          return
+        }
+        const raw = await readBody(req)
+        let body
+        try {
+          body = JSON.parse(raw || '{}')
+        } catch {
+          sendJson(res, 400, { ok: false, error: 'bad json' })
+          return
+        }
+        const e = this.engineRef()
+        if (!e?.onRecall) {
+          sendJson(res, 503, { ok: false, error: 'engine 还没就绪' })
+          return
+        }
+        const groupId = body?.groupId ? String(body.groupId) : ''
+        const userId = String(body?.userId || '')
+        const messageId = String(body?.messageId || '')
+        const noticeType = String(body?.noticeType || (groupId ? 'group_recall' : 'friend_recall'))
+        if (!messageId) {
+          sendJson(res, 400, { ok: false, error: 'messageId 必填' })
+          return
+        }
+        const ev = {
+          post_type: 'notice',
+          notice_type: noticeType,
+          time: Math.floor(Date.now() / 1000),
+          self_id: String(e.selfId || e.config?.selfId || ''),
+          user_id: userId,
+          message_id: messageId,
+        }
+        if (groupId) ev.group_id = groupId
+        const before = e.recallState?.last || null
+        let result
+        try {
+          result = await e.onRecall(ev, { whisper: body?.whisper === true })
+        } catch (err) {
+          sendJson(res, 200, { ok: false, ev, error: String(err?.stack || err?.message || err) })
+          return
+        }
+        sendJson(res, 200, { ok: true, ev, result, before, last: e.recallState?.last || null })
+      }),
+    })
+
+    /*
      * POST /dsh-qq-whale/chat/test —— 打一发**真实的 chat 通道调用**，给账目对账用。
      *
      * 为什么非要有这个口子：预算表里 chat 是按次记账的，但它到底有没有跟网关
@@ -1847,6 +1941,9 @@ export class WebWidget {
         if (trimTrailing > 0 && Array.isArray(conv.history)) conv.history.splice(-trimTrailing)
         const historyBefore = Array.isArray(conv.history) ? conv.history.slice() : []
         const lastSelfBefore = conv.lastSelfAt
+        const lastUserBefore = conv.lastUserAt
+        const lastUserNameBefore = conv.lastUserName
+        const lastUserIdBefore = conv.lastUserId
         const client = e.client
         const origSendGroup = client?.sendGroupMsg
         const origSendPrivate = client?.sendPrivateMsg
@@ -1865,6 +1962,31 @@ export class WebWidget {
           for (let i = 0; i < runs; i++) {
             const ev = makeEv(i)
             const norm = { text, images: [], replyTo: null }
+            /*
+             * 2026-10-24：把这条「模拟收到的消息」先塞进 conv.history。
+             *
+             * 之前只把 text 塞进 norm，模型在 buildMessages 里根本看不到它
+             * （历史里没有这条）——空跑出来的回复永远在接上一轮旧话题，
+             * 验证「提示词注入有没有生效」时会被误判成没生效。
+             * 真实链路 onMessage 也是先 pushHistory 再决定要不要回，这里补同一步；
+             * finally 会整体还原，不会污染真实会话。
+             */
+            if (Array.isArray(conv.history)) {
+              conv.history.push({
+                role: 'user',
+                text,
+                who: 'example',
+                userId,
+                messageId: String(ev.message_id),
+                at: Date.now(),
+                scene,
+                isAtMe: scene === 'group_mention',
+                images: [],
+              })
+              conv.lastUserAt = Date.now()
+              conv.lastUserName = 'example'
+              conv.lastUserId = userId
+            }
             const verdict = e.shouldRespond({ scene, ev, norm, conv })
             const run = { verdict, trace: null }
             if (verdict?.yes) {
@@ -1899,6 +2021,9 @@ export class WebWidget {
           try {
             conv.history = historyBefore
             conv.lastSelfAt = lastSelfBefore
+            conv.lastUserAt = lastUserBefore
+            conv.lastUserName = lastUserNameBefore
+            conv.lastUserId = lastUserIdBefore
           } catch {}
           if (client) {
             if (origSendGroup) client.sendGroupMsg = origSendGroup

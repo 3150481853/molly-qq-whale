@@ -527,13 +527,13 @@ export const DEFAULTS = {
   // 语音条时长硬闸门（秒）：合成完先按 wav 头量真实时长，超了就退回文字——
   // QQ 语音硬上限 60 秒，超了上传会失败并吞掉整条回复。0 = 不限。
   voiceMaxSeconds: 58,
-  // 2026-10-22 22:5x 用户拍板（m05352）：语音改用社区音色 Dania
-  // （本机 GPT-SoVITS v2ProPlus + villia/dania 权重，HTTP 9880）。
+  // 2026-10-24：用户拍板（本条会话）把 Molly 的语音从社区音色 Dania 换成
+  // **用户自己录的 54 句微调出来的 molly_own 音色**（GPT-SoVITS v2ProPlus，HTTP 9880）。
   // backend='edge' 可退回 edge-tts（晓晓）；本地服务挂了会按 voiceFallbackEdge 自动退。
   voiceBackend: 'sovits',
   voiceSovitsUrl: 'http://127.0.0.1:9880',
-  voiceRefAudio: 'G:\\Molly\\data\\qq-whale\\voice-ref\\dania-ref.wav',
-  voicePromptText: '怎么啊？如果有你在也不放心，那就干脆给我也装个限制器或者炸弹喽。',
+  voiceRefAudio: 'G:\\Molly\\data\\qq-whale\\voice-ref\\molly-ref.wav',
+  voicePromptText: '想的美，今天本鱼才是老大，你喝白开水去！',
   voicePromptLang: 'zh',
   voiceFallbackEdge: true,
   // 静默时段：这段时间不提供语音（用户 m05352：23:50–次日 09:00）。
@@ -561,6 +561,22 @@ export const DEFAULTS = {
   pokeAngryWindowSeconds: 180,
   pokeCooldownSeconds: 8,
   pokeAngryCooldownSeconds: 90,
+  // —— 撤回（2026-10-24，主人 m00480 需求②）——
+  // 有人撤回消息后：清历史 / 作废在途回复是硬行为（不留配置）；
+  // 「轻回一句」是可配置的软行为。用户 m00585 明确要求**群里也轻回一句**
+  // （不要死寂），所以群/私聊都会掷骰，只是概率不高、延迟 20 秒、
+  // 且对方立刻重发就不插嘴。
+  recallWhisperEnabled: true,
+  recallWhisperChance: 0.45,
+  recallWhisperDelaySeconds: 20,
+  // —— 群里照发（2026-10-24，主人 m00480 需求①）——
+  // 现场：群里让人翻译东西，她回「细节我私聊你」；对方第二遍说「就在群里发」
+  // 她还是推私聊。这里三件事：判定窗口、每颗气泡字数、单次总量。
+  // 代码/日志和隐私/凭据仍然不能发群（那条线不跟这个开关一起放宽）。
+  groupEchoEnabled: true,
+  groupEchoRepeatWindowSeconds: 300,
+  groupEchoMaxBubbleChars: 400,
+  groupEchoMaxTotalChars: 1200,
 }
 
 function resolveDirs(config) {
@@ -797,6 +813,13 @@ function _configShapeReference(Schema) {
     pokeAngryWindowSeconds: s.natural().default(DEFAULTS.pokeAngryWindowSeconds).description('生气计数的窗口（秒，默认 180）'),
     pokeCooldownSeconds: s.natural().default(DEFAULTS.pokeCooldownSeconds).description('两次戳回应的最小间隔（秒，默认 8）'),
     pokeAngryCooldownSeconds: s.natural().default(DEFAULTS.pokeAngryCooldownSeconds).description('生气之后的冷却（秒，默认 90）'),
+    recallWhisperEnabled: s.boolean().default(DEFAULTS.recallWhisperEnabled).description('对方撤回消息后是否轻回一句（清历史/作废在途回复不受此开关影响）'),
+    recallWhisperChance: s.number().min(0).max(1).default(DEFAULTS.recallWhisperChance).description('撤回后轻回一句的概率（0~1，默认 0.45；群聊私聊都会掷骰）'),
+    recallWhisperDelaySeconds: s.natural().default(DEFAULTS.recallWhisperDelaySeconds).description('撤回后等多少秒再轻回（默认 20；期间对方重发就不插嘴）'),
+    groupEchoEnabled: s.boolean().default(DEFAULTS.groupEchoEnabled).description('对方明确要求/坚持「就在群里发」时，不再推私聊、长文按句分条发（代码/日志/隐私仍然不发群）'),
+    groupEchoRepeatWindowSeconds: s.natural().default(DEFAULTS.groupEchoRepeatWindowSeconds).description('她说「私聊」之后多久内的追问算「第二次坚持」（秒，默认 300）'),
+    groupEchoMaxBubbleChars: s.natural().default(DEFAULTS.groupEchoMaxBubbleChars).description('群里照发时每颗气泡的字数上限（默认 400）'),
+    groupEchoMaxTotalChars: s.natural().default(DEFAULTS.groupEchoMaxTotalChars).description('群里照发时一次最多发多少字（默认 1200，超了截断并说明）'),
   })
 }
 
@@ -1444,14 +1467,28 @@ export function apply(root, rawConfig = {}) {
       }
 
       /*
-       * 通知类事件（2026-10-23，主人 m01231）：目前只接「戳一戳」。
+       * 通知类事件（2026-10-23 戳一戳；2026-10-24 撤回）。
        *
-       * 以前 notice 一路落到函数末尾被静默丢弃——有人戳 Molly，她毫无反应。
-       * 现在递给 engine.onNotice（内部有开关/白名单/概率/冷却，且自己兜错），
+       * 以前 notice 一路落到函数末尾被静默丢弃——有人戳 Molly，她毫无反应，
+       * 有人撤回消息她也照旧对着撤回内容回。现在分别递给 engine，
        * 这里只负责分发，不在这里写业务。
        */
       if (ev.post_type === 'notice') {
-        if (config.blindMode || !config.enabled) return
+        if (!config.enabled) return
+        /*
+         * 撤回（2026-10-24，主人 m00480 需求②）。
+         *
+         * 放在 blindMode 判断**之前**：撤回要把 history 里那条剔掉、把在途
+         * 回复作废，这是内务，闭眼模式也要做（不然睁眼后还会引用撤回内容）。
+         * 轻回那句由 engine.onRecall 自己再判一次 blindMode。
+         */
+        if (ev.notice_type === 'group_recall' || ev.notice_type === 'friend_recall') {
+          engine
+            ?.onRecall?.(ev)
+            .catch((err) => logger('warn', `处理撤回失败: ${err?.message || err}`))
+          return
+        }
+        if (config.blindMode) return
         if (ev.notice_type === 'notify' && ev.sub_type === 'poke') {
           engine
             ?.onNotice?.(ev)

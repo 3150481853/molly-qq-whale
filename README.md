@@ -1,11 +1,11 @@
 <div align="center">
 
-<img src="assets/hero-v111.svg" width="880" alt="Molly QQ Whale">
+<img src="assets/hero-v112.svg" width="880" alt="Molly QQ Whale">
 
 基于 **DeepSeek Harness** 的 QQ 通道插件：稳定的人设、长期记忆、表情包习惯、会发语音，
 以及一个能看懂她此刻在干什么的控制台。
 
-**v1.1.1** —— 语音改成显式触发（想听就直说，不用再碰运气）：她说 `<voice>` 才发；被戳一戳会回应，戳多了会生气；重复消息根治（同一会话 60 秒内不重复发）；记忆池 2000 条起、AES-256-GCM 加密落盘 + 双盘定时备份；单条语音最长约 56 秒。
+**v1.1.2** —— 她不再追着撤回的消息回（撤回、重发，她回新的那条，偶尔轻回一句）；群里明确要求「就在这儿说」就在群里说，不再往私聊引；查资料时不再自己往别的群发答案；好友申请解析不出 QQ 号也不再静默丢，按序号就能批。另有音色包 v1.0 开源（molly_own，54 句自录微调）。
 
 [![license](https://img.shields.io/badge/license-MIT-1aae39?style=flat-square)](LICENSE) [![node](https://img.shields.io/badge/node-22%2B-1aae39?style=flat-square)](https://nodejs.org) [![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0075de?style=flat-square)](#环境要求) [![host](https://img.shields.io/badge/host-DeepSeek%20Harness-5645d4?style=flat-square)](#环境要求) [![QQ](https://img.shields.io/badge/QQ-OneBot%2011-0075de?style=flat-square)](#环境要求)
 

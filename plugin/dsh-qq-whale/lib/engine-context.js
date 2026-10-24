@@ -22,7 +22,17 @@
  */
 
 export function buildSystemPrompt(input, deps) {
-  const { scene, userName, qq = '', groupName, mood, conv, degraded = false, research = '' } = input
+  const {
+    scene,
+    userName,
+    qq = '',
+    groupName,
+    mood,
+    conv,
+    degraded = false,
+    research = '',
+    groupEcho = false,
+  } = input
     let sp = deps.persona.systemPrompt({
       scene,
       selfNickname: deps.client?.self?.nickname || 'Molly',
@@ -49,6 +59,21 @@ export function buildSystemPrompt(input, deps) {
         '\n\n（这是你刚才自己上网查来的。用你自己的话讲，别原样复述，别提"搜索""资料"这些词。' +
         '如果这跟人家问的对不上、或者内容含糊，就说"这个我没查到"——' +
         '**注意：是这一个问题没查到，不是你不能查。别说"我上不了网""我没那功能"这种话。**）'
+    }
+
+    /*
+     * 群发豁免（2026-10-24，主人 m00480 需求①）：对方明确要求、甚至第二次
+     * 坚持「就在群里发」。core.md 那条「细节我私聊你说」这一轮要让路，但加
+     * 两道约束：①长内容分条，别一坨；②隐私/凭据仍然不能贴。
+     */
+    if (groupEcho) {
+      sp +=
+        '\n\n# 这次要发在群里\n' +
+        '对方明确要求、而且坚持要在这儿看到内容（不是私聊）。这次就直接在群里说，' +
+        '别说"这个我私聊你""细节私聊"这种话。\n' +
+        '- 内容长就拆成几条发，每条一两句，用 <sep/> 分隔——别一次塞一大段。\n' +
+        '- 翻译、解释、原文照贴的活，把内容照实给出来，别省略、别只给结论。\n' +
+        '- 隐私和凭据（手机号、身份证、密码、token、别人的私聊截图）仍然不能贴。'
     }
 
     /*

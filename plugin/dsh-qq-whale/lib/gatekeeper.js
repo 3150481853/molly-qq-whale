@@ -181,12 +181,20 @@ export class Gatekeeper {
     this.pending.delete(id)
     this.denied.delete(id)
     if (e.kind !== 'group') {
-      this.approved.set(id, {
-        name: e.name || '',
-        at: now,
-        kind: e.kind || 'chat',
-        by: String(approverUin || ''),
-      })
+      /*
+       * 好友申请有可能拿不到 QQ 号（SnowLuma 解析不出陌生人 uid→uin，
+       * user_id=0，engine.onRequest 用 `friend:<flag>` 合成 key）。这种 key
+       * 不是真实 QQ 号：写进 approved 永远匹配不上 isApproved(真实 uin)，
+       * 只是白占一条记录、还会让 /state 出现怪 ID。所以只销待批。
+       */
+      if (/^\d{5,12}$/.test(id)) {
+        this.approved.set(id, {
+          name: e.name || '',
+          at: now,
+          kind: e.kind || 'chat',
+          by: String(approverUin || ''),
+        })
+      }
     }
     this.save()
     return e
@@ -199,7 +207,8 @@ export class Gatekeeper {
     this.pending.delete(id)
     this.approved.delete(id)
     // 被拒的群不需要冷却期（再邀请一次还是会问主人），只销掉申请
-    if (e.kind !== 'group') {
+    // 拿不到 QQ 号的合成 key（friend:<flag>）同理：写进 denied 也匹配不到真人。
+    if (e.kind !== 'group' && /^\d{5,12}$/.test(id)) {
       this.denied.set(id, { name: e.name || '', at: now })
     }
     this.save()
@@ -277,6 +286,20 @@ export function parseVerdict(text) {
     return { action: yes ? 'approve' : 'deny', userId: m[1] }
   }
 
+  /*
+   * 按序号指定：「通过 1」「拒绝 2」「同意第3个」。
+   *
+   * 2026-10-24 场景：SnowLuma 解析不出陌生人 uid→uin 时，好友申请事件里
+   * user_id 是 0，待批队列里用的是 `friend:<flag>` 合成 key —— 主人根本没有
+   * QQ 号可以回（上面那条 5-12 位号码的规则用不上），只能按列表序号点。
+   * 只认 1-2 位数字（QQ 号最短 5 位），不会和真实号码混淆。
+   */
+  const mi = t.match(/^(同意|通过|放行|批准|加|拒(?:绝)?|不同意|别|不)(?:第)?\s*(\d{1,2})(?:个|条)?$/u)
+  if (mi) {
+    const yes = /^(?:同意|通过|放行|批准|加)/.test(mi[1])
+    return { action: yes ? 'approve' : 'deny', userId: '', index: Number(mi[2]) }
+  }
+
   const s = t.replace(/[\s。.!！~～,，、]/g, '').toLowerCase()
 
   /*
@@ -327,6 +350,10 @@ export function personLabel(entry) {
   const name = (entry?.name || '').trim()
   const uid = String(entry?.groupId || entry?.userId || '')
   if (entry?.kind === 'group') return name ? `群 ${name}（${uid}）` : `群 ${uid}`
+  // 合成 key = 好友申请但 QQ 号解析不出来（见 engine.onRequest 注释）
+  if (/^friend:/.test(uid)) {
+    return name ? `${name}（QQ 号未知）` : 'QQ 号未知的申请人'
+  }
   if (name && name !== uid) return `${name}（${uid}）`
   return uid || '某人'
 }

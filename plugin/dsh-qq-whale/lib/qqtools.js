@@ -325,6 +325,29 @@ export function buildQqTool({ getClient }) {
         return { ok: false, action, text: `QQ 现在没连上（状态 ${client.state || '未知'}）。等它连上再试，或者让主人重新扫码。` }
       }
 
+      /*
+       * 查资料子任务里，禁止 agent 自己发消息（2026-10-24 14:17 真机事故）。
+       *
+       * 现场：群 666666666 有人问「审核是什么意思呀」→ engine 判成要查资料 →
+       * Researcher 用 executor.run 开了一次干活会话（带着全套工具，包括
+       * qq_onebot）。干活会话把答案直接 send_group_msg 到了它自己熟悉的
+       * 1092417231（两条，还 @ 了那边的人），查完的结论又被引擎发回正确的群
+       * → 主人看到的就是「在 1092417231 发在 666666666 问的问题」。
+       *
+       * 查资料只要文字结论，不需要手。Researcher 跑的时候会给 client 打
+       * __qqWhaleSendBlock 计数（engine.wrapResearchAccounting），这里硬拦，
+       * 返回明确理由，让模型把结论说给引擎听，而不是自己发出去。
+       */
+      if (Number(client.__qqWhaleSendBlock || 0) > 0 && SEND_ACTIONS.has(action)) {
+        return {
+          ok: false,
+          action,
+          text:
+            '现在这个任务是查资料，不允许自己发 QQ 消息（发了也会被拦掉）。' +
+            '把结论用文字告诉我，由聊天引擎统一发回原来问话的群/人。',
+        }
+      }
+
       // 参数校验：漏了就明确说漏了哪个，别丢给 OneBot 换一句看不懂的报错
       const missing = meta.need.filter((k) => {
         if (k === 'card') return args.card === undefined

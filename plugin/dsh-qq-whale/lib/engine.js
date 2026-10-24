@@ -83,12 +83,18 @@ const engineContext = await import(sub('./engine-context.js'))
 const engineDecision = await import(sub('./engine-decision.js'))
 // 发言开关（2026-10-22，用户 m03759/m03849）：控制台点一下立即生效，重启保持。
 // 状态落在 data/qq-whale/switches.json；旧 noLikeGroups 在构造时迁移成群级 like=false。
-const { SwitchBoard, sanitizeGroupText } = await import(sub('./switches.js'))
+const { SwitchBoard, sanitizeGroupText, looksLikeCodeOrLog } = await import(sub('./switches.js'))
 // 语音（2026-10-22，用户 m04697/m04855）：把回复的一部分换成 edge-tts 合成的声音。
 // 生成失败/超时一律退回文字——语音是锦上添花，不能因为它把回复搞丢。
 const { VoiceMaker, cleanVoiceText } = await import(sub('./voice.js'))
 // 戳一戳回应（2026-10-23，主人 m01231）：反戳 / 被戳多了生气，不走模型。
 const { PokeReactor, isPokeNotice } = await import(sub('./poke.js'))
+// 撤回处理（2026-10-24，主人 m00480）：纯函数模块（字段解析/TTL 清理/history 剔除）。
+// 撤回带来的状态（recalled Map、计数）留在这个类里，方便 /state 观察。
+const recallUtil = await import(sub('./engine-recall.js'))
+// 群发豁免（2026-10-24，主人 m00480 需求①）：对方明确要求/第二次坚持「就在群里发」时，
+// 别再推私聊、别把长文截成一句。判定与分条都是纯函数，放 lib/group-echo.js。
+const groupEchoUtil = await import(sub('./group-echo.js'))
 
 const SCENE_PRIVATE = 'private'
 const SCENE_MENTION = 'group_mention'
@@ -505,6 +511,24 @@ export class ChatEngine {
     this.conversations = new Map()
     /** 每个会话的进行中任务，用于"新消息打断旧回复" */
     this.jobs = new Map()
+
+    /**
+     * 已撤回消息（message_id -> 撤回时间戳，10 分钟 TTL）。
+     *
+     * 用途有三：① 入站兜底——撤回先到、随后补发的那条直接丢；
+     * ② 在途任务守卫——生成完成时发现来源已撤回，就不再发出去；
+     * ③ 重发场景——对方撤回后重发，新消息正常走，不能被旧回复顶掉。
+     */
+    this.recalled = new Map()
+    /** /state 观察窗口：撤回处理次数 + 最近一次详情 */
+    this.recallState = { count: 0, last: null }
+
+    /**
+     * 群发豁免（2026-10-24，主人 m00480 需求①）：命中次数 + 最近一次触发的场景。
+     * 只有内务观察用，不参与发送逻辑。
+     */
+    this.groupEchoState = { count: 0, last: null }
+
     /** 全局：最近一次主动联系的时间 */
     this.lastProactiveAt = 0
     /** 群名/昵称缓存 */
@@ -1100,12 +1124,33 @@ export class ChatEngine {
         }
         target = v.userId
       } else {
-        if (pending.length > 1) {
+        // 按序号指定（「通过 2」「拒绝 1」）：多人待批、或对方 QQ 号拿不到时
+        // 唯一的指定办法（parseVerdict 会把这种写法解析成 v.index）。
+        if (v.index) {
+          if (v.index >= 1 && v.index <= pending.length) {
+            target = pending[v.index - 1].userId
+          } else {
+            await this.replyTo(ev.user_id, `没有第 ${v.index} 条待批请求（现在一共 ${pending.length} 条）。`)
+            return true
+          }
+        } else if (pending.length > 1) {
+          /*
+           * 多个人同时待批时，光说「1」没法知道批谁。
+           *
+           * 2026-10-24 扩：好友申请有可能连 QQ 号都拿不到（SnowLuma 解析不出
+           * 陌生人 uid→uin，见 onRequest 里的注释），这时「回通过 <QQ号>」
+           * 根本用不了，所以补一个按序号指定的说法：「通过 2」「拒绝 1」。
+           * 序号按下面列出来的顺序（1 开始）。
+           */
           const lines = pending.map((p, i) => `${i + 1}. ${personLabel(p)}`).join('\n')
-          await this.replyTo(ev.user_id, `有好几个人同时在等，得说是哪个：\n${lines}\n\n回「通过 <QQ号>」或「拒绝 <QQ号>」。`)
+          await this.replyTo(
+            ev.user_id,
+            `有好几个人同时在等，得说是哪个：\n${lines}\n\n回「通过 1」「拒绝 1」这样按序号说；知道 QQ 号也可以回「通过 <QQ号>」。`,
+          )
           return true
+        } else {
+          target = pending[0].userId
         }
-        target = pending[0].userId
       }
 
       const entry = gk.pending.get(target) || {}
@@ -1153,18 +1198,25 @@ export class ChatEngine {
          * ——就当是刚看到消息。用 proactive 通道发，走同一套人设与记忆。
          */
         this.logger('info', `主人批准了 ${label}（${kind}），加入白名单`)
+        // 合成 key（QQ 号未知的好友申请，target=friend:<flag>）不是真实 QQ 号，
+        // 拿它当主动打招呼的目标只会 100% 发送失败、刷一条 debug 日志。
+        const greetable = /^\d{5,12}$/.test(String(target))
         if (kind === 'friend') {
           await this.notifyVerdict(`好，${label} 加上了。`, ev.user_id)
-          this.greetApproved(target, entry).catch((err) =>
-            this.logger('debug', `主动打招呼失败：${err?.message || err}`),
-          )
+          if (greetable) {
+            this.greetApproved(target, entry).catch((err) =>
+              this.logger('debug', `主动打招呼失败：${err?.message || err}`),
+            )
+          }
         } else if (kind === 'group') {
           await this.notifyVerdict(`好，进群 ${target} 了。`, ev.user_id)
         } else {
           await this.notifyVerdict(`好，${label} 我理了。`, ev.user_id)
-          this.greetApproved(target, entry).catch((err) =>
-            this.logger('debug', `主动打招呼失败：${err?.message || err}`),
-          )
+          if (greetable) {
+            this.greetApproved(target, entry).catch((err) =>
+              this.logger('debug', `主动打招呼失败：${err?.message || err}`),
+            )
+          }
         }
       } else {
         if (kind === 'friend' || kind === 'group') await this.rejectRequest(entry)
@@ -1295,6 +1347,40 @@ export class ChatEngine {
   }
 
   /**
+   * 「这次要不要在群里照发」判定（2026-10-24，主人 m00480 需求①）。
+   *
+   * 现场：群里让人翻译点东西，她回「细节我私聊你」；对方第二遍说
+   * 「你就在群里发」，她还是推私聊——可人家就是想让大家看见。
+   *
+   * 这里只做三件事：看总开关、调纯函数判定、记一次 /state 观察窗口。
+   * 判定结果会在两处生效：generate 的 system prompt（别再教她推私聊）、
+   * scheduleReply 的分条计划（长文按句拆成多颗气泡）。
+   */
+  detectGroupEcho({ ev, norm, scene, conv }) {
+    const enabled = this.config.groupEchoEnabled !== false
+    if (!enabled) return { active: false, why: 'disabled' }
+    const repeatSeconds = Number(this.config.groupEchoRepeatWindowSeconds)
+    const result = groupEchoUtil.detectGroupEcho({
+      text: norm?.text,
+      scene,
+      conv,
+      now: this.now(),
+      repeatWindowMs: repeatSeconds > 0 ? repeatSeconds * 1000 : undefined,
+    })
+    if (result.active) {
+      this.groupEchoState.count += 1
+      this.groupEchoState.last = {
+        at: this.now(),
+        key: String(conv?.key || ''),
+        why: result.why,
+        user: String(ev?.user_id || ''),
+      }
+      this.traceReply(String(conv?.key || ''), 'group-echo', { why: result.why })
+    }
+    return result
+  }
+
+  /**
    * 通知类事件入口（2026-10-23，主人 m01231）：目前只有戳一戳。
    * main.js 的 onOneBotEvent 把 notice 事件递到这里；这里包一层 try，
    * 通知处理失败绝不往上抛——不该影响聊天主链路。
@@ -1310,25 +1396,170 @@ export class ChatEngine {
     }
   }
 
+  async onRecall(ev, opts = {}) {
+    const type = String(ev?.notice_type || '')
+    if (type !== 'group_recall' && type !== 'friend_recall') {
+      return { acted: false, reason: 'ignored' }
+    }
+    const now = this.now()
+    const mid = recallUtil.recallMessageId(ev)
+    const key = recallUtil.recallKeyOf(ev)
+    const author = recallUtil.recallAuthorId(ev)
+    const base = { at: now, type, key, mid, author }
+    if (!mid) {
+      this.recallState.last = { ...base, acted: false, reason: 'no-message-id' }
+      this.logger('warn', `撤回事件缺 message_id（${type}），只能忽略`)
+      return { acted: false, reason: 'no-message-id' }
+    }
+    if (author && author === String(this.selfId || '')) {
+      // 撤回的是 Molly 自己发的：历史里记的是 self-<ts>，没有 message_id 可对；
+      // 也不该因为自己撤回就去回一句。
+      this.recallState.last = { ...base, acted: false, reason: 'self-message' }
+      return { acted: false, reason: 'self-message' }
+    }
+
+    recallUtil.pruneRecalled(this.recalled, now)
+    this.recalled.set(mid, now)
+
+    const conv = key ? this.conversations.get(key) : null
+    const removed = conv ? recallUtil.purgeHistory(conv, mid) : 0
+
+    let aborted = false
+    let dropped = 0
+    const job = key ? this.jobs.get(key) : null
+    if (job) {
+      dropped = recallUtil.filterPending(job, mid)
+      if (String(job.triggerMid || '') === mid) {
+        if (job.phase === 'thinking') {
+          try {
+            job.controller?.abort?.()
+          } catch {}
+          aborted = true
+          this.traceReply(String(key), 'aborted', { where: 'recall' })
+        }
+        /*
+         * phase === 'sending' 时不硬停：第一个气泡已经落地，硬停会留下半截话，
+         * 比多回半句更难看。历史/队列照清，下一轮自然以新消息为准。
+         */
+      }
+    }
+
+    /*
+     * 45 秒同文去重（_recentSent）必须清掉。
+     * 场景：她刚回过「我看到了」→ 对方撤回 → 重发同一句 → 她再回，
+     * 若不去重，deliver 会把这条回复当"刚说过"吞掉，体感就是"还是不理我"。
+     */
+    try {
+      this._recentSent?.delete?.(key)
+    } catch {}
+
+    this.recallState.count += 1
+    this.recallState.last = { ...base, acted: true, removed, aborted, dropped }
+    this.traceReply(String(key || ''), 'recall', { removed, aborted, dropped, author })
+    this.logger('debug', `撤回 ${mid}（${key}）：清历史 ${removed} 条、作废排队 ${dropped} 条、中止生成=${aborted}`)
+
+    // 探针/自测默认不真发轻回（opts.whisper=false），免得在别人群里冒一句
+    if (opts?.whisper !== false) {
+      this.scheduleRecallWhisper({ key, ev, type, author, baselineUserAt: conv?.lastUserAt || 0 })
+    }
+    return { acted: true, removed, aborted, dropped }
+  }
+
+  /** 这条消息是不是已经撤回了（10 分钟 TTL 内有效）。 */
+  isRecalled(messageId) {
+    const mid = String(messageId ?? '')
+    if (!mid || !this.recalled) return false
+    const at = this.recalled.get(mid)
+    if (!at) return false
+    if (Date.now() - at > recallUtil.RECALL_TTL_MS) {
+      this.recalled.delete(mid)
+      return false
+    }
+    return true
+  }
+
+  /**
+   * 撤回后的「轻回一句」（用户 m00585 决策：群里也轻回一句，不要死寂）。
+   *
+   * 三条闸门，缺一不可：
+   *   ① 概率（config.recallWhisper.chance，默认 0.45）——不是每次撤回都要说话；
+   *   ② 延迟（默认 20 秒）——给对方重发的机会，别抢在新消息前面；
+   *   ③ 到时候再看一眼：有新消息 / 她正在回别的 → 闭嘴，以新消息为准。
+   * 走 sayQuick（固定台词、不走模型、不进历史），最坏情况是多一句废话。
+   */
+  scheduleRecallWhisper({ key, ev, type, author, baselineUserAt }) {
+    if (this.config?.recallWhisperEnabled === false || this.config?.blindMode || !this.config?.enabled) return
+    const chance = Math.max(0, Math.min(1, Number(this.config?.recallWhisperChance ?? 0.45)))
+    if (chance <= 0) return
+    const delayMs = Math.max(0, Number(this.config?.recallWhisperDelaySeconds ?? 20) * 1000)
+    const timer = setTimeout(() => {
+      try {
+        if (Math.random() > chance) return
+        const conv = key ? this.conversations.get(key) : null
+        // 撤回之后对方又发了新的：以新消息为准，不插嘴
+        if ((conv?.lastUserAt || 0) > baselineUserAt) return
+        // 她正在处理这个会话的别的消息：别打断
+        if (key && this.jobs.get(key)) return
+        // 撤回的那条不是最近说话的人发的（群里别人撤回）：当没看见
+        if (author && conv?.lastUserId && author !== String(conv.lastUserId)) return
+        const target =
+          type === 'group_recall'
+            ? { message_type: 'group', group_id: ev.group_id, user_id: String(ev.user_id || '') }
+            : { message_type: 'private', user_id: String(ev.user_id || '') }
+        const scene = type === 'group_recall' ? SCENE_MENTION : SCENE_PRIVATE
+        this.sayQuick(target, scene, recallUtil.pickWhisperLine())
+      } catch (err) {
+        this.logger('debug', `撤回轻回失败：${err?.message || err}`)
+      }
+    }, delayMs)
+    if (typeof timer?.unref === 'function') timer.unref()
+  }
+
   async onRequest(ev) {
     try {
       const gk = this.gatekeeper
       if (!gk) return
       const flag = ev.request_type === 'group' ? 'group' : 'friend'
-      const target = String(flag === 'group' ? ev.group_id || '' : ev.user_id || '')
-      if (!target) return
-
       const uid = String(ev.user_id || '')
+      let target = String(flag === 'group' ? ev.group_id || '' : uid)
+      if (target === '0') target = ''
+      /*
+       * 好友申请拿不到 QQ 号（2026-10-24 真机，用户 m01309）。
+       *
+       * SnowLuma 的 friend_request 里 user_id 是 resolveUidToUin(uid, 0)：
+       * 陌生人还没加好友，本地 identity 缓存里没有 uid→uin 映射，解析结果就是 0。
+       * 这里以前直接 `if (!target) return` —— 申请既不进待批队列，也不问主人，
+       * 主人只能在 QQ「新朋友」里自己发现，于是有了「两个好友申请没发给我」。
+       *
+       * flag（请求凭据）本身是好的，approveRequest 也只需要 flag，所以用
+       * `friend:<flag>` 当临时 key 照常登记 + 私聊主人，回「1」/「通过 1」照样能批。
+       */
+      const unknownUin = !target
+      if (unknownUin && flag === 'friend' && ev.flag) {
+        target = `friend:${String(ev.flag).slice(0, 64)}`
+      }
+      if (!target) {
+        this.logger(
+          'warn',
+          `收到申请事件但缺目标（${flag}），没法问主人：${JSON.stringify({
+            user_id: ev.user_id,
+            group_id: ev.group_id,
+            flag: ev.flag,
+          }).slice(0, 200)}`,
+        )
+        return
+      }
+
       let name = ''
       try {
-        name = uid ? await this.displayName({ user_id: uid, sender: ev.sender || {} }) : ''
+        name = uid && !unknownUin ? await this.displayName({ user_id: uid, sender: ev.sender || {} }) : ''
       } catch {}
       // displayName() 在拿不到昵称时会兜底返回 QQ 号本身，于是拼出来
       // 就是「999999999（999999999）」这种蠢相（真机 m16524 截图）。
       // 名字等于号、或者整串就是纯数字号码，一律当没名字处理。
       name = String(name || '').trim()
       if (name === uid || /^\d{5,12}$/.test(name)) name = ''
-      const who = name ? `${name}（${uid}）` : `QQ ${uid}`
+      const who = unknownUin ? '（QQ 号暂时拿不到，对方标识：' + String(ev.flag || '?').slice(0, 24) + '）' : name ? `${name}（${uid}）` : `QQ ${uid}`
 
       if (!this.client || (gk.owners || []).length === 0) return
 
@@ -1374,6 +1605,9 @@ export class ChatEngine {
         invitedBy: uid,
         flag: ev.flag || '',
         subType: ev.sub_type || '',
+        // 好友申请但 QQ 号解析不出来（user_id=0）：approve/deny 后不能写进
+        // approved/denied 名单（那把名单是按 QQ 号匹配的，写进去永远对不上）。
+        unknownUin: Boolean(unknownUin),
       })
       gk.save?.()
 
@@ -1552,6 +1786,20 @@ export class ChatEngine {
     // 自己发的话如果被当成用户输入回灌，会导致「自己跟自己聊」的死循环。
     if (!ev || ev.post_type === 'message_sent') return
     if (String(ev.user_id) === String(this.selfId)) return
+
+    /*
+     * 撤回兜底（2026-10-24，主人 m00480 需求②）。
+     *
+     * 正常顺序是「消息 → 撤回」，撤回时把 history 里那条剔掉就行；
+     * 但 SnowLuma 重连补发、或网络抖一下时可能「撤回先到、消息后到」，
+     * 这时如果不挡，她会对着一条已经不存在的消息生成回复。
+     * 这里只做丢弃，不产生任何发送。
+     */
+    if (this.isRecalled(String(ev.message_id ?? ''))) {
+      this.traceReply(this.conversationKey(ev), 'dropped-recalled-inbound')
+      this.logger('debug', `跳过已撤回的入站消息 ${ev.message_id}`)
+      return
+    }
 
     /*
      * 2026-10-22 修：入站去重（同一问题被回答很多遍的根因之一）。
@@ -1761,6 +2009,8 @@ export class ChatEngine {
     })
     conv.lastUserAt = now
     conv.lastUserName = userName
+    // 撤回轻回要用：判断「撤回的那条是不是刚刚说话这个人发的」
+    conv.lastUserId = String(ev.user_id ?? '')
 
     // 抽记忆：同样放在"回不回"判断之前。
     // 用户提到自己叫什么、喜欢什么、答应了什么，哪怕这句她没回，也得记住。
@@ -3119,7 +3369,12 @@ export class ChatEngine {
     }
 
     const controller = new AbortController()
-    const job = { phase: 'thinking', controller, pending: [] }
+    /*
+     * triggerMid：这一轮是被哪条消息触发的（2026-10-24，主人 m00480 需求②）。
+     * 撤回时靠它判断「在途的到底是撤回那条的回复，还是更新的一条」——
+     * 只作废来源被撤回的那个 job，别把别人新消息的回复也一起打断。
+     */
+    const job = { phase: 'thinking', controller, pending: [], triggerMid: String(ev?.message_id ?? '') }
     this.jobs.set(key, job)
     // 耗时起点：从"决定开口"算到最后一个气泡落地（含防抖等待与模型生成）。
     // metrics.onReplied 只认毫秒数，别再传时间戳（2026-10-21 修）。
@@ -3129,6 +3384,14 @@ export class ChatEngine {
     // 不 await——改名片失败不该卡住回复，而且它在冷却内会自己短路。
     const isGroup = ev.message_type === 'group'
     if (isGroup) this.setGroupCardThinking(ev.group_id).catch(() => {})
+
+    /*
+     * 「明确要求在群里发」判定（2026-10-24，主人 m00480 需求①）。
+     *
+     * 必须在 generate 之前算：要把「这次就在群里说」写进 system prompt，
+     * 让模型自己就按「分条、别推私聊」来组织话。judge 只看群聊场景。
+     */
+    const echo = this.detectGroupEcho({ ev, norm, scene, conv })
 
     try {
       this.traceReply(key, 'start', { scene })
@@ -3140,12 +3403,53 @@ export class ChatEngine {
         return
       }
 
-      const reply = await this.generate({ ev, norm, scene, conv, userName, groupName, mood, signal: controller.signal })
+      const reply = await this.generate({
+        ev,
+        norm,
+        scene,
+        conv,
+        userName,
+        groupName,
+        mood,
+        signal: controller.signal,
+        groupEcho: echo,
+      })
       if (controller.signal.aborted) {
         this.traceReply(key, 'aborted', { where: 'generate' })
         if (isGroup) this.restoreGroupCard(ev.group_id).catch(() => {})
         return
       }
+      /*
+       * 生成完成、还没发送时再查一次：来源在这期间被撤回了？
+       * onRecall 到达时会 abort（thinking 阶段），这里兜的是
+       * 「撤回事件比消息事件晚到几毫秒 / abort 信号没赶上」的时序窗口——
+       * 已经想出来的话就不要说出去了，对方撤了就是不想让这句话被回。
+       */
+      if (job.triggerMid && this.isRecalled(job.triggerMid)) {
+        this.traceReply(key, 'dropped-recalled')
+        this.logger('debug', `来源已撤回，丢弃这轮回复（${key} ${job.triggerMid}）`)
+        if (isGroup) this.restoreGroupCard(ev.group_id).catch(() => {})
+        return
+      }
+
+      /*
+       * 明确要求发群里（2026-10-24，主人 m00480 需求①）：长文本按句拆成多颗气泡，
+       * 每颗 ≤ groupEchoMaxBubbleChars、总量 ≤ groupEchoMaxTotalChars；并打标记
+       * reply.groupEcho —— deliver 看到它就不再截断加「（细节…我私聊你）」后缀。
+       * 真代码/日志仍然走原过滤（安全线不跟着放宽）。
+       */
+      if (echo?.active && reply?.parts?.length) {
+        const planned = groupEchoUtil.planEchoBubbles(reply.parts, {
+          maxBubbleChars: this.config.groupEchoMaxBubbleChars,
+          maxTotalChars: this.config.groupEchoMaxTotalChars,
+        })
+        reply.parts = planned.parts
+        reply.groupEcho = echo
+        if (planned.truncated) {
+          this.logger('info', `群里照发：内容超过总量上限已截断（${key} ${planned.parts.length} 颗气泡）`)
+        }
+      }
+
       if (!reply) {
         this.traceReply(key, 'no-reply')
         if (isGroup) this.restoreGroupCard(ev.group_id).catch(() => {})
@@ -3275,7 +3579,7 @@ export class ChatEngine {
   /**
    * 组织上下文并调用模型，拿到切分后的回复计划。
    */
-  async generate({ ev, norm, scene, conv, userName, groupName, mood, signal }) {
+  async generate({ ev, norm, scene, conv, userName, groupName, mood, signal, groupEcho = null }) {
     /*
      * 免费额度用完了没有？这是每轮的第一道判断。
      *
@@ -3375,6 +3679,8 @@ export class ChatEngine {
       conv,
       degraded: budgetOut,
       research: research?.ok ? research.summary : '',
+      // 2026-10-24 需求①：对方明确要求/坚持发群里 → 提示词里就别再教她推私聊
+      groupEcho: Boolean(groupEcho?.active),
     })
     if (stall.hardStop) system += `\n\n${this.stallStopSection(stall.misses)}`
     const messages = await this.buildMessages(conv, norm, userName, { degraded: budgetOut })
@@ -3890,9 +4196,19 @@ export class ChatEngine {
     const self = this
     researcher.research = async function budgetWrappedResearch(...args) {
       self._researchDepth = (self._researchDepth || 0) + 1
+      /*
+       * 查资料期间把「agent 自己发 QQ 消息」这道门关上（2026-10-24 14:17）。
+       *
+       * 干活会话手里也有 qq_onebot，而查资料任务里根本不知道这条问题来自哪个
+       * 群——它照着会话历史里最熟的群号猜，就把答案发到了 1092417231（两条），
+       * 引擎再把结论发回真正的群。qqtools 里看这个计数，命中就拒绝发送。
+       */
+      const client = self.client
+      if (client) client.__qqWhaleSendBlock = (Number(client.__qqWhaleSendBlock) || 0) + 1
       try {
         return await orig(...args)
       } finally {
+        if (client) client.__qqWhaleSendBlock = Math.max(0, (Number(client.__qqWhaleSendBlock) || 1) - 1)
         self._researchDepth = Math.max(0, (self._researchDepth || 0) - 1)
       }
     }
@@ -4224,13 +4540,24 @@ export class ChatEngine {
          */
         if (isGroup) {
           const filtered = sanitizeGroupText(text, this.switches.contentFilterCfg())
+          /*
+           * 群发豁免（2026-10-24，主人 m00480 需求①）：对方明确要求/第二次坚持
+           * 「就在群里发」时，长文已经在 scheduleReply 里按句拆成多颗气泡了，
+           * 这里再按 180 字截断 + 加「细节私聊你」后缀就等于白拆——所以只放行
+           * 「因为太长」这一类；真代码/日志（looksLikeCodeOrLog）仍然走原过滤。
+           */
+          const echoRelax = Boolean(reply?.groupEcho) && !looksLikeCodeOrLog(text)
           if (filtered.changed) {
-            this.traceReply(String(conv.key || ''), filtered.dropped ? 'dropped-content' : 'shrunk-content', { reason: filtered.reason })
+            this.traceReply(
+              String(conv.key || ''),
+              echoRelax ? 'echo-kept' : filtered.dropped ? 'dropped-content' : 'shrunk-content',
+              { reason: filtered.reason },
+            )
             if (filtered.dropped) {
               this.logger('info', '群聊内容过滤：整条丢弃（日志/代码味太重）')
               continue
             }
-            text = filtered.text
+            if (!echoRelax) text = filtered.text
           }
         }
         /*

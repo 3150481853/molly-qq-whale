@@ -104,6 +104,26 @@ const CODE_LOG_PATTERNS = [
 ]
 
 /**
+ * 命中代码/日志特征的行数。
+ *
+ * 2026-10-24 抽出来：群发豁免（lib/group-echo.js）放行「明确要求发群里」的长文时，
+ * 长度可以放宽，但**真代码/日志仍然不该贴到群里**——那条安全线不能跟着放宽。
+ */
+export function countCodeLogLines(text) {
+  const lines = String(text || '').split(/\r?\n/)
+  let hits = 0
+  for (const line of lines) {
+    if (CODE_LOG_PATTERNS.some((re) => re.test(line))) hits++
+  }
+  return hits
+}
+
+/** 这段文本是不是「代码/日志味」重到不该发群（默认 ≥2 行特征）。 */
+export function looksLikeCodeOrLog(text, minHits = 2) {
+  return countCodeLogLines(text) >= minHits
+}
+
+/**
  * 群聊内容过滤（用户 m03846：群里别发代码/日志长文）。
  *
  * @param {string} text 模型生成的一条文本
@@ -117,11 +137,7 @@ export function sanitizeGroupText(text, cfg = {}) {
   const mode = cfg.mode === 'drop' ? 'drop' : 'shorten'
   if (!enabled || !raw) return { text: raw, changed: false, dropped: false, reason: '' }
 
-  const lines = raw.split(/\r?\n/)
-  let hits = 0
-  for (const line of lines) {
-    if (CODE_LOG_PATTERNS.some((re) => re.test(line))) hits++
-  }
+  const hits = countCodeLogLines(raw)
   const tooLong = raw.length > maxChars
   if (hits < 2 && !tooLong) return { text: raw, changed: false, dropped: false, reason: '' }
 

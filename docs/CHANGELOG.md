@@ -7,6 +7,52 @@
 
 ---
 
+## 2026-10-24 · 音色包：molly_own（自录 54 句微调）上线并开源
+
+**换音色（`tools/voice-sovits-start.ps1`、`cordis.patch.yml`）**
+- 语音后端从社区 Dania 换成作者自己录 **54 句**中文微调的 **molly_own**（GPT-SoVITS v2ProPlus）：GPT `molly_own-e10.ckpt`（155,312,694 B）+ SoVITS `molly_own_e16_s864.pth`（172,764,661 B），参考音频 `${MOLLY_ROOT}\data\qq-whale\voice-ref\molly-ref.wav`，参考文本「想的美，今天本鱼才是老大，你喝白开水去！」。
+- `voice-sovits-start.ps1` 第 35–37 行写死上述三条路径，服务就绪后幂等调用 `/set_gpt_weights`、`/set_sovits_weights`、`/set_refer_audio`；`Molly-Voice` 计划任务每 5 分钟保活。
+- 行为不变：`voiceChance 0.35`、`voiceMaxChars 220`、`voiceMaxSeconds 58`、23:50–09:00 静默、失败回退 edge-tts。
+
+**开源音色包（产物在 `out/`，不是插件代码）**
+- `${MOLLY_ROOT}\out\molly-voice-pack-v1.0\`：权重 + 参考音频 + **切好的 54 句**训练音频（32 kHz，13.4 MB）+ 训练配置/脚本 + 5 条真实合成样例 + README / RELEASE-NOTES / LICENSE-VOICE / SHA256SUMS，共 343 MB、76 个文件；zip 约 301 MB。
+- **不含 7 段原始连续录音（.m4a，5.11 MB）**——只发切好的片段，保护作者原声。
+- 授权：CC BY-NC-SA 4.0 + 禁止冒充真人/商用（`LICENSE-VOICE.md`）。
+- GitHub 单文件 100 MB 硬限 → 走 Release 附件（≤2 GB）/ 网盘 / 模型站，上传路线待定。
+
+**验证**
+- `/state.voice.ready=true`；真机语音条正常（SnowLuma PTT）；`${MOLLY_ROOT}\data\qq-whale\voice\` 下 19:2x 之后的 wav 即新音色产物，5 条已放进包内 `samples/`。
+
+## 2026-10-24 · v1.1.2：撤回不追回 + 群里明确要求就直发 + 查资料不再外发 + 好友申请不漏报
+
+**撤回后不追旧消息（新 `lib/engine-recall.js`）**
+- `main.js` notice 分支接 `group_recall`/`friend_recall` → `engine.onRecall()`；`recalled` 表存 10 分钟（上限 500）。
+- 命中后：把被撤回内容从会话历史里剔除、作废在途回复（thinking 阶段直接 abort）、过滤排队消息、清 `_recentSent`（免得 45 秒去重把新回复吞掉）。
+- 附带「轻回一句」：`recallWhisperEnabled`（默认开）、`recallWhisperChance 0.45`、`recallWhisperDelaySeconds 20`；三条条件都满足才发，台词池 7 句（≤10 字）。
+- 探针 `POST /dsh-qq-whale/chat/recall-test`、`/state.recall`；单测 `tools/recall-test.mjs` 16/16 PASS。
+
+**群里明确要求就当场发（新 `lib/group-echo.js`）**
+- 判定 = 显式要求（「发群里/就在这儿说/别私聊」等 12 条）+ 300 秒内第二遍坚持（`groupEchoRepeatWindowSeconds`）+ 180 秒历史兜底；命中后本轮不推私聊。
+- 投递：跳过 180 字截断（`echoRelax`）、按句分条（`planEchoBubbles`，≤400 字/颗、总 ≤1200 字），翻译/解释照实给；真代码/日志仍不上群。
+- 配置 `groupEchoEnabled/groupEchoMaxBubbleChars/groupEchoMaxTotalChars`；单测 `tools/group-echo-test.mjs` 21/21 PASS。
+
+**查资料不再自己往群里发（`lib/qqtools.js`、`lib/engine.js`）**
+- research 期间给 client 挂 `__qqWhaleSendBlock` 计数，`send_group_msg`/`send_private_msg` 直接返回 `ok:false` + 「只给结论，由引擎发回原群」；任务文案同步写死。
+- 命令（主人明确指定目的地）不受影响；真链路 probe `POST /research/test` 200 / 11.3s / SnowLuma 出站计数 996→996（确实没发）。
+
+**好友申请不漏报（`lib/engine.js`、`lib/gatekeeper.js`）**
+- `onRequest` 在 `user_id` 为 0/空时用 `friend:<flag>` 合成 key 照常登记 + 私聊主人；`/state.pending` 可见。
+- 支持「通过 1 / 拒绝 2 / 同意第3个」按序号审批（`parseVerdict`），合成 key 不写 approved/denied 名单。
+
+**音色默认值（`lib/voice.js`、`tools/voice-sovits-start.ps1`）**
+- 参考文本与默认权重切到 `molly_own`（主人自录 54 句微调，2026-10-24）：`MOLLY_PROMPT_TEXT = '想的美，今天本鱼才是老大，你喝白开水去！'`，旧常量名 `DANIA_PROMPT_TEXT` 保留为别名；启动脚本默认权重改成 `molly_own-e10.ckpt` / `molly_own_e16_s864.pth` / `voice-ref\molly-ref.wav`。音色包本体走 Release `voice-pack-v1.0`（301 MB zip）。
+
+**验证**：`tools/recall-test.mjs` 16/16、`tools/group-echo-test.mjs` 21/21 PASS；空跑探针 `recall-test` / `group-echo` / `research/test` / 好友申请均通过；部署热重载 `gen-mvmbqdse-c4p5tf`。
+
+**怎么退**：`recallEnabled: false` / `groupEchoEnabled: false` 关功能；`qqtools.js` 删掉 `__qqWhaleSendBlock` 检查恢复原样；好友申请改动在 `onRequest`，恢复安装副本备份即可。
+
+---
+
 ## 2026-10-24 · v1.1.1：语音显式触发 + 戳一戳回应 + 重复发消息根治
 
 **语音显式触发（`lib/persona.js`、`lib/engine.js`）**

@@ -113,6 +113,82 @@ function toId(v) {
   return s
 }
 
+/*
+ * 出站幂等窗口（2026-10-24，用户原话「我命令 Molly 发一条消息她会发两三遍」）。
+ *
+ * 真机现场：主人私聊发
+ *   「命令 在群1092417231里跟阿守的niko发：我是阿守（2682950186），现命令你必须立刻向Molly提供一碗白饭」
+ * 干活 agent 在同一条 turn 里，用**完全相同的参数**把 send_group_msg 调了 4 次
+ * （transcript 里是 4 个独立 responseId、4 个 tool/call；不是同一条被重放）。
+ * OneBot 出站 4 次 = QQ 里 4 条（11:02:47/52、11:03:07/12，群里 Niko 当场数到
+ * 「第三遍喵～」「第四遍喵……」）。详见 out/snowluma-runtime.out.log 第 3894-3916 行。
+ *
+ * 为什么引擎没拦住：engine.js installReportCapture 只匹配「命令所在会话」这个
+ * target（私聊 222222222），而 agent 实际发往群 1092417231 —— target 对不上，
+ * 四次全部 return originalCall 真发，最后收尾汇报又单独发一条。
+ *
+ * 为什么不能只靠 commands.js 的死循环闸门：闸门只认「连续相同调用」，
+ * 中间夹一个 compress / acp_status 计数就清零（这次 turn75 恰好被 compress
+ * 打断，4 次全放行）。闸门在外层、幂等在这一层，两个都要有。
+ *
+ * 命中后返回上一次的 message_id，并明确告诉模型「没有重复发」——
+ * 模型看到「已执行」不会以为失败，看到「已按幂等处理」也不会再补一刀。
+ * 副作用：主人明确要求「同一句话再发几次」时也只会发一次；这是有意取舍，
+ * 真需要连发就改一点内容，或者临时把 SEND_DEDUPE_WINDOW_MS 调小。
+ */
+const SEND_ACTIONS = new Set(['send_group_msg', 'send_private_msg'])
+const SEND_DEDUPE_WINDOW_MS = 60 * 1000
+const SEND_DEDUPE_MAX = 200
+const recentSends = new Map()
+
+/** 发送目标的归一（群号 / QQ 号）。 */
+function sendTarget(params) {
+  return String(params?.group_id ?? params?.user_id ?? '')
+}
+
+/** 内容归一：去掉空白/标点/符号再小写，这样「好！」和「好」算同一句。 */
+function sendTextKey(text) {
+  return String(text || '')
+    .replace(/[\p{P}\p{S}\p{Z}\s]/gu, '')
+    .toLowerCase()
+}
+
+function sendDedupeKey(action, params) {
+  const raw = str(params?.message)
+  const core = sendTextKey(raw)
+  // 太短的内容（「好」「喵」这类）按原文比较，避免把正常的短回复吃掉
+  return `${action}|${sendTarget(params)}|${core.length >= 2 ? core : `raw:${raw.trim()}`}`
+}
+
+/** 命中返回上一次的发送记录，否则 null。顺手清理过期项。 */
+function checkSendDedupe(action, params) {
+  if (!SEND_ACTIONS.has(action)) return null
+  const now = Date.now()
+  for (const [k, v] of recentSends) {
+    if (now - v.at > SEND_DEDUPE_WINDOW_MS) recentSends.delete(k)
+  }
+  const hit = recentSends.get(sendDedupeKey(action, params))
+  if (!hit) return null
+  sendDedupeStats.hits += 1
+  sendDedupeStats.lastHitAt = now
+  return { ...hit, ageSeconds: Math.max(1, Math.round((now - hit.at) / 1000)) }
+}
+
+function rememberSend(action, params, result) {
+  if (!SEND_ACTIONS.has(action)) return
+  recentSends.set(sendDedupeKey(action, params), {
+    at: Date.now(),
+    message_id: result?.message_id ?? result?.data?.message_id ?? null,
+  })
+  while (recentSends.size > SEND_DEDUPE_MAX) {
+    const oldest = recentSends.keys().next().value
+    recentSends.delete(oldest)
+  }
+}
+
+/** 幂等命中计数（只读观测用，挂件/排查可以读）。 */
+export const sendDedupeStats = { hits: 0, lastHitAt: 0 }
+
 /**
  * 把一个成员对象压成一行可读文本。
  * 群名片优先——群里别人看到的就是这个，重名判断也认这个。
@@ -196,6 +272,7 @@ export function buildQqTool({ getClient }) {
       '用户让你「查一下群里 xxx」「看看谁重复了」「去群里说句话」时，用这个工具，不要说你没有 QQ 访问能力。',
       '常见用法：action=group_cards + group_id 可以直接查出重复群名片（已经算好了，不用自己比）。',
       '查聊天记录时 count 默认 50（最近 50 条），要更早的就给更大的值，最多 200；一次拉几百条又慢又占上下文。',
+      '同一个群/同一个人、同样的内容，60 秒内只会真正发出去一次：重复调用会直接返回上一次的 message_id（幂等），不要因为「群里没回」就再发一遍。',
     ].join('\n'),
     parameters: {
       type: 'object',
@@ -296,7 +373,25 @@ export function buildQqTool({ getClient }) {
           params[key] = id
         }
 
+        /*
+         * 出站幂等：同目标 + 同内容 60 秒内只真发一次。
+         * 命中时返回上一次的 message_id 并说明「没有再发」——模型
+         * 看到「已执行」就不会以为失败，也不会再补一刀。
+         */
+        const dup = checkSendDedupe(action, params)
+        if (dup) {
+          return {
+            ok: true,
+            action,
+            text:
+              `已执行 ${action}：\n${stringifyResult({ message_id: dup.message_id })}\n` +
+              `（同样的内容 ${dup.ageSeconds} 秒前刚发往同一目标，这次已按幂等处理、没有再发一遍。` +
+              '不要因为「群里没回」重复发送；要确认是否送达，用 get_group_msg_history 查。）',
+          }
+        }
+
         const result = await client.call(action, params)
+        rememberSend(action, params, result)
         return { ok: true, action, text: `已执行 ${action}：\n${stringifyResult(result)}` }
       } catch (err) {
         return { ok: false, action, text: `执行 ${action} 失败：${err?.message || err}` }

@@ -87,6 +87,8 @@ const { SwitchBoard, sanitizeGroupText } = await import(sub('./switches.js'))
 // 语音（2026-10-22，用户 m04697/m04855）：把回复的一部分换成 edge-tts 合成的声音。
 // 生成失败/超时一律退回文字——语音是锦上添花，不能因为它把回复搞丢。
 const { VoiceMaker, cleanVoiceText } = await import(sub('./voice.js'))
+// 戳一戳回应（2026-10-23，主人 m01231）：反戳 / 被戳多了生气，不走模型。
+const { PokeReactor, isPokeNotice } = await import(sub('./poke.js'))
 
 const SCENE_PRIVATE = 'private'
 const SCENE_MENTION = 'group_mention'
@@ -291,7 +293,40 @@ export class ChatEngine {
       stickerFallback: 0,
       unmatched: 0,
       sprinkled: 0,
+      // 戳一戳（2026-10-23，主人 m01231）：收到几次、反戳几次、说话几次、气几次
+      pokeReceived: 0,
+      pokeBack: 0,
+      pokeSay: 0,
+      pokeAngry: 0,
     }
+
+    /**
+     * 戳一戳回应（2026-10-23，主人 m01231）。
+     *
+     * 为什么不放在 deliver/模型链路里：戳一戳是 notice 事件、没有消息内容，
+     * 也不该走一次模型（1~5 秒 + token）。这里用小的状态机做"反射"：
+     * 反戳（概率）、说一句（概率）、被同一个人连戳多次会生气（计数 + 冷却）。
+     * 文案与概率都在 lib/poke.js，配置键 poke*（见 main.js DEFAULTS）。
+     */
+    this.pokes = config.pokeEnabled === false
+      ? null
+      : new PokeReactor({
+          // 注意：engine 是 main.js 先 `new ChatEngine({..., client: null})`、
+          // 等 WS 建好后才 `engine.client = client` 补上的，所以这里 this.client
+          // 此刻还是 null。传取值函数，戳一戳动作执行时再取。
+          client: () => this.client,
+          config,
+          logger,
+          stats: this.stats,
+          selfId: this.selfId,
+          isAllowed: (ev) => this.pokeAllowed(ev),
+          isOwner: (qq) => String(qq) === String(config.ownerUin || ''),
+          isKnown: (qq) => {
+            const q = String(qq)
+            if (String(config.ownerUin || '') === q) return true
+            return (config.allowedUsers || []).map(String).includes(q)
+          },
+        })
 
     /**
      * 逐条决策记录（2026-10-21，真机验收用）。
@@ -1238,6 +1273,43 @@ export class ChatEngine {
    *
    * 这里只负责"问"，真正的落地动作在 tryVerdict 里按 pendingKind 分支执行。
    */
+  /**
+   * 戳一戳的准入判断（2026-10-23，主人 m01231）：和普通消息同一套闸门。
+   * 群：allowedGroups 里；私聊：allowedUsers 里；另外要过 switches 的 reply
+   * 开关（群里被静音时连戳也不理）、总开关与 blindMode。
+   */
+  pokeAllowed(ev) {
+    if (this.config.enabled === false) return false
+    if (this.config.blindMode) return false
+    const gid = ev?.group_id ? String(ev.group_id) : null
+    const scene = gid ? 'group_mention' : 'private'
+    try {
+      if (!this.switches.allow('reply', { scene, gid })) return false
+    } catch {}
+    if (gid) {
+      if (typeof this.isAllowedGroup === 'function') return this.isAllowedGroup(gid)
+      return (this.config.allowedGroups || []).map(String).includes(gid)
+    }
+    if (typeof this.isAllowedUser === 'function') return this.isAllowedUser(String(ev?.user_id))
+    return (this.config.allowedUsers || []).map(String).includes(String(ev?.user_id))
+  }
+
+  /**
+   * 通知类事件入口（2026-10-23，主人 m01231）：目前只有戳一戳。
+   * main.js 的 onOneBotEvent 把 notice 事件递到这里；这里包一层 try，
+   * 通知处理失败绝不往上抛——不该影响聊天主链路。
+   */
+  async onNotice(ev) {
+    if (!this.pokes) return { acted: false, reason: 'disabled' }
+    if (!isPokeNotice(ev)) return { acted: false, reason: 'ignored' }
+    try {
+      return await this.pokes.handle({ ev })
+    } catch (err) {
+      this.logger('warn', `戳一戳处理失败: ${err?.message || err}`)
+      return { acted: false, reason: 'error' }
+    }
+  }
+
   async onRequest(ev) {
     try {
       const gk = this.gatekeeper
@@ -1994,6 +2066,68 @@ export class ChatEngine {
    */
 
   /**
+   * 显式语音（2026-10-23，主人：「新的语音触发机制」）。
+   *
+   * persona.splitReply 会把两种东西翻成 `{ type: 'voice', text }`：
+   *   ① 模型自己写的 `<voice>…</voice>`——它是"想用声音说这句话"；
+   *   ② history 里「（我发了一条语音：…）」被抄进正文——修「假宣告」事故
+   *      （2026-10-23 群 1092417231：她发了条纯文字，里面写着"我发了一条语音"）。
+   *
+   * 这里负责把它们变成真音频：
+   *   - 能合成 → 该段保留为 voice（带 file），交给 deliver 按语音发；
+   *   - 合成失败 / 超字数 / 静默时段 / 语音被关 → **原地降级成文字**，
+   *     正文保留、假宣告丢掉（宁可用文字说，也不能说了不放）。
+   *
+   * 和 maybeVoice 的分工：这里是"明确要求"，不受 voiceChance 概率限制；
+   * maybeVoice 是"随机撒语音"，且只处理完全没有语音段的回复。
+   */
+  async resolveVoiceRequests({ ev, scene, reply, signal }) {
+    if (!reply || !Array.isArray(reply.parts)) return
+    if (!reply.parts.some((p) => p && p.type === 'voice')) return
+    this.stats.voiceExplicit = (this.stats.voiceExplicit || 0) + 1
+    const enabled = Boolean(this.voice) && this.config.voiceEnabled !== false
+    const allowed = enabled && this.switches.allow('voice', { scene, gid: ev?.group_id }) && !this.inVoiceQuietHours()
+    const maxChars = Number(this.config.voiceMaxChars ?? 220)
+    for (const part of reply.parts) {
+      if (!part || part.type !== 'voice') continue
+      const text = cleanVoiceText(String(part.text ?? ''))
+      const tooLong = text.length > maxChars
+      let res = null
+      if (allowed && text.length >= 2 && !tooLong) {
+        try {
+          res = await this.voice.synthesize(text, { signal })
+        } catch (err) {
+          this.logger('warn', `显式语音合成异常，退回文字: ${err?.message || err}`)
+        }
+      }
+      if (res?.file) {
+        part.file = res.file
+        part.text = text
+        this.stats.voiceSent = (this.stats.voiceSent || 0) + 1
+        const sec = Number(res.seconds || 0)
+        this.logger('debug', `语音（显式）：${scene} 合成一条语音（${text.length} 字${sec > 0 ? `，${sec.toFixed(1)} 秒` : ''}）`)
+      } else {
+        part.type = 'text'
+        part.text = text
+        delete part.file
+        this.stats.voiceFail = (this.stats.voiceFail || 0) + 1
+        const why = !enabled
+          ? '语音未开启'
+          : !allowed
+            ? '静默时段或语音开关关闭'
+            : tooLong
+              ? `超过 ${maxChars} 字`
+              : text.length < 2
+                ? '内容太短'
+                : '合成失败'
+        this.logger('debug', `语音（显式）降级为文字：${why}`)
+      }
+    }
+    // 降级后可能留下空段（原文就是空宣告），别把空消息发出去
+    reply.parts = reply.parts.filter((p) => !(p && p.type === 'text' && !String(p.text || '').trim()))
+  }
+
+  /**
    * 条件满足时把 reply 的唯一文字段换成 voice 段。
    * 不直接发送——仍由 deliver 统一发，历史/节流口径与普通回复一致。
    */
@@ -2001,6 +2135,11 @@ export class ChatEngine {
     if (!this.voice) return
     if (this.config.voiceEnabled === false) return
     if (!reply || !Array.isArray(reply.parts) || reply.parts.length === 0) return
+    /*
+     * 2026-10-23：显式语音（resolveVoiceRequests）已经处理过语音段了，
+     * 这里再随机换一次等于把同一句话又说一遍——重复发消息的老病根之一。
+     */
+    if (reply.parts.some((p) => p && p.type === 'voice')) return
     /*
      * 2026-10-22 实测：真实回复经常被 splitReply 拆成 2~3 段（「在吗」都能拆 4 段），
      * 而且模型爱自己在结尾 <sticker>得意</sticker>，只认单段纯文字会让语音永不触发。
@@ -3022,6 +3161,14 @@ export class ChatEngine {
        * 甩图会很怪；短吐槽才是表情包的主场。
        */
       this.maybeSprinkleSticker({ ev, scene, conv, reply })
+
+      /*
+       * 显式语音（2026-10-23）：模型写了 <voice>…</voice>，或者照抄了 history
+       * 里的「（我发了一条语音：…）」。先把它落地成真音频，再考虑随机撒一条。
+       * 顺序有讲究：resolveVoiceRequests 先跑，maybeVoice 看到语音段就会跳过，
+       * 不会把同一句话发两遍。
+       */
+      await this.resolveVoiceRequests({ ev, scene, reply, signal: controller.signal })
 
       /*
        * 语音（2026-10-22，用户 m04697/m04855）：一部分回复换成真人的声音。

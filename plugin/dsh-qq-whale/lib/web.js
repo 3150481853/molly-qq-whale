@@ -325,6 +325,31 @@ export class WebWidget {
       if (s) out.stats = { ...s }
     } catch {}
     /*
+     * 戳一戳（2026-10-23，主人 m01231）：/state 回读配置 + 计数。
+     * 这类"新增能力的参数"以前改完没地方核，只能翻日志猜生效没有——
+     * 回读字段就是为了让验收有据可查。
+     */
+    try {
+      if (e) {
+        out.poke = {
+          enabled: e.config?.pokeEnabled !== false,
+          backChance: Number(e.config?.pokeBackChance ?? 0.7),
+          sayChance: Number(e.config?.pokeSayChance ?? 0.45),
+          angryAfter: Number(e.config?.pokeAngryAfter ?? 4),
+          received: e.stats?.pokeReceived || 0,
+          back: e.stats?.pokeBack || 0,
+          say: e.stats?.pokeSay || 0,
+          angry: e.stats?.pokeAngry || 0,
+          // 诊断（2026-10-23）：主人问「为什么我戳她没反应」时，
+          // 光看计数分不清"没收到/收到但判定不回应/发了但失败"。
+          // last 是最近一次判定的完整结果（含 reason 与原始 event 字段），
+          // recent 是最近 6 条，够定位了。
+          last: e.pokes?.last || null,
+          recent: Array.isArray(e.pokes?.recent) ? e.pokes.recent.slice(-6) : [],
+        }
+      }
+    } catch {}
+    /*
      * 逐条决策日志 + 最近一轮回复的耗时/降级（2026-10-21，真机验收用）。
      *
      * 用户报「还是@她了才回一句」时，从 QQ 外面只能看到"回/没回"。
@@ -1517,6 +1542,74 @@ export class WebWidget {
           running: Boolean(ex.running),
           error,
         })
+      }),
+    })
+
+    /*
+     * POST /dsh-qq-whale/poke/test（2026-10-23，验收用）—— 伪造一条戳一戳通知喂给引擎。
+     *
+     * 主人问「我戳她为什么没反应」时，从 QQ 外面只能看到"回/没回"，分不清是
+     * ①事件没进来 ②进来了但判定不回应（概率/冷却/白名单）③动作发了但失败。
+     * 这条路由把 engine.onNotice 的完整链路跑一遍，结果同时留在 /state.poke.last。
+     *
+     * body: {groupId?, userId?, targetId?, dryRun?}
+     *   - dryRun 默认 true：只算不动作，返回 plan 结果（纯本地，不会打扰任何人）
+     *   - dryRun=false：真的反戳/说一句（会发到对应群或私聊，等于自己戳自己一次）
+     * 只监听 127.0.0.1，不算对外接口。
+     */
+    add({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/poke/test`,
+      ...wrap(async (req, res) => {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          return
+        }
+        const raw = await readBody(req)
+        let body
+        try {
+          body = JSON.parse(raw || '{}')
+        } catch {
+          sendJson(res, 400, { ok: false, error: 'bad json' })
+          return
+        }
+        const e = this.engineRef()
+        if (!e?.pokes) {
+          sendJson(res, 503, { ok: false, error: '戳一戳模块没就绪（pokeEnabled=false？）' })
+          return
+        }
+        const selfId = String(e.selfId || e.config?.selfId || '')
+        const groupId = body?.groupId ? String(body.groupId) : ''
+        const userId = String(body?.userId || e.config?.ownerUin || '')
+        const targetId = body?.targetId ? String(body.targetId) : selfId
+        const ev = {
+          post_type: 'notice',
+          notice_type: String(body?.noticeType || 'notify'),
+          sub_type: String(body?.subType || 'poke'),
+          time: Math.floor(Date.now() / 1000),
+          self_id: selfId,
+          user_id: userId,
+        }
+        if (targetId) ev.target_id = targetId
+        if (groupId) ev.group_id = groupId
+        const dryRun = body?.dryRun !== false
+        if (dryRun) {
+          let plan
+          try {
+            plan = e.pokes.plan({
+              scene: groupId ? 'group_mention' : 'private',
+              gid: groupId,
+              uid: userId,
+            })
+          } catch (err) {
+            sendJson(res, 200, { ok: false, dryRun: true, ev, error: String(err?.stack || err?.message || err) })
+            return
+          }
+          sendJson(res, 200, { ok: true, dryRun: true, ev, plan, config: e.config?.pokeEnabled !== false })
+          return
+        }
+        const result = await e.onNotice(ev)
+        sendJson(res, 200, { ok: true, dryRun: false, ev, result, last: e.pokes?.last || null })
       }),
     })
 

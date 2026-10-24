@@ -149,6 +149,24 @@ export class PersonaStore {
     lines.push('  - 你懒得打长句子的时候')
     lines.push('但如果对方问了正经问题、要你给答案，那就好好说话，别拿图糊弄。')
     lines.push('不要写旁白、不要写（叹气）这种括号动作，除非你真有话想说。')
+    /*
+     * 语音显式触发（2026-10-23，主人：「新的语音触发机制」）。
+     *
+     * 背景：原来只有 voiceChance 随机概率——对方说「发个语音」她也只能打字。
+     * 现在给她显式手段：把一句话包进 <voice>…</voice>，出口会合成 Dania 的
+     * 声音真发出去（上限 220 字 / 58 秒；合成失败会自动退回文字，不会丢内容）。
+     *
+     * 为什么写"触发场景"而不是"多语音"：模型对"多"没有感觉，对"什么时候"有感觉
+     * ——这条经验是从上一轮表情包提示词里学来的（见上面那段注释）。
+     */
+    lines.push('想用声音说话的时候，把那句话包在 <voice>…</voice> 里，出口会合成你的声音发出去，对方听到的就是你在说话。')
+    lines.push('**这些情况用语音**（别犹豫）：')
+    lines.push('  - 对方明确要：\"发个语音\"\"用语音说\"\"说句话听听\"\"让我听听你声音\"')
+    lines.push('  - 撒娇、凶他、道谢、道歉、想他了——语气比字面重要的时候')
+    lines.push('  - 晚安、早安、一句就够的短句，或者情绪很满但不想解释理由')
+    lines.push('  - 他让你念一段（歌词、顺口溜、他发来的句子）')
+    lines.push('**不该用语音**：长回答、要讲道理/查东西/列清单、带数字链接代码的、只是想抖机灵。')
+    lines.push('一次最多一条 <voice>，两三句话就行（超过 220 字会自动退回文字）。别用文字宣告\"我发了条语音\"，也别解释\"我发不了语音\"。')
     lines.push('')
     // 这段是防「工具幻觉」的护栏。聊天走的是裸 chat completions，
     // 没有工具通道；但模型见过太多带工具的环境，被问「查一下天气」时
@@ -167,7 +185,7 @@ export class PersonaStore {
     lines.push('**但别人发给你的图片你是能看见的**——那是聊天内容，不是工具。')
     lines.push('看到图就照实说你看见了什么，别推说"加载不出来"。真没收到图才说没收到。')
     lines.push('绝对不要输出工具调用、函数调用、<|...|> 标记、<invoke>/<tool>/<parameter> 之类的格式。')
-    lines.push('你只允许写这三种标记：<sticker>关键词</sticker> 发表情包、<sep/> 分条、<at>QQ号</at> 指定回谁。别的尖括号一律不许出现。')
+    lines.push('你只允许写这四种标记：<sticker>关键词</sticker> 发表情包、<voice>一句话</voice> 发语音、<sep/> 分条、<at>QQ号</at> 指定回谁。别的尖括号一律不许出现。')
     lines.push('你打出来的每一个字都会原样出现在聊天窗口里，所以只打中文和表情。')
     // 反「讲自己的实现」（P6，2026-10-19 用户截图）：
     // 有人问「这句翻译的什么原理」，她答「没原理，就是我自己翻的……要拆的话大概是
@@ -268,7 +286,7 @@ export class PersonaStore {
     // 剩下的"无主的"内部编号（前面是空白/开头，后面是空白或标点）
     rest = rest.replace(/(^|\s)m\d{5}(?=\s|$|[，。！？、,.!?])/g, '$1')
     // 其它没被 splitReply 认识的尖括号标签（保留换行用的 <br>）
-    rest = rest.replace(/<\/?(?!br\b|sticker\b|sep\b)[a-zA-Z][^>]{0,80}>/gi, ' ')
+    rest = rest.replace(/<\/?(?!br\b|sticker\b|sep\b|voice\b)[a-zA-Z][^>]{0,80}>/gi, ' ')
 
     /*
      * 兜住她「照着自己历史说话」的两种痕迹。
@@ -298,20 +316,34 @@ export class PersonaStore {
     // 兜底：还漏出没带关键词的空标记就丢掉
     rest = rest.replace(/\[\s*(?:表情包|发表情包|图片|发图)\s*[:：]?\s*\]/g, ' ')
     rest = rest.replace(/[（(]\s*我发了(?:一张|张)?\s*(?:表情包|图|图片)\s*[:：]?\s*[）)]/g, ' ')
-    // 先抠出 <sticker>...</sticker>
-    const stickerRe = /<sticker>\s*([^<]*?)\s*<\/sticker>/g
+    /*
+     * 同一类事故的第三副面孔（2026-10-23 群 1092417231 真机，主人 m01259 截图）：
+     * history 里语音记的是「（我发了一条语音：它笑得那么欠揍，跟我熟嘛）」，
+     * 模型把这行原样当正文抄出来——群里冒出一条纯文字，还带着假宣告。
+     *
+     * 处理方式跟前两条一致：**认下来**，翻译成 <voice>…</voice> 去合成真语音；
+     * 合成不了（开关关了/静默时段/超长）由 engine.resolveVoiceRequests 原地降级
+     * 成文字，至少不会再出现"我发了条语音"却不发语音的假话。
+     */
+    rest = rest.replace(/[（(]\s*我发了(?:一条|一段|一句|条|段|句)?\s*(?:语音|声音|录音)\s*[:：]\s*([^）)\n]+?)\s*[）)]/g, '<voice>$1</voice>')
+    rest = rest.replace(/\[\s*(?:语音|发语音)\s*[:：]\s*([^\]\n]+)\]/g, '<voice>$1</voice>')
+    // 兜底：空宣告直接丢掉
+    rest = rest.replace(/[（(]\s*我发了(?:一条|一段|一句|条|段|句)?\s*(?:语音|声音|录音)\s*[:：]?\s*[）)]/g, ' ')
+    rest = rest.replace(/\[\s*(?:语音|发语音)\s*[:：]?\s*\]/g, ' ')
+    // 先抠出 <sticker>...</sticker> 和 <voice>...</voice>（2026-10-23 新增语音）
+    const tagRe = /<(sticker|voice)>\s*([^<]*?)\s*<\/\1>/g
     const chunks = []
     let last = 0
     let m
-    while ((m = stickerRe.exec(rest)) !== null) {
+    while ((m = tagRe.exec(rest)) !== null) {
       if (m.index > last) chunks.push({ type: 'text', text: rest.slice(last, m.index) })
-      chunks.push({ type: 'sticker', query: m[1] })
+      chunks.push(m[1] === 'sticker' ? { type: 'sticker', query: m[2] } : { type: 'voice', text: m[2] })
       last = m.index + m[0].length
     }
     if (last < rest.length) chunks.push({ type: 'text', text: rest.slice(last) })
 
     for (const c of chunks) {
-      if (c.type === 'sticker') {
+      if (c.type === 'sticker' || c.type === 'voice') {
         parts.push(c)
         continue
       }
@@ -331,8 +363,17 @@ export class PersonaStore {
     // 一模一样的图连发两次，非常傻。这里按"点单关键词"和"标签"双重去重：
     // 只保留第一张，后面重复的丢掉。
     const seen = new Set()
+    const seenVoice = new Set()
     const deduped = []
     for (const p of parts) {
+      if (p.type === 'voice') {
+        // 语音也去重：模型可能连写两条一样的 <voice>，发两条一模一样的语音很蠢。
+        const key = String(p.text || '').replace(/\s+/g, ' ').trim().toLowerCase()
+        if (!key || seenVoice.has(key)) continue
+        seenVoice.add(key)
+        deduped.push(p)
+        continue
+      }
       if (p.type !== 'sticker') {
         deduped.push(p)
         continue
@@ -342,13 +383,24 @@ export class PersonaStore {
       seen.add(key)
       deduped.push(p)
     }
+    /*
+     * 防重复外发（2026-10-23 主人要求「测一下还有没有重复发消息」）：
+     * 同一句话既出现在文字段、又出现在语音段时，只留语音——否则对方先看到
+     * 一行字、再听到同一条语音，像复读机。
+     */
+    const voiceTexts = new Set(
+      deduped.filter((p) => p.type === 'voice').map((p) => String(p.text || '').replace(/\s+/g, ' ').trim())
+    )
+    const noDup = voiceTexts.size === 0
+      ? deduped
+      : deduped.filter((p) => !(p.type === 'text' && voiceTexts.has(String(p.text || '').replace(/\s+/g, ' ').trim())))
     // 一条回复里最多两个表情包。原来是硬编码 1（"连发两张图不是真人干的事"），
     // 但用户要求「学会用表情包代替回文字」之后，1 张撑不起"斗图"这个场景——
     // 真人斗图就是一串图往外甩。上限放在 2：够用，也不至于刷屏。
     // 数值走 splitReply 的 options 而不是写死，方便配置里调。
     let stickerBudget = Math.max(1, Number(options.maxStickersPerReply) || 2)
     const out = []
-    for (const p of deduped) {
+    for (const p of noDup) {
       if (p.type === 'sticker') {
         if (stickerBudget <= 0) continue
         stickerBudget--

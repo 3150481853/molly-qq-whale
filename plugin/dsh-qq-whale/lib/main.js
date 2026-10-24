@@ -551,6 +551,16 @@ export const DEFAULTS = {
   // 2026-10-22 用户 m05352 拍板：**取消同会话冷却**（0 = 不限制）。
   // 保留字段是为了兼容旧配置，engine.maybeVoice 已不再用它。
   voiceCooldownSeconds: 0,
+  // —— 戳一戳回应（2026-10-23，主人 m01231）——
+  // 被 QQ 戳一戳时的反射：反戳 / 说一句 / 被连戳多次生气。不走模型，
+  // 文案与状态机在 lib/poke.js；这里只是默认值。
+  pokeEnabled: true,
+  pokeBackChance: 0.7,
+  pokeSayChance: 0.45,
+  pokeAngryAfter: 4,
+  pokeAngryWindowSeconds: 180,
+  pokeCooldownSeconds: 8,
+  pokeAngryCooldownSeconds: 90,
 }
 
 function resolveDirs(config) {
@@ -779,6 +789,14 @@ function _configShapeReference(Schema) {
     voiceTimeoutMs: s.natural().default(DEFAULTS.voiceTimeoutMs).description('单次合成超时（毫秒；长文本合成要 40 秒以上，默认 90000）'),
     voiceMaxKeep: s.natural().default(DEFAULTS.voiceMaxKeep).description('语音缓存保留文件数上限'),
     voiceCooldownSeconds: s.natural().default(DEFAULTS.voiceCooldownSeconds).description('已废弃（用户 2026-10-22 取消冷却，保留字段兼容旧配置）'),
+    // —— 戳一戳回应（2026-10-23，主人 m01231）——
+    pokeEnabled: s.boolean().default(DEFAULTS.pokeEnabled).description('戳一戳回应：被戳时按概率反戳/说一句，被连戳多次会生气'),
+    pokeBackChance: s.number().min(0).max(1).default(DEFAULTS.pokeBackChance).description('被戳时反戳的概率（0~1，默认 0.7）'),
+    pokeSayChance: s.number().min(0).max(1).default(DEFAULTS.pokeSayChance).description('被戳时附带说一句的概率（0~1，默认 0.45，与反戳独立掷骰）'),
+    pokeAngryAfter: s.natural().default(DEFAULTS.pokeAngryAfter).description('窗口期内被同一个人戳到第几次开始生气（默认 4）'),
+    pokeAngryWindowSeconds: s.natural().default(DEFAULTS.pokeAngryWindowSeconds).description('生气计数的窗口（秒，默认 180）'),
+    pokeCooldownSeconds: s.natural().default(DEFAULTS.pokeCooldownSeconds).description('两次戳回应的最小间隔（秒，默认 8）'),
+    pokeAngryCooldownSeconds: s.natural().default(DEFAULTS.pokeAngryCooldownSeconds).description('生气之后的冷却（秒，默认 90）'),
   })
 }
 
@@ -1422,6 +1440,23 @@ export function apply(root, rawConfig = {}) {
         engine
           ?.onRequest?.(ev)
           .catch((err) => logger('warn', `处理申请事件失败: ${err?.message || err}`))
+        return
+      }
+
+      /*
+       * 通知类事件（2026-10-23，主人 m01231）：目前只接「戳一戳」。
+       *
+       * 以前 notice 一路落到函数末尾被静默丢弃——有人戳 Molly，她毫无反应。
+       * 现在递给 engine.onNotice（内部有开关/白名单/概率/冷却，且自己兜错），
+       * 这里只负责分发，不在这里写业务。
+       */
+      if (ev.post_type === 'notice') {
+        if (config.blindMode || !config.enabled) return
+        if (ev.notice_type === 'notify' && ev.sub_type === 'poke') {
+          engine
+            ?.onNotice?.(ev)
+            .catch((err) => logger('warn', `处理戳一戳失败: ${err?.message || err}`))
+        }
         return
       }
     } catch (err) {

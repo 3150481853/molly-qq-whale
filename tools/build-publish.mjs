@@ -109,7 +109,8 @@ const FILES = [
   // copyFile 对同一「源 → 目标」去重，不会重复计数。
   // 2026-10-23 改名 hero.svg → hero-v1.svg → hero-v11.svg：GitHub 的图片代理按 URL 缓存，
   // 同名更新不生效，换文件名让新图立刻渲染（README 引用同步改成 assets/hero-v11.svg）。
-  ['publish-assets/assets/hero-v11.svg', 'assets/hero-v11.svg'],
+  // 2026-10-24 v1.1.1 再改名 hero-v11.svg → hero-v111.svg（主图里的版本字样跟着改，同样是为了绕缓存）。
+  ['publish-assets/assets/hero-v111.svg', 'assets/hero-v111.svg'],
 ]
 
 /** 文档白名单：只发「讲怎么装、怎么用」的，运维流水账一律不发 */

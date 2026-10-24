@@ -1,11 +1,11 @@
 <div align="center">
 
-<img src="assets/hero-v11.svg" width="880" alt="Molly QQ Whale">
+<img src="assets/hero-v111.svg" width="880" alt="Molly QQ Whale">
 
 基于 **DeepSeek Harness** 的 QQ 通道插件：稳定的人设、长期记忆、表情包习惯、会发语音，
 以及一个能看懂她此刻在干什么的控制台。
 
-**v1.1.0** —— 记忆池扩容到 2000 条（记满自动长到 1 万）、写入去重、AES-256-GCM 加密落盘 + 双盘定时备份；语音时长放宽到约 56 秒；模型链路可钉国内池。
+**v1.1.1** —— 语音改成显式触发（想听就直说，不用再碰运气）：她说 `<voice>` 才发；被戳一戳会回应，戳多了会生气；重复消息根治（同一会话 60 秒内不重复发）；记忆池 2000 条起、AES-256-GCM 加密落盘 + 双盘定时备份；单条语音最长约 56 秒。
 
 [![license](https://img.shields.io/badge/license-MIT-1aae39?style=flat-square)](LICENSE) [![node](https://img.shields.io/badge/node-22%2B-1aae39?style=flat-square)](https://nodejs.org) [![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0075de?style=flat-square)](#环境要求) [![host](https://img.shields.io/badge/host-DeepSeek%20Harness-5645d4?style=flat-square)](#环境要求) [![QQ](https://img.shields.io/badge/QQ-OneBot%2011-0075de?style=flat-square)](#环境要求)
 
@@ -44,7 +44,8 @@
 | **人设** | 人格写在 `persona/*.md` 里：怎么说话、底线在哪、对不同的人用什么语气 | 改文件 + 重载插件就换一个人；不是换个提示词那种换 |
 | **记忆** | 短期窗口之外还有长期库和关系画像；模型按批抽事实，没把握的先进「待核实区」；默认 2000 条、记满自动长到 1 万，写入先去重（新的覆盖旧的），落盘加密 | 她记得你上周说过要搬家，也记得你讨厌被叫全名 |
 | **表情包** | 收到的图会自动学（有日配额和体积上限），按语境挑，一条回复最多两张 | 聊着聊着甩一张图过来，不是随机贴表情 |
-| **语音** | 接 SnowLuma 的 PTT 通道，edge-tts 打底，也能挂 GPT-SoVITS 社区音色；23:50–9:00 静默 | 冷不丁一条 4 秒语音弹出来 |
+| **语音** | 接 SnowLuma 的 PTT 通道，edge-tts 打底，也能挂 GPT-SoVITS 社区音色；她说 `<voice>` 才发，23:50–9:00 静默 | 想听就直说「发个语音」，不用等运气 |
+| **戳一戳** | 收到戳一戳会回应：默认窗口内戳多了会生气，也可能反戳你 | 手欠一下，她会回你一句 |
 | **手（V1.0）** | 合并转发的正文进上下文；QQ 空间能读、能写草稿，发布必须你确认；群里叫她的名字会应 | 她会看、会等批准，不擅自替你发 |
 | **先查再说** | 事实性问题先委派干活会话去查，再用自己的话讲；查不到就说不知道 | 不编。宁可漏，不可滥 |
 | **干活** | 以 `命令` 开头的指令会进常驻 agent：读文件、跑脚本、整理资料，进度实时播报到 QQ | 她一边干一边碎碎念，不是等十分钟后甩一个结果 |

@@ -548,12 +548,16 @@ export const DEFAULTS = {
   voiceTimeoutMs: 90000,
   // 语音文件保留数量上限（按文件数淘汰最旧的），避免音频缓存无限涨。
   voiceMaxKeep: 200,
+  // 2026-10-25 用户试听 5 档后拍板「E」：voiceSpeed 0.93（比默认慢 7%）+ 句间 50ms。
+  // voiceSpeed 直接透传给 GPT-SoVITS speed_factor；voicePauseMs 是逐句合成后插入的静音毫秒（0 = 整段合成）。
+  voiceSpeed: 0.93,
+  voicePauseMs: 50,
   // 2026-10-22 用户 m05352 拍板：**取消同会话冷却**（0 = 不限制）。
   // 保留字段是为了兼容旧配置，engine.maybeVoice 已不再用它。
   voiceCooldownSeconds: 0,
-  // —— 戳一戳回应（2026-10-23，主人 m01231）——
-  // 被 QQ 戳一戳时的反射：反戳 / 说一句 / 被连戳多次生气。不走模型，
-  // 文案与状态机在 lib/poke.js；这里只是默认值。
+  // —— 戳一戳回应（2026-10-23，主人 m01231；2026-10-24 主人 m01908 改成模型说一句）——
+  // 被 QQ 戳一戳时的反射：反戳 / 说一句 / 被连戳多次生气。
+  // 反戳与计数不花模型；「说一句」默认让模型现编（pokeUseModel），失败用 lib/poke.js 的固定文案兜底。
   pokeEnabled: true,
   pokeBackChance: 0.7,
   pokeSayChance: 0.45,
@@ -561,6 +565,9 @@ export const DEFAULTS = {
   pokeAngryWindowSeconds: 180,
   pokeCooldownSeconds: 8,
   pokeAngryCooldownSeconds: 90,
+  pokeUseModel: true,
+  pokeModelTimeoutMs: 10000,
+  pokeModelMaxChars: 40,
   // —— 撤回（2026-10-24，主人 m00480 需求②）——
   // 有人撤回消息后：清历史 / 作废在途回复是硬行为（不留配置）；
   // 「轻回一句」是可配置的软行为。用户 m00585 明确要求**群里也轻回一句**
@@ -804,6 +811,8 @@ function _configShapeReference(Schema) {
     voicePitch: s.string().default(DEFAULTS.voicePitch).description('edge-tts 音高（如 +15Hz）'),
     voiceTimeoutMs: s.natural().default(DEFAULTS.voiceTimeoutMs).description('单次合成超时（毫秒；长文本合成要 40 秒以上，默认 90000）'),
     voiceMaxKeep: s.natural().default(DEFAULTS.voiceMaxKeep).description('语音缓存保留文件数上限'),
+    voiceSpeed: s.number().min(0.5).max(2).default(DEFAULTS.voiceSpeed).description('GPT-SoVITS 语速系数（默认 0.93；>1 变快，<1 变慢）'),
+    voicePauseMs: s.natural().default(DEFAULTS.voicePauseMs).description('句间刻意停顿（毫秒，默认 50；0 = 整段合成不再逐句暂停）'),
     voiceCooldownSeconds: s.natural().default(DEFAULTS.voiceCooldownSeconds).description('已废弃（用户 2026-10-22 取消冷却，保留字段兼容旧配置）'),
     // —— 戳一戳回应（2026-10-23，主人 m01231）——
     pokeEnabled: s.boolean().default(DEFAULTS.pokeEnabled).description('戳一戳回应：被戳时按概率反戳/说一句，被连戳多次会生气'),

@@ -19,21 +19,37 @@
     </div>
 
     <nav class="nav" id="nav" aria-label="主导航">
+      <!-- 总览单独放最上面，不再套组标题（组标题也叫「总览」会重复） -->
       <a class="nav-item" href="#/overview" data-page="overview">总览</a>
-      <a class="nav-item" href="#/chats" data-page="chats">会话与消息</a>
-      <a class="nav-item" href="#/memory" data-page="memory">记忆</a>
-      <a class="nav-item" href="#/pending" data-page="pending">待核实<span class="nav-badge" id="pendBadge" hidden>0</span></a>
-      <a class="nav-item" href="#/stickers" data-page="stickers">表情包</a>
-      <a class="nav-item" href="#/switches" data-page="switches">发言开关</a>
-      <a class="nav-item" href="#/budget" data-page="budget">预算</a>
-      <a class="nav-item" href="#/work" data-page="work">干活</a>
-      <a class="nav-item" href="#/watchdog" data-page="watchdog">守护</a>
-      <a class="nav-item" href="#/ops" data-page="ops">运维</a>
-      <a class="nav-item" href="#/external" data-page="external">外部服务</a>
-      <a class="nav-item" href="#/napcat" data-page="napcat">NapCat</a>
-      <a class="nav-item" href="#/login" data-page="login">登录<span class="nav-badge is-warn nav-dot" id="loginBadge" hidden aria-hidden="true"></span></a>
-      <a class="nav-item" href="#/exec" data-page="exec">执行块</a>
-      <a class="nav-item" href="#/settings" data-page="settings">设置</a>
+      <div class="nav-group">
+        <div class="nav-group-title">她</div>
+        <a class="nav-item" href="#/chats" data-page="chats">会话与消息</a>
+        <a class="nav-item" href="#/memory" data-page="memory">记忆</a>
+        <a class="nav-item" href="#/pending" data-page="pending">待核实<span class="nav-badge" id="pendBadge" hidden>0</span></a>
+        <a class="nav-item" href="#/stickers" data-page="stickers">表情包</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-group-title">行为</div>
+        <a class="nav-item" href="#/switches" data-page="switches">发言开关</a>
+        <a class="nav-item" href="#/budget" data-page="budget">预算</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-group-title">QQ</div>
+        <a class="nav-item" href="#/qq" data-page="qq">QQ 连接</a>
+        <a class="nav-item" href="#/login" data-page="login">登录<span class="nav-badge is-warn nav-dot" id="loginBadge" hidden aria-hidden="true"></span></a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-group-title">运维</div>
+        <a class="nav-item" href="#/work" data-page="work">干活</a>
+        <a class="nav-item" href="#/watchdog" data-page="watchdog">守护</a>
+        <a class="nav-item" href="#/ops" data-page="ops">运维</a>
+        <a class="nav-item" href="#/external" data-page="external">外部服务</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-group-title">系统</div>
+        <a class="nav-item" href="#/exec" data-page="exec">执行块</a>
+        <a class="nav-item" href="#/settings" data-page="settings">设置</a>
+      </div>
     </nav>
 
     <div class="sidebar-foot">
@@ -47,7 +63,7 @@
     <header class="topbar">
       <div class="topbar-left">
         <span class="pill pill-idle" id="pillMolly"><i class="dot"></i>Molly 未知</span>
-        <span class="pill pill-idle" id="pillNapcat"><i class="dot"></i>NapCat 未知</span>
+        <span class="pill pill-idle" id="pillNapcat" title="QQ 连接状态"><i class="dot"></i>QQ 未知</span>
         <span class="pill pill-idle" id="pillWatchdog"><i class="dot"></i>守护 未知</span>
         <span class="pill pill-bad" id="pillLink" hidden><i class="dot"></i>连接中断</span>
       </div>
@@ -65,12 +81,12 @@
       <section class="page" data-page="overview">
         <div class="page-head">
           <h1>总览</h1>
-          <p class="page-sub">Molly 的运行状态、模型与数据源一览。</p>
+          <p class="page-sub">Molly 的运行状态、模型与数据源一览。顶部状态条回答「QQ 连没连上」。</p>
         </div>
-        <!-- 掉登录时插在最上面：整条可点，跳到「登录」页并直接开始生成二维码 -->
-        <a class="ov-login-banner" id="ovLoginBanner" href="#/login" hidden>
-          <span>⚠️ Molly 掉登录了 —— 点这里扫码</span>
-          <span class="ov-login-banner-go">去登录 →</span>
+        <!-- QQ 链路不通时插在最上面：整条可点，跳到「QQ 连接」页看状态、点重新登录 -->
+        <a class="ov-login-banner" id="ovLoginBanner" href="#/qq" hidden>
+          <span>⚠️ Molly 还没连上 QQ —— 点这里看怎么处理</span>
+          <span class="ov-login-banner-go">去 QQ 连接 →</span>
         </a>
         <div class="stat-grid" id="ovStats"></div>
         <div class="card-grid" id="ovCards"></div>
@@ -199,7 +215,7 @@
         <div class="card-grid" id="opsCards"></div>
         <div class="card card-block">
           <h2 class="card-title">进程操作</h2>
-          <p class="card-sub">启动会跳过已在跑的部分；停止只杀 QQ 与 NapCat，不碰 DSH 宿主、网关和控制台自己。</p>
+          <p class="card-sub">启动会跳过已在跑的部分；停止只关 QQ 客户端和它的连接服务，不碰 DSH 宿主、网关和控制台自己。</p>
           <div class="row-actions">
             <button class="btn btn-primary" id="opsStart" type="button">启动 Molly</button>
             <button class="btn btn-danger" id="opsStop" type="button">停止 Molly</button>
@@ -214,6 +230,8 @@
             <select class="input input-sm" id="opsLogSource" aria-label="日志来源">
               <option value="watchdog">watchdog</option>
               <option value="plugin">plugin</option>
+              <option value="snowluma-boot">SnowLuma 启动</option>
+              <option value="snowluma-runtime">SnowLuma 运行</option>
             </select>
             <button class="btn btn-ghost btn-sm" id="opsLogLoad" type="button">加载</button>
             <button class="btn btn-ghost btn-sm" id="opsLogCopy" type="button">复制</button>
@@ -258,18 +276,25 @@
         </div>
       </section>
 
-      <!-- NapCat -->
-      <section class="page" data-page="napcat" hidden>
+      <!-- QQ 连接（原 NapCat 页改名；内部路由/字段仍叫 napcat 以兼容老配置和收藏） -->
+      <section class="page" data-page="qq" hidden>
         <div class="page-head">
-          <h1>NapCat</h1>
-          <p class="page-sub">QQ 登录态与扫码入口。重启登录请到「执行块」，那里有二次确认。</p>
+          <h1>QQ 连接</h1>
+          <p class="page-sub">Molly 与 QQ 的链路状态、客户端信息与扫码入口。这里判的是「Molly 连没连上 QQ」，不是「QQ 进程开没开」。</p>
         </div>
         <div class="card-grid" id="ncCards"></div>
         <div class="card card-block">
-          <h2 class="card-title">登录二维码</h2>
-          <p class="card-sub">二维码由 make-qr.mjs 现场生成，扫完即失效。</p>
+          <h2 class="card-title">重新登录 QQ（扫码）</h2>
+          <p class="card-sub">当前后端：<b id="qqBackendName">读取中…</b>。点下面的按钮只重启 QQ 客户端，<b>不会</b>重启 Molly 插件、网关和控制台。</p>
+          <ul class="qq-flow">
+            <li><b>SnowLuma 后端</b>：触发计划任务 <span class="mono">SnowLuma-Relogin</span>，约 10~25 秒后 QQ 窗口弹出，用手机扫码即可（SnowLuma 进程不动，设备指纹不变）。</li>
+            <li><b>回滚后端</b>：现场生成一张登录二维码（约 2–6 秒），用手机 QQ 扫码，扫完即失效。</li>
+            <li>扫码后 QQ 窗口会自动关闭；回来刷新本页，看到「Molly 已连接 QQ」就成功了。</li>
+            <li>30 秒还不见窗口：先看 <span class="mono">${MOLLY_ROOT}\qq-whale\out\snowluma-runtime.out.log</span> 和 <span class="mono">${MOLLY_ROOT}\qq-whale\out\snowluma-boot.log</span>；也可以在「运维」页的日志里选「SnowLuma 运行 / 启动」看最近 200 行。</li>
+            <li>还不行就去「守护」看 watchdog 结论，或到「执行块」重新检查连接。</li>
+          </ul>
           <div class="row-actions">
-            <button class="btn btn-primary" id="ncQr" type="button">生成二维码</button>
+            <button class="btn btn-primary" id="ncQr" type="button">重新登录 QQ（扫码）</button>
           </div>
           <div class="action-result" id="ncOut" hidden></div>
         </div>
@@ -279,14 +304,14 @@
       <section class="page" data-page="login" hidden>
         <div class="page-head">
           <h1>登录</h1>
-          <p class="page-sub">二维码在本机现场生成，扫完即失效。这里只生成二维码，不会重启任何进程。</p>
+          <p class="page-sub">扫码登录 QQ 的自助页。SnowLuma 后端下按钮会重启 QQ 客户端并弹出扫码窗口；回滚后端下现场生成二维码。两种都不会重启 Molly 插件、网关和控制台。</p>
         </div>
         <div class="login-status" id="loginStatus"></div>
         <div class="login-success" id="loginSuccess" hidden></div>
         <div class="login-error" id="loginError" hidden></div>
         <div class="card card-block login-main">
           <div class="login-actions">
-            <button class="btn btn-primary" id="loginGen" type="button">生成二维码</button>
+            <button class="btn btn-primary" id="loginGen" type="button">重新登录 QQ（扫码）</button>
             <button class="btn btn-ghost btn-sm" id="loginRefresh" type="button">刷新状态</button>
             <span class="login-progress" id="loginProgress" hidden></span>
             <span class="login-countdown" id="loginCountdown" hidden></span>
@@ -300,8 +325,8 @@
             <p class="login-hint" id="loginHint"></p>
           </div>
           <div class="login-idle" id="loginIdle">
-            <p class="card-sub">点「生成二维码」会现场刷新一张新码（约 2–6 秒），然后用手机 QQ 扫码。</p>
-            <p class="login-hint">二维码约 2 分钟过期；过期后会自动换一张，最多连换 3 次。已登录时不需要扫码。</p>
+            <p class="card-sub" id="loginIdleMain">点「重新登录 QQ（扫码）」：SnowLuma 后端会触发计划任务重启 QQ 客户端，约 10~25 秒后 QQ 窗口弹出，用手机扫码。</p>
+            <p class="login-hint" id="loginIdleHint">不会重启 Molly 插件、网关和控制台。回滚后端则改为现场生成二维码（约 2–6 秒，2 分钟过期，最多自动换 3 张）。</p>
           </div>
         </div>
       </section>
@@ -322,6 +347,11 @@
           <p class="page-sub">连接信息与诊断。这里只读，真正的开关都在「执行块」。</p>
         </div>
         <div class="card-grid" id="setCards"></div>
+        <div class="card card-block">
+          <h2 class="card-title">后端切换（回滚备注）</h2>
+          <p class="card-sub">QQ 后端由 <span class="mono">${MOLLY_ROOT}\qq-whale\watchdog-config.json</span> 的 <span class="mono">backend</span> 决定：默认 <b>SnowLuma</b>；历史回滚后端的名字是 <b>NapCat</b>。切换属于运维操作，不在这里改。</p>
+          <p class="card-sub">正常部署不用关心 NapCat，只有回滚时才会用到它；控制台其余页面都只显示「QQ」。</p>
+        </div>
         <div class="card card-block">
           <h2 class="card-title">诊断</h2>
           <p class="card-sub">把当前 overview / memory / stickers 的原始 JSON 复制走，方便贴给 Molly 排查。</p>
@@ -362,6 +392,8 @@
     <select class="input input-sm" id="logSource">
       <option value="watchdog">watchdog</option>
       <option value="plugin">plugin</option>
+      <option value="snowluma-boot">SnowLuma 启动</option>
+      <option value="snowluma-runtime">SnowLuma 运行</option>
     </select>
     <span class="drawer-path mono" id="logPath"></span>
     <button class="btn btn-ghost btn-sm" id="logReload" type="button">刷新</button>

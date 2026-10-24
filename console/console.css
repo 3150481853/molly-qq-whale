@@ -159,6 +159,28 @@ h1, h2, h3, p{ margin: 0; }
   font-weight: 500;
 }
 
+/* 导航分组（2026-10-25）：总览 / 她 / 行为 / QQ / 运维 / 系统。
+   组标题只是视觉分隔，导航项样式沿用 .nav-item，不改交互。 */
+.nav-group + .nav-group{ margin-top: var(--s-2); }
+
+.nav-group-title{
+  padding: var(--s-3) var(--s-4) var(--s-1);
+  font-size: var(--fs-micro);
+  color: var(--stone);
+  letter-spacing: .04em;
+  user-select: none;
+}
+
+/* QQ 连接页：登录流程说明列表（纯说明文字，无交互） */
+.qq-flow{
+  margin: var(--s-2) 0 var(--s-1);
+  padding-left: 18px;
+  font-size: var(--fs-sub);
+  color: var(--steel);
+  line-height: 1.75;
+}
+.qq-flow li{ margin: 0; }
+
 .sidebar-foot{
   padding: var(--s-3) var(--s-4);
   border-top: 1px solid var(--hairline);
@@ -745,6 +767,19 @@ select.input{ cursor: pointer; }
   background: var(--tint-rose);
   color: var(--error);
   font-size: var(--fs-sub);
+  margin-bottom: var(--s-2);
+  overflow-wrap: anywhere;
+}
+
+/* 「重新登录」这类动作的说明句：服务端给的一句人话，比 JSON 展开好读 */
+.ar-hint{
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--tint-sky);
+  border-radius: var(--r-md);
+  background: var(--tint-sky);
+  color: var(--ink);
+  font-size: var(--fs-sub);
+  line-height: 1.6;
   margin-bottom: var(--s-2);
   overflow-wrap: anywhere;
 }

@@ -11,12 +11,12 @@
   var PEND_POLL_MS = 15000;   /* 待核实计数：15 秒一次，只走轻量 GET，不动列表 DOM */
   var QR_POLL_MS = 3000;      /* 等待扫码时每 3 秒读一次 overview，扫上就停 */
   var QR_MAX_AUTO = 3;        /* 过期自动换码最多连换 3 次，之后交回人手，免得无限刷 */
-  /* 二维码有效期只是本地展示：约 2 分钟，不假装与 NapCat 内部计时精确一致。
+  /* 二维码有效期只是本地展示：约 2 分钟，不假装与 QQ 客户端内部计时精确一致。
      测试里用 window.__QR_TTL_MS__ 缩短，免得等两分钟。 */
   var QR_TTL_MS = (typeof window !== 'undefined' && typeof window.__QR_TTL_MS__ === 'number' && window.__QR_TTL_MS__ > 0)
     ? window.__QR_TTL_MS__
     : 120000;
-  var PAGES = ['overview', 'chats', 'memory', 'pending', 'stickers', 'switches', 'budget', 'work', 'watchdog', 'ops', 'external', 'napcat', 'login', 'exec', 'settings'];
+  var PAGES = ['overview', 'chats', 'memory', 'pending', 'stickers', 'switches', 'budget', 'work', 'watchdog', 'ops', 'external', 'qq', 'login', 'exec', 'settings'];
 
   /* 记忆类型：顺序即页面分组顺序。值和插件端 lib/memory.js 的 kind 枚举一一对应，
      中文标签只在前端出现，不参与任何写请求。 */
@@ -76,12 +76,13 @@
       expiresAt: 0,
       autoSwaps: 0,      /* 上一张手动码之后，自动换过几次 */
       waiting: false,
+      triggered: false,  /* SnowLuma 后端：已触发计划任务重启 QQ，等窗口弹出扫码 */
+      triggeredAt: 0,
       success: '',       /* 非空=已登录横幅要显示，值是「Molly 345…」 */
       successNote: '',   /* 已登录横幅的副标题：扫码成功 / 本来就在线 */
       error: '',
       hint: ''
     },
-    loginAutoStart: false,   /* 总览黄条点进来时置位：进页后自动生成一次 */
     /*
      * 运维 / 外部服务（task-58）。
      * 心跳、网关用量、模型清单都**不进** 4 秒的 overview 轮询：它们各自要
@@ -497,6 +498,57 @@
     return (d.getMonth() + 1) + '-' + pad2(d.getDate());
   }
 
+  /* ---------------- QQ 链路状态（统一口径，2026-10-25） ----------------
+     主依据 = 插件桥接：plugin.link.state === 'online' ⇒ Molly 已经连上 OneBot，
+     QQ 链路就是通的。次依据 = 客户端探测：ov.napcat 只回答「QQ 客户端进程在不在」。
+     以前顶栏和总览把客户端探测当主依据，探测失败就显示「未连接」，
+     部署者看到「QQ 未连接」但 QQ 明明在跑 —— 现在统一成四种组合，只在这里算一次。
+     后端已经聚合出 ov.qq（level/text/nextStep 与 bridge、client 两组字段），前端只取。 */
+  var QQ_LEVEL_TEXT = {
+    connected: 'QQ 在线',
+    'bridge-only': 'QQ 在线·客户端信息不可达',
+    'client-only': 'QQ 在运行·Molly 未连',
+    offline: 'QQ 未登录'
+  };
+  var QQ_LEVEL_KIND = {
+    connected: 'ok',
+    'bridge-only': 'ok',
+    'client-only': 'warn',
+    offline: 'bad'
+  };
+
+  function qqStatus(ov) {
+    ov = ov || state.overview || {};
+    var q = ov.qq;
+    if (q && q.level) return q;
+    /* 旧后端兼容（没有 ov.qq）：按同一优先级就地算一份，口径不许漂 */
+    var p = ov.plugin || {};
+    var link = p.link || {};
+    var nc = ov.napcat || {};
+    var bridgeOnline = link.ready === true && link.state === 'online';
+    var clientReachable = nc.reachable === true;
+    var level = bridgeOnline
+      ? (clientReachable ? 'connected' : 'bridge-only')
+      : (clientReachable ? 'client-only' : 'offline');
+    var backend = nc.backend === 'snowluma' ? 'snowluma' : (nc.backend || '');
+    return {
+      level: level,
+      text: QQ_LEVEL_TEXT[level],
+      nextStep: '',
+      bridgeState: link.state || 'unknown',
+      bridgeReady: link.ready === true,
+      bridgeOnline: bridgeOnline,
+      clientReachable: clientReachable,
+      clientLogin: nc.isLogin === true,
+      backend: backend,
+      backendName: backend === 'snowluma' ? 'SnowLuma' : 'QQ',
+      uin: nc.uin || (p.bot && p.bot.userId) || null,
+      nickname: nc.nickname || (p.bot && p.bot.nickname) || null,
+      isLogin: bridgeOnline || nc.isLogin === true,
+      napcat: nc
+    };
+  }
+
   /* ---------------- 顶部状态条 ---------------- */
 
   function renderTop() {
@@ -524,17 +576,18 @@
 
     var np = $('#pillNapcat');
     if (np) {
-      /* SnowLuma 与 NapCat 都是"QQ 客户端"，但用户看到的品牌名要跟着当前后端走 */
-      var qcName = nc.backend === 'snowluma' ? 'SnowLuma' : 'NapCat';
-      if (!nc.reachable) {
+      /* QQ 状态 pill：主依据是插件桥接（link），客户端探测只作为补充信息。
+         四种组合的文案和配色都在 qqStatus() 里统一，别在这里另写一套。 */
+      var hasData = !!(ov.qq || ov.plugin || ov.napcat);
+      var q = qqStatus(ov);
+      if (!hasData) {
         np.className = 'pill pill-idle';
-        np.innerHTML = '<i class="dot"></i>' + qcName + ' 不可达';
-      } else if (nc.isLogin) {
-        np.className = 'pill pill-ok';
-        np.innerHTML = '<i class="dot"></i>' + qcName + ' 已登录';
+        np.innerHTML = '<i class="dot"></i>QQ 未知';
+        np.title = '还没拿到控制台数据';
       } else {
-        np.className = 'pill pill-warn';
-        np.innerHTML = '<i class="dot"></i>' + qcName + ' 未登录';
+        np.className = 'pill pill-' + (QQ_LEVEL_KIND[q.level] || 'idle');
+        np.innerHTML = '<i class="dot"></i>' + esc(QQ_LEVEL_TEXT[q.level] || 'QQ 未知');
+        np.title = q.text + (q.nextStep ? '：' + q.nextStep : '');
       }
     }
 
@@ -620,12 +673,13 @@
     var stk = p.stickers || {};
     var side = ov.sidecar || {};
 
-    /* 掉登录横幅：isLogin=false 且插件链路也不 online 才算真掉线，
-       避免「插件开着但没连 QQ」和「还没探到 NapCat」被误报 */
+    /* 掉登录横幅：只在「Molly 没连上 QQ」时出现（桥接离线且客户端也不可达，
+       或者客户端在跑但 Molly 没连上）。客户端信息不可达但桥接正常不算掉线，
+       否则又回到「QQ 明明在线却提示未连接」的老问题。 */
+    var q = qqStatus(ov);
     var banner = $('#ovLoginBanner');
     if (banner) {
-      var linkState = p.link && p.link.state;
-      banner.hidden = !(nc.isLogin === false && linkState !== 'online');
+      banner.hidden = !(q.level === 'offline' || q.level === 'client-only');
     }
 
     /* ── 统计卡：独立 try。这里炸了也不许影响下面卡片区 ─────────────────── */
@@ -686,17 +740,18 @@
         kv('计划任务', wd.taskEnabled === false ? pill('warn', '已禁用') : '已启用')
       ].join('');
 
-      /* 当前 QQ 客户端后端（SnowLuma / NapCat）在配置里定，控制台跟着它换名字 */
-      var qcName = nc.backend === 'snowluma' ? 'SnowLuma' : 'NapCat';
-      var ncRows = [
-        kv('后端', esc(qcName)),
-        kv('登录', nc.reachable ? (nc.isLogin ? pill('ok', '已登录') : pill('warn', '未登录')) : pill('idle', '不可达')),
-        kv('阶段', val(nc.loginPhase)),
-        kv('QQ 号', (nc.uin || (p.bot && p.bot.userId)) ? '<span class="mono">' + esc(nc.uin || p.bot.userId) + '</span>' : '—'),
-        nc.backend === 'snowluma'
-          ? kv('昵称', nc.nickname ? esc(nc.nickname) : '—')
-          : '',
-        nc.backend === 'snowluma'
+      /* QQ 连接卡：状态用统一口径（桥接优先），后端名只做展示。
+         SnowLuma 是默认后端；只有回滚配置才会出现 NapCat，且这里不显示品牌名。 */
+      var qRows = [
+        kv('状态', pill(QQ_LEVEL_KIND[q.level] || 'idle', q.text || '未知')),
+        kv('后端', esc(q.backendName || 'QQ')),
+        kv('Molly 链路', q.bridgeReady ? pill('ok', '已连接') : pill('bad', val(q.bridgeState))),
+        kv('QQ 客户端', q.clientReachable
+          ? (q.clientLogin ? pill('ok', '已登录') : pill('warn', '未登录'))
+          : pill('idle', '进程信息不可达')),
+        kv('QQ 号', (q.uin || (p.bot && p.bot.userId)) ? '<span class="mono">' + esc(q.uin || p.bot.userId) + '</span>' : '—'),
+        kv('昵称', q.nickname ? esc(q.nickname) : '—'),
+        q.backend === 'snowluma'
           ? kv('深度探测', nc.deepOk === true ? pill('ok', '正常') : (nc.deepOk === false ? pill('warn', '假在线') : '—'))
           : kv('核心', nc.coreReady ? '就绪' : '未就绪')
       ].join('');
@@ -724,7 +779,7 @@
         card('连接与身份', identity),
         card('消息与响应', msgRows),
         card('守护', wdRows),
-        card(qcName, ncRows),
+        card('QQ 连接', qRows),
         card('学习器', learnRows),
         card('数据服务', sideRows)
       ].join(''));
@@ -1429,7 +1484,7 @@
       '<input class="input" id="cmWho" type="text" maxlength="40" placeholder="例如：主人 / 全体" value="' + esc(it.who || '') + '"></div>' +
       /* qq 单独一列：名字可能重名，QQ 号才是稳定身份；老数据没有这字段，一律当空处理 */
       '<div class="field"><label class="field-label" for="cmQQ">QQ 号（可空）</label>' +
-      '<input class="input mono" id="cmQQ" type="text" inputmode="numeric" autocomplete="off" maxlength="12" placeholder="例如：111111111" value="' + esc(it.qq || '') + '">' +
+      '<input class="input mono" id="cmQQ" type="text" inputmode="numeric" autocomplete="off" maxlength="12" placeholder="例如：123456789" value="' + esc(it.qq || '') + '">' +
       '<div class="field-hint">留空表示只记名字；填了就按 QQ 号也能搜到。</div></div>' +
       '<div class="field"><label class="field-label" for="cmText">正文' +
       '<span class="crud-counter mono" id="cmCount">0/200</span></label>' +
@@ -2089,35 +2144,46 @@
     ].join(''));
   }
 
-  /* ---------------- NapCat ---------------- */
+  /* ---------------- QQ 连接 ----------------
+     这页回答两件事：Molly 有没有连上 QQ、QQ 客户端进程在不在。
+     主依据 = 插件桥接（link），次依据 = 客户端探测；后端名只做展示，
+     SnowLuma 之外的都叫「回滚后端」，不再出现 NapCat 字样（回滚备注只在设置页）。 */
 
-  function renderNapcat() {
+  function qqBackendLabel(q) {
+    q = q || {};
+    if (q.backend === 'snowluma') return 'SnowLuma';
+    if (q.backend) return '回滚后端';
+    return 'QQ';
+  }
+
+  function renderQq() {
     var box = $('#ncCards');
     if (!box) return;
     var ov = state.overview;
     if (!ov) { setHtml(box, card('等待数据', '<p class="card-sub">正在连接控制台服务…</p>')); return; }
 
     var nc = ov.napcat || {};
-    var bot = (ov.plugin && ov.plugin.bot) || {};
-    var name = nc.backend === 'snowluma' ? 'SnowLuma' : 'NapCat';
-    if (!nc.reachable) {
-      setHtml(box, card(name + ' 不可达', '<p class="ar-error">' + esc(nc.error || 'OneBot 未响应') + '</p>'));
-      return;
-    }
+    var p = ov.plugin || {};
+    var bot = p.bot || {};
+    var q = qqStatus(ov);
+    var label = qqBackendLabel(q);
+    var uin = q.uin || bot.userId || '';
+    var nick = q.nickname || bot.nickname || '';
 
-    var qrBody = nc.backend === 'snowluma'
-      ? '<p class="card-sub">SnowLuma 用 QQ 原生窗口扫码登录。点「重新登录」只会重启 QQ（SnowLuma 进程不动、设备指纹不变），约 10~25 秒后 QQ 窗口会弹出来，手机扫码即可；点「全量重启」则会连 SnowLuma 一起重启，只在进程卡死时用。</p>'
-      : (nc.qrcodeurl
-        ? '<p class="card-sub">当前二维码地址：<a href="' + esc(nc.qrcodeurl) + '" target="_blank" rel="noreferrer">打开</a></p>'
-        : '<p class="card-sub">当前没有待扫的二维码。已登录时不需要扫码。</p>');
+    var bn = $('#qqBackendName');
+    if (bn) bn.textContent = label;
 
     var clientText = (nc.onlineClients || []).map(function (c) {
       var n = c.name || c.kind || '未知设备';
-      if (c.name && c.kind && c.kind !== c.name) n += '（' + c.kind + '）';
+      if (c.name && c.kind && c.kind !== n) n += '（' + c.kind + '）';
       return n;
     }).join('、');
 
-    var svcRows = nc.backend === 'snowluma'
+    var flowBody = q.backend === 'snowluma'
+      ? '<p class="card-sub">SnowLuma 后端：点按钮 = 触发计划任务 <span class="mono">SnowLuma-Relogin</span>，只重启 QQ 客户端，约 10~25 秒后 QQ 窗口会弹出来，用手机扫码即可。不会重启 Molly 插件、网关和控制台。</p>'
+      : '<p class="card-sub">回滚后端：点按钮 = 现场生成一张登录二维码（约 2–6 秒，2 分钟过期），用手机 QQ 扫码。不会重启 Molly 插件、网关和控制台。</p>';
+
+    var svcRows = q.backend === 'snowluma'
       ? [
           kv('OneBot', '<span class="mono">3000 / 3001</span>'),
           kv('WebUI', nc.webui
@@ -2127,26 +2193,32 @@
           kv('在线设备', esc(clientText || '未返回'))
         ]
       : [
-          kv('WebUI', pill('ok', '可达')),
+          kv('WebUI', pill(nc.reachable ? 'ok' : 'idle', nc.reachable ? '可达' : '不可达')),
           kv('端口', '<span class="mono">6099</span>'),
-          kv('OneBot', '<span class="mono">3001</span>')
+          kv('OneBot', '<span class="mono">3001</span>'),
+          kv('核心就绪', nc.coreReady ? '是' : '否')
         ];
 
+    var nextStep = q.level === 'connected'
+      ? '<p class="card-sub">Molly 已经连上 QQ，能正常收发消息，不需要扫码。</p>'
+      : '<p class="card-sub">' + esc(q.nextStep || '先点下面的「重新登录 QQ（扫码）」，再回来看这个状态。') + '</p>';
+
     setHtml(box, [
-      card('登录态', [
-        kv('后端', esc(name)),
-        kv('状态', nc.isLogin ? pill('ok', '已登录') : pill('warn', '未登录')),
-        kv('阶段', val(nc.loginPhase)),
-        /* NapCat 的 CheckLoginStatus 不返回 uin，退回插件侧的 bot.userId */
-        kv('QQ 号', (nc.uin || bot.userId)
-          ? '<span class="mono">' + esc(nc.uin || bot.userId) + '</span>'
-          : '—'),
-        kv('昵称', nc.nickname ? esc(nc.nickname) : esc(bot.nickname || '—')),
-        kv('核心就绪', nc.coreReady ? '是' : '否'),
+      card('QQ 连接状态', [
+        kv('状态', pill(QQ_LEVEL_KIND[q.level] || 'idle', q.text || '未知')),
+        kv('Molly 链路', q.bridgeReady ? pill('ok', '已连接') : pill('bad', val(q.bridgeState))),
+        kv('QQ 客户端', q.clientReachable
+          ? (q.clientLogin ? pill('ok', '已登录') : pill('warn', '未登录'))
+          : pill('idle', '进程信息不可达')),
+        kv('后端', esc(label)),
+        kv('QQ 号', uin ? '<span class="mono">' + esc(uin) + '</span>' : '—'),
+        kv('昵称', nick ? esc(nick) : '—'),
         nc.loginError ? kv('错误', esc(nc.loginError), 'is-bad') : ''
-      ].join('')),
+      ].join('') + nextStep),
       card('服务', svcRows.join('')),
-      card('二维码', qrBody)
+      card('扫码登录', flowBody + (nc.qrcodeurl
+        ? '<p class="card-sub">当前二维码地址：<a href="' + esc(nc.qrcodeurl) + '" target="_blank" rel="noreferrer">打开</a></p>'
+        : ''))
     ].join(''));
   }
 
@@ -2179,7 +2251,8 @@
     var ov = state.overview;
     var lg = state.login;
     var nc = (ov && ov.napcat) || {};
-    var qcName = nc.backend === 'snowluma' ? 'SnowLuma' : 'NapCat';
+    var q = qqStatus(ov);
+    var label = qqBackendLabel(q);
     var kind = 'idle';
     var head = '正在读取…';
     var note = '';
@@ -2187,20 +2260,25 @@
 
     if (!ov) {
       head = '正在连接控制台服务…';
-    } else if (!nc.reachable) {
-      kind = 'bad';
-      head = qcName + ' 不可达';
-      note = String(nc.error || 'OneBot 未响应');
-    } else if (nc.isLogin) {
+    } else if (q.bridgeOnline) {
       kind = 'ok';
-      head = '已登录';
-      note = 'Molly ' + (uin || '（QQ 号未知）') + (nc.nickname ? '（' + nc.nickname + '）' : '');
+      head = 'Molly 已连接 QQ';
+      note = 'Molly ' + (uin || '（QQ 号未知）') + (q.nickname ? '（' + q.nickname + '）' : '') + '，不需要扫码。';
+    } else if (q.clientReachable && q.clientLogin) {
+      /* QQ 明明在跑、也登录了，但插件没连上 OneBot：别再说「QQ 未登录」 */
+      kind = 'warn';
+      head = 'QQ 在运行，Molly 还没连上';
+      note = 'QQ 客户端已登录，但插件没连上 OneBot。去「守护」或「执行块」看插件连接状态；也可以点下面的「重新登录 QQ（扫码）」重拉一次。';
+    } else if (lg.triggered) {
+      kind = 'warn';
+      head = '已触发重启，等待登录';
+      note = '计划任务已下发：约 10~25 秒后 QQ 窗口弹出，用手机扫码即可。30 秒没反应看「运维」页的 SnowLuma 启动/运行日志。';
     } else {
       kind = 'warn';
-      head = '等待扫码';
-      note = nc.backend === 'snowluma'
-        ? '点下面的「重新登录」，约 10~25 秒后 QQ 窗口弹出，用手机 QQ 扫一下'
-        : (lg.waiting ? '二维码已就绪，用手机 QQ 扫一下' : '还没登录：点下面的「生成二维码」');
+      head = q.clientReachable ? '等待扫码' : 'QQ 未连接';
+      note = q.backend === 'snowluma'
+        ? '点下面的「重新登录 QQ（扫码）」，约 10~25 秒后 QQ 窗口弹出，用手机扫码'
+        : (lg.waiting ? '二维码已就绪，用手机 QQ 扫一下' : '还没登录：点下面的「重新登录 QQ（扫码）」');
     }
 
     box.innerHTML = '<article class="card login-status-card is-' + kind + '">' +
@@ -2208,13 +2286,16 @@
         '<span class="login-status-note">' + esc(note) + '</span>' +
       '</div>' +
       '<div class="login-status-grid">' +
-        kv('后端', esc(qcName)) +
-        kv('登录阶段', nc.reachable ? esc(loginPhaseText(nc.loginPhase)) : '—') +
-        (nc.backend === 'snowluma'
+        kv('Molly 链路', q.bridgeReady ? pill('ok', '已连接') : pill('bad', val(q.bridgeState))) +
+        kv('QQ 客户端', q.clientReachable
+          ? (q.clientLogin ? pill('ok', '已登录') : pill('warn', '未登录'))
+          : pill('idle', '进程信息不可达')) +
+        kv('后端', esc(label)) +
+        (q.backend === 'snowluma'
           ? kv('深度探测', nc.deepOk === true ? pill('ok', '正常') : (nc.deepOk === false ? pill('warn', '假在线') : '—'))
           : kv('核心就绪', nc.reachable ? (nc.coreReady ? '是' : '否') : '—')) +
         kv('QQ 号', uin ? '<span class="mono">' + esc(uin) + '</span>' : '—') +
-        (nc.backend === 'snowluma'
+        (q.backend === 'snowluma'
           ? kv('登录方式', 'QQ 原生窗口扫码')
           : kv('二维码', lg.png ? pill('warn', '已生成') : pill('idle', '未生成'))) +
       '</div></article>';
@@ -2254,7 +2335,9 @@
     var gen = $('#loginGen');
     if (gen) {
       gen.disabled = lg.generating;
-      gen.textContent = lg.generating ? '生成中…' : (lg.waiting ? '换一张' : '生成二维码');
+      gen.textContent = lg.generating
+        ? '处理中…'
+        : (lg.triggered ? '再次触发重启' : (lg.waiting ? '换一张' : '重新登录 QQ（扫码）'));
       gen.classList.toggle('is-loading', lg.generating);
     }
 
@@ -2281,6 +2364,8 @@
     var qr = $('#loginQr');
     var img = $('#loginQrImg');
     var idle = $('#loginIdle');
+    var idleMain = $('#loginIdleMain');
+    var idleHint = $('#loginIdleHint');
     var link = $('#loginUrl');
     var hint = $('#loginHint');
     if (qr && img) {
@@ -2300,12 +2385,26 @@
         qr.hidden = true;
         if (idle) idle.hidden = false;
         if (img) img.removeAttribute('src');
+        /* 没有二维码分两种：SnowLuma 后端「已触发重启、等窗口」和「还没点按钮」 */
+        var q = qqStatus();
+        if (idleMain) {
+          idleMain.textContent = lg.triggered
+            ? '已触发重启 QQ：约 10~25 秒后 QQ 窗口会弹出来，用手机扫码登录。'
+            : (q.backend === 'snowluma'
+              ? '点「重新登录 QQ（扫码）」：会触发计划任务重启 QQ 客户端，约 10~25 秒后 QQ 窗口弹出，用手机扫码。'
+              : '点「重新登录 QQ（扫码）」会现场生成一张登录二维码，用手机 QQ 扫码。');
+        }
+        if (idleHint) {
+          idleHint.textContent = lg.triggered
+            ? '不会重启 Molly 插件、网关和控制台。30 秒还没反应：看「运维」页的 SnowLuma 启动/运行日志，或去「守护」检查插件连接。'
+            : '不会重启 Molly 插件、网关和控制台。回滚后端下二维码约 2 分钟过期，过期后最多自动换 3 张。';
+        }
       }
     }
 
-    /* 导航上的橙点：只在「有一张还没扫的码」时亮，成功或过期即灭 */
+    /* 导航上的橙点：有码在等扫、或者刚触发完重启在等登录时都亮 */
     var badge = $('#loginBadge');
-    if (badge) badge.hidden = !(lg.waiting && !lg.success);
+    if (badge) badge.hidden = !((lg.waiting || lg.triggered) && !lg.success);
   }
 
   function tickGenProgress() {
@@ -2319,7 +2418,10 @@
     if (!prog) return;
     var secs = Math.max(0, Math.round((Date.now() - lg.genStartedAt) / 1000));
     prog.hidden = false;
-    prog.textContent = '正在生成二维码，已等待 ' + secs + ' 秒（通常 2–6 秒）';
+    /* SnowLuma 后台没有二维码可生成：点按钮是触发计划任务重启 QQ，文案别再说「生成二维码」 */
+    prog.textContent = qqStatus().backend === 'snowluma'
+      ? '正在触发重新登录，已等待 ' + secs + ' 秒…'
+      : '正在生成二维码，已等待 ' + secs + ' 秒（通常 2–6 秒）';
   }
 
   function stopGenTick() {
@@ -2350,7 +2452,7 @@
 
   function loginPollTick() {
     var lg = state.login;
-    if (!lg.waiting) { stopLoginPoll(); return; }
+    if (!lg.waiting && !lg.triggered) { stopLoginPoll(); return; }
     fetch('/api/overview', { cache: 'no-store' })
       .then(function (r) {
         if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -2362,11 +2464,17 @@
         state.lastOkAt = Date.now();
         state.lastError = null;
         safe(renderTop);
-        var nc = j.napcat || {};
-        if (nc.isLogin) {
-          /* 码还在生成时就已经在线：说明用户本来就是登录状态，不是刚扫上的 */
-          markLoginSuccess(lg.generating ? { already: true } : {});
+        /* 成功标准 = 插件桥接 online（Molly 真连上了），不是客户端探测 */
+        var q = qqStatus(j);
+        if (q.bridgeOnline) {
+          markLoginSuccess(lg.triggered ? { retriggered: true } : (lg.generating ? { already: true } : {}));
           return;
+        }
+        /* 触发重启后最多等 60 秒：别让「等待中」无限转下去 */
+        if (lg.triggered && lg.triggeredAt && Date.now() - lg.triggeredAt > 60_000) {
+          lg.triggered = false;
+          lg.hint = '还没等到 QQ 登录。看「运维」页的 SnowLuma 启动/运行日志（G:\\Molly\\qq-whale\\out\\snowluma-boot.log、snowluma-runtime.out.log），也可以去「守护」检查插件连接。';
+          stopLoginPoll();
         }
         safe(renderLogin);
       })
@@ -2411,11 +2519,13 @@
     generateQr({ auto: true });
   }
 
-  /* opts.already 表示「本来就在线，后端没给码」：这时候说「扫码成功」是在骗人 */
+  /* opts.already 表示「本来就在线，后端没给码」：这时候说「扫码成功」是在骗人；
+     opts.retriggered 表示「刚触发重启 QQ，后来真的连上了」 */
   function markLoginSuccess(opts) {
     var lg = state.login;
     opts = opts || {};
     lg.waiting = false;
+    lg.triggered = false;
     lg.expiresAt = 0;
     lg.png = '';
     lg.url = '';
@@ -2425,11 +2535,13 @@
     lg.success = 'Molly ' + (loginUin() || '（QQ 号未知）');
     lg.successNote = opts.already
       ? '本来就在线，不需要扫码。'
-      : '扫码成功，Molly 已经能正常收发消息了。';
+      : (opts.retriggered
+        ? 'QQ 重新登录完成，Molly 已经连上 QQ，能正常收发消息了。'
+        : '扫码成功，Molly 已经连上 QQ，能正常收发消息了。');
     stopLoginPoll();
     stopLoginCountdown();
     safe(renderLogin);
-    toast(opts.already ? '本来就在线，不需要扫码' : '扫码登录成功');
+    toast(opts.already ? '本来就在线，不需要扫码' : 'QQ 已重新登录，Molly 已连上');
     poll();   /* 立刻刷一遍总览和顶栏，别等 4 秒 */
   }
 
@@ -2442,6 +2554,7 @@
     lg.genStartedAt = Date.now();
     lg.error = '';
     lg.hint = '';
+    lg.triggered = false;
     if (!opts.auto) {
       lg.autoSwaps = 0;   /* 手动生成一次 = 重新开始计数 */
       lg.success = '';
@@ -2478,6 +2591,25 @@
         return;
       }
 
+      /* SnowLuma 后端「重新登录」= 触发 SnowLuma-Relogin 计划任务重启 QQ 客户端，
+         本来就没有二维码。没有 png 不是失败：转成「已触发，等窗口」状态继续轮询。 */
+      if (!d.png && (d.backend === 'snowluma' || d.hint || d.task === 'SnowLuma-Relogin')) {
+        lg.png = '';
+        lg.imgSrc = '';
+        lg.url = '';
+        lg.waiting = false;
+        lg.triggered = true;
+        lg.triggeredAt = Date.now();
+        lg.expiresAt = 0;
+        lg.hint = d.hint ? String(d.hint) : '已触发重新登录：约 10~25 秒后 QQ 窗口会弹出来，用手机扫码即可。';
+        lg.success = '';
+        startLoginPoll();
+        toast('已触发重新登录 QQ，等窗口弹出');
+        safe(renderLogin);
+        poll();
+        return;
+      }
+
       if (!d.png) {
         lg.error = '服务端没有返回二维码（png 为空）';
         lg.png = '';
@@ -2505,16 +2637,17 @@
     });
   }
 
-  /* 进登录页：只恢复现场，不自动生成；例外是总览黄条点进来（loginAutoStart）
-     和「停在别处时码过期了」——这两种情况下用户本来就想要一张新码。 */
+  /* 进登录页：只恢复现场，不自动触发；点按钮才是明确动作。
+     例外是「停在别处时码过期了」——这种情况下用户本来就想要一张新码；
+     SnowLuma 的「已触发重启、等登录」状态下进页继续轮询等结果。 */
   function enterLoginPage() {
     var lg = state.login;
     safe(renderLogin);
     if (lg.generating || lg.success) return;
 
-    if (state.loginAutoStart) {
-      state.loginAutoStart = false;
-      if (!lg.waiting) { generateQr(); return; }
+    if (lg.triggered) {
+      startLoginPoll();
+      return;
     }
 
     if (lg.waiting && lg.expiresAt && lg.expiresAt <= Date.now()) {
@@ -2643,15 +2776,15 @@
     },
     {
       id: 'napcat/qr',
-      title: '重新登录（扫码）',
+      title: '重新登录 QQ（扫码）',
       /* 两种后端行为不同：SnowLuma 只重启 QQ（不重启 SnowLuma，设备指纹不变）；
-         NapCat 走 make-qr.mjs 出二维码。标题用中性的「重新登录」。 */
-      desc: 'SnowLuma 后端：触发计划任务 SnowLuma-Relogin（只重启 QQ，约 10~25 秒后 QQ 窗口弹出，手机扫码）；NapCat 后端：spawn make-qr.mjs 显示二维码。'
+         回滚后端走 make-qr.mjs 出二维码。标题用中性的「重新登录」。 */
+      desc: 'SnowLuma 后端：触发计划任务 SnowLuma-Relogin（只重启 QQ 客户端，约 10~25 秒后 QQ 窗口弹出，手机扫码；不重启 Molly 插件、网关和控制台）；回滚后端：spawn make-qr.mjs 显示二维码。'
     },
     {
       id: 'napcat/restart',
       title: '全量重启 QQ 客户端',
-      desc: 'SnowLuma 后端：触发计划任务 SnowLuma-Boot（连 SnowLuma 一起重启，只在进程卡死时用）；NapCat 后端：spawn start-molly.ps1 -Restart。',
+      desc: 'SnowLuma 后端：触发计划任务 SnowLuma-Boot（连 SnowLuma 一起重启，只在进程卡死时用）；回滚后端：spawn start-molly.ps1 -Restart。',
       confirm: true,
       consequence: '会踢掉当前 QQ 登录：Molly 立刻掉线，必须重新扫码才能回来。'
     },
@@ -2689,7 +2822,7 @@
     {
       id: 'process/start-napcat',
       title: '启动 QQ 客户端进程',
-      desc: 'SnowLuma 后端：触发计划任务 SnowLuma-Boot（拉起 SnowLuma + QQ）；NapCat 后端：spawn start-molly.ps1（不带 -Restart），只拉起进程。',
+      desc: 'SnowLuma 后端：触发计划任务 SnowLuma-Boot（拉起 SnowLuma + QQ）；回滚后端：spawn start-molly.ps1（不带 -Restart），只拉起进程。',
       confirm: true,
       consequence: '会拉起一个 QQ 客户端进程；若已有进程在跑，可能端口冲突。'
     }
@@ -2866,8 +2999,10 @@
       if (res.durationMs === undefined) res.durationMs = Date.now() - started;
       if (box) safe(function () { showResult(box, res); });
       setBusy(btn, false);
-      if (res.ok) toast('已执行：' + actionId);
-      else toast('失败：' + (res.error || '未知错误'));
+      if (res.ok) {
+        toast(actionId === 'napcat/qr' ? '已触发重新登录 QQ，等窗口弹出扫码' : ('已执行：' + actionId));
+        if (actionId === 'napcat/qr') safe(poll);   /* 立刻刷一遍状态条，别等 4 秒 */
+      } else toast('失败：' + (res.error || '未知错误'));
     });
   }
 
@@ -2890,6 +3025,10 @@
     }
     if (ok && data.url) {
       html += '<p class="ar-meta">链接：<a href="' + esc(data.url) + '" target="_blank" rel="noreferrer">' + esc(data.url) + '</a></p>';
+    }
+    if (ok && data.hint) {
+      /* 重新登录是「触发计划任务」而不是「生成一张码」，服务端会带一句人话解释，别让它埋在 JSON 里 */
+      html += '<p class="ar-hint">' + esc(String(data.hint)) + '</p>';
     }
 
     if (tail) {
@@ -3002,9 +3141,10 @@
     if (ovBanner) {
       ovBanner.addEventListener('click', function (ev) {
         ev.preventDefault();
-        state.loginAutoStart = true;   /* 由 setPage('login') 消费一次 */
-        if (location.hash === '#/login') setPage('login');
-        else location.hash = '#/login';
+        /* 去「QQ 连接」页看状态和下一步：SnowLuma 后端不能现场出二维码，
+           所以这里不再自动「生成」，否则用户会以为闪一下就有码可扫。 */
+        if (location.hash === '#/qq') setPage('qq');
+        else location.hash = '#/qq';
       });
     }
   }
@@ -3221,6 +3361,7 @@
     var pl = ov.plugin || {};
     var nc = ov.napcat || {};
     var wd = ov.watchdog || {};
+    var q = qqStatus(ov);
     var linkReady = !!(pl.link && pl.link.ready);
     var linkState = (pl.link && pl.link.state) || 'unknown';
 
@@ -3232,17 +3373,16 @@
         kv('昵称', pl.bot && pl.bot.nickname ? esc(pl.bot.nickname) : '—'),
         kv('今天消息', pl.metrics && pl.metrics.messages !== null ? mono(pl.metrics.messages) : '—')
       ].join('')),
-      card((nc.backend === 'snowluma' ? 'SnowLuma' : 'NapCat'), [
-        nc.backend === 'snowluma'
-          ? kv('WebUI', nc.webui
-            ? '<a href="' + esc(nc.webui) + '" target="_blank" rel="noreferrer">' + esc(nc.webui) + '</a>'
-            : '—')
-          : kv('WebUI', nc.reachable ? pill('ok', '可达') : pill('bad', '不可达')),
-        kv('登录态', nc.isLogin ? pill('ok', '已登录') : pill('warn', '未登录')),
-        kv('阶段', val(nc.loginPhase)),
-        nc.backend === 'snowluma'
-          ? kv('深度探测', nc.deepOk === true ? pill('ok', '正常') : (nc.deepOk === false ? pill('warn', '假在线') : '—'))
-          : kv('核心就绪', nc.coreReady ? '是' : '否')
+      card('QQ 客户端（' + qqBackendLabel(q) + '）', [
+        kv('Molly 链路', q.bridgeOnline ? pill('ok', '在线') : pill('warn', esc(q.bridgeState || '未连上'))),
+        kv('客户端进程', q.clientReachable ? pill('ok', '在跑') : pill('bad', '探测不到')),
+        kv('登录态', q.isLogin ? pill('ok', '已登录') : pill('warn', '未登录')),
+        kv('阶段', nc.loginPhase ? val(nc.loginPhase) : '—'),
+        q.backend === 'snowluma'
+          ? (nc.webui
+            ? kv('WebUI', '<a href="' + esc(nc.webui) + '" target="_blank" rel="noreferrer">' + esc(nc.webui) + '</a>')
+            : '')
+          : kv('WebUI', nc.reachable ? pill('ok', '可达') : pill('bad', '不可达'))
       ].join('')),
       card('守护', [
         kv('watchdog', wd.reachable ? pill('ok', '可达') : pill('bad', '不可达')),
@@ -3320,9 +3460,9 @@
   function opsStopMolly() {
     openConfirm({
       title: '停止 Molly',
-      desc: '会杀掉 QQ 与 NapCat 进程，Molly 立刻掉线。',
+      desc: '会停掉 QQ 客户端和它的连接服务，Molly 立刻掉线。',
       items: [
-        '只停 QQ 与 NapCat；DSH 宿主、网关、控制台本身不动',
+        '只停 QQ 客户端和它的连接服务；DSH 宿主、网关、控制台本身不动',
         '再要说话得重新启动，可能需要重新扫码'
       ],
       okText: '停掉',
@@ -3335,7 +3475,7 @@
   function opsRestartMolly() {
     openConfirm({
       title: '重启 Molly',
-      desc: '先停 QQ 与 NapCat，等 3 秒再重新拉起。中间会有一段空窗。',
+      desc: '先停 QQ 客户端和它的连接服务，等 3 秒再重新拉起。中间会有一段空窗。',
       items: ['重启期间消息不会回应', '拉起成功与否看下面结果里的 tail'],
       okText: '重启',
       onYes: function () {
@@ -3771,7 +3911,7 @@
       gh += '<p class="card-sub">还没有群级覆盖，所有群都跟随「群聊（默认）」。</p>';
     }
     gh += '<div class="field"><div class="field-label">群号</div><div class="row-actions">'
-      + '<input class="input input-sm" id="swGroupInput" inputmode="numeric" placeholder="例如 666666666" value="'
+      + '<input class="input input-sm" id="swGroupInput" inputmode="numeric" placeholder="例如 123456789" value="'
       + esc(swFormVal('group', gid)) + '">'
       + '<button class="btn btn-sm" type="button" data-sw-act="group-open">打开</button>'
       + (gid ? '<button class="btn btn-sm btn-ghost" type="button" data-sw-act="group-remove" data-gid="'
@@ -3814,7 +3954,7 @@
       + '<input class="input input-sm" id="swMuteNote" placeholder="备注（可选）" style="width:160px" value="'
       + esc(swFormVal('muteNote', '')) + '">'
       + '<button class="btn btn-sm" type="button" data-sw-act="mute">静音</button>'
-      + '</div><p class="field-hint">scope 写 private（私聊）或群号（群聊），例如 666666666。</p></div>';
+      + '</div><p class="field-hint">scope 写 private（私聊）或群号（群聊），例如 123456789。</p></div>';
     cards.push(card('临时静音', mh));
 
     box.innerHTML = cards.join('');
@@ -3832,6 +3972,8 @@
 
   function currentPage() {
     var h = String(location.hash || '').replace(/^#\/?/, '');
+    /* 老链接兼容：#/napcat 是这一页改名前叫「QQ 连接」的地址，收藏夹里可能还留着 */
+    if (h === 'napcat') h = 'qq';
     return PAGES.indexOf(h) >= 0 ? h : 'overview';
   }
 
@@ -3844,7 +3986,7 @@
       case 'watchdog': renderWatchdog(); break;
       case 'ops': renderOps(); break;
       case 'external': renderExternal(); break;
-      case 'napcat': renderNapcat(); break;
+      case 'qq': renderQq(); break;
       case 'login': renderLogin(); break;
       case 'settings': renderSettings(); break;
       case 'switches': if (!swInputFocused()) renderSwitches(); break;

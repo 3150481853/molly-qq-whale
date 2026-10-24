@@ -3,9 +3,10 @@
  * 比如反戳、被戳多了生气这种」）。
  *
  * 设计取舍：
- *  1. **不走模型**。戳一戳是高频、廉价的肢体互动，走一次模型要 1~5 秒、一次 token，
- *     而且她正忙着聊别的时候会被排在后面——真人被戳是"反射"，不是"思考"。
- *     所以文案固定在这里，按关系粗分（主人 / 熟人 / 陌生人）。
+ *  1. **2026-10-24 起「说一句」改用模型现说**（主人 m01908：「Molly 的戳一戳功能目前是
+ *     固定回复吧，把固定回复也改成使用模型进行回复」）。这里只保留固定文案作**兜底**：
+ *     模型超时/失败/被 `pokeUseModel:false` 关掉时用它，保证被戳不会彻底没反应。
+ *     纯反射的「反戳」动作仍然不花模型（那是肢体回应，没有台词）。
  *  2. **反戳 + 说一句可以同时发生，但受概率控制**。默认 70% 反戳、45% 说一句；
  *     两个都独立掷骰——全都不中就是"被戳了但没反应"，真人也会这样。
  *  3. **被戳多了会生气**：同一个对象在窗口期（默认 180 秒）内被戳到第 N 次（默认 4）
@@ -25,6 +26,9 @@ export const POKE_DEFAULTS = {
   pokeAngryWindowSeconds: 180, // 计数窗口（秒）
   pokeCooldownSeconds: 8, // 两次反应之间的最小间隔（秒）
   pokeAngryCooldownSeconds: 90, // 生气之后的冷却（秒）
+  pokeUseModel: true, // 说一句时让模型现编（false = 用下面的固定文案池）
+  pokeModelTimeoutMs: 10000, // 模型回话的超时；超时就退回固定文案
+  pokeModelMaxChars: 40, // 模型回话的字数上限（超出截断）
 }
 
 /** 文案池。{who} 会替换成对方名字（拿不到就用"你"）。 */
@@ -61,6 +65,7 @@ export class PokeReactor {
    * @param {Function} [opts.inRestWindow] () => boolean，休息时段
    * @param {Function} [opts.isOwner]   (qq) => boolean
    * @param {Function} [opts.isKnown]   (qq) => boolean 熟人（主人/审批人/记忆里出现过）
+   * @param {Function} [opts.replyText] async (ctx) => string，让模型现编一句（可为空串）
    */
   constructor({
     client,
@@ -74,6 +79,7 @@ export class PokeReactor {
     inRestWindow = () => false,
     isOwner = () => false,
     isKnown = () => false,
+    replyText = null,
   }) {
     this.client = client
     this.config = config
@@ -86,6 +92,7 @@ export class PokeReactor {
     this.inRestWindow = inRestWindow
     this.isOwner = isOwner
     this.isKnown = isKnown
+    this.replyText = replyText
     /** key -> { hits:number[], lastActAt:number, angryUntil:number } */
     this.records = new Map()
     /** 最近一次处理结果（诊断用，暴露在 /state.poke.last） */
@@ -205,6 +212,7 @@ export class PokeReactor {
     if (!this.isAllowed(ev)) return { acted: false, reason: 'not-allowed' }
 
     const scene = gid ? 'group_mention' : 'private'
+    const strangerNow = !this.isOwner(uid) && !this.isKnown(uid)
     const plan = this.plan({ scene, gid, uid })
     if (this.stats) this.stats.pokeReceived = (this.stats.pokeReceived || 0) + 1
     if (plan.act === 'none') {
@@ -213,6 +221,36 @@ export class PokeReactor {
     }
 
     const who = userName || (gid ? '' : '')
+    /*
+     * 文案：优先让模型现说一句（2026-10-24 主人 m01908），失败就用 plan 里的固定文案。
+     * 只对「要说一句话」的情形调模型（plan.text 非空）；纯反戳没有台词，不花这次调用。
+     */
+    let text = plan.text || ''
+    let fromModel = false
+    if (text && this.config.pokeUseModel !== false && typeof this.replyText === 'function') {
+      try {
+        const gen = await this.replyText({
+          scene,
+          gid,
+          uid,
+          userName: who,
+          count: plan.count,
+          angry: plan.act === 'angry',
+          stranger: strangerNow,
+        })
+        const cleaned = this._cleanLine(gen)
+        if (cleaned) {
+          text = cleaned
+          fromModel = true
+          if (this.stats) this.stats.pokeModel = (this.stats.pokeModel || 0) + 1
+        } else if (this.stats) {
+          this.stats.pokeModelFail = (this.stats.pokeModelFail || 0) + 1
+        }
+      } catch (err) {
+        if (this.stats) this.stats.pokeModelFail = (this.stats.pokeModelFail || 0) + 1
+        this.logger('debug', `戳一戳模型回话失败，改用固定文案：${err?.message || err}`)
+      }
+    }
     const fill = (s) => String(s || '').replace(/\{who\}/g, who || '你')
     const bot = this._resolveClient()
     if (!bot) return { acted: false, act: 'none', reason: 'no-client', count: plan.count }
@@ -222,8 +260,8 @@ export class PokeReactor {
         else await bot.sendPrivatePoke(uid)
         if (this.stats) this.stats.pokeBack = (this.stats.pokeBack || 0) + 1
       }
-      if (plan.text) {
-        const seg = [{ type: 'text', data: { text: fill(plan.text) } }]
+      if (text) {
+        const seg = [{ type: 'text', data: { text: fill(text) } }]
         if (gid) await bot.sendGroupMsg(gid, seg)
         else await bot.sendPrivateMsg(uid, seg)
       }
@@ -232,8 +270,16 @@ export class PokeReactor {
       } else if (plan.say) {
         if (this.stats) this.stats.pokeSay = (this.stats.pokeSay || 0) + 1
       }
-      this.logger('debug', `戳一戳：${gid || '私聊'} 来自 ${uid}（第 ${plan.count} 次）→ ${plan.act}`)
-      return { acted: true, act: plan.act, count: plan.count, back: !!plan.back, say: !!(plan.text && plan.act !== 'angry') }
+      this.logger('debug', `戳一戳：${gid || '私聊'} 来自 ${uid}（第 ${plan.count} 次）→ ${plan.act}${fromModel ? '（模型）' : ''}`)
+      return {
+        acted: true,
+        act: plan.act,
+        count: plan.count,
+        back: !!plan.back,
+        say: !!(text && plan.act !== 'angry'),
+        model: fromModel,
+        text: text ? fill(text) : '',
+      }
     } catch (err) {
       // 发失败不算"回应过"：把冷却起点清掉，下一条戳能立刻重试
       if (plan.key) {
@@ -243,5 +289,21 @@ export class PokeReactor {
       this.logger('warn', `戳一戳回应失败: ${err?.message || err}`)
       return { acted: false, act: 'error', reason: String(err?.message || err) }
     }
+  }
+
+  /**
+   * 清洗模型给的一句话：压成单行、剥掉包裹引号与「Molly：」前缀、按字数截断。
+   * 模型偶尔会写成两行或加引号，直接发出去很难看。
+   */
+  _cleanLine(s) {
+    let t = String(s ?? '').trim()
+    if (!t) return ''
+    t = t.replace(/\r?\n+/g, ' ').replace(/\s+/g, ' ').trim()
+    t = t.replace(/^[「『"'“‘]+/, '').replace(/[」』"'”’]+$/, '').trim()
+    t = t.replace(/^(?:Molly|molly|鲸鱼娘)\s*[：:]\s*/, '').trim()
+    const max = Math.max(8, Number(this.config.pokeModelMaxChars ?? POKE_DEFAULTS.pokeModelMaxChars) || 40)
+    const chars = [...t]
+    if (chars.length > max) t = chars.slice(0, max).join('')
+    return t
   }
 }

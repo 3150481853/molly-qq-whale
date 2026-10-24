@@ -481,8 +481,13 @@ async function buildOverview() {
     out.sidecar = { reachable: true, ...d };
   }
 
-  // 3) NapCat WebUI（6099，需 JWT，见契约 §6；token/secret 绝不落日志）
+  // 3) QQ 客户端探测（SnowLuma 走 OneBot HTTP 3000；回滚后端 NapCat 走 WebUI 6099。
+  //    token/secret 绝不落日志）
   out.napcat = await buildNapcat();
+
+  // 3.5) QQ 链路聚合（2026-10-25）：主依据 = 插件桥接，次依据 = QQ 客户端探测。
+  //    out.napcat 原样保留做兼容；前端新逻辑优先读 out.qq。
+  out.qq = await buildQqStatus(out.plugin, out.napcat);
 
   // 4) 守护（本地文件 + 计划任务状态）
   out.watchdog = await buildWatchdog();
@@ -617,6 +622,94 @@ async function buildNapcat() {
   } catch (err) {
     return { reachable: false, backend: 'napcat', webui: null, error: `${(err && err.message) || err}` };
   }
+}
+
+// ── QQ 链路聚合：主依据 = 插件桥接，次依据 = QQ 客户端探测 ───────────────────
+/*
+ * 2026-10-25 主人确认的判定优先级（部署者反馈：QQ 明明在跑，控制台却显示未连接）：
+ *   - 插件 /state.link.state === 'online' ⇒ Molly 已经连上 OneBot，QQ 链路是通的。
+ *   - QQ 客户端 WebUI 探测只回答「客户端进程在不在」，**不能**拿来判「未连接」。
+ * 四种组合（level）：connected / bridge-only / client-only / offline；
+ * 文案与「下一步」建议都放这里，前端只取，避免两处文案漂移。
+ * 以前误报的原因：前端只有 napcat 块（客户端探测），拿它当主依据，
+ * 客户端探测失败就直接显示未登录，把「插件已在线」这个更强的证据盖掉了。
+ */
+
+// 客户端探测缓存：4 秒轮询下不能每轮都等一次连接超时（不可达时尤其慢）。
+const clientProbeCache = { key: '', at: 0, reachable: false };
+const CLIENT_PROBE_TTL = 10_000;
+const CLIENT_PROBE_TIMEOUT = 800;
+
+async function probeClientWebui() {
+  const backend = currentBackend();
+  const url = backend === 'snowluma' ? SNOWLUMA_WEBUI : NAPCAT;
+  const key = backend + '|' + url;
+  if (clientProbeCache.key === key && Date.now() - clientProbeCache.at < CLIENT_PROBE_TTL) {
+    return clientProbeCache.reachable;
+  }
+  let reachable = false;
+  try {
+    // 只要 HTTP 有应答就算进程活着：WebUI 要鉴权时 401/403 也算可达。
+    const r = await fetch(url + '/', {
+      method: 'GET',
+      redirect: 'manual',
+      signal: AbortSignal.timeout(CLIENT_PROBE_TIMEOUT),
+    });
+    reachable = Number(r.status) > 0;
+  } catch {
+    reachable = false;
+  }
+  clientProbeCache.key = key;
+  clientProbeCache.at = Date.now();
+  clientProbeCache.reachable = reachable;
+  return reachable;
+}
+
+async function buildQqStatus(plugin, napcat) {
+  const backend = currentBackend();
+  const link = (plugin && plugin.link) || {};
+  const bridgeState = link.state || 'unknown';
+  const bridgeReady = link.ready === true;
+  const bridgeOnline = bridgeReady && bridgeState === 'online';
+  // 客户端进程的两种证据：WebUI 能应答，或 OneBot HTTP 已经回过话
+  //（回过话说明 SnowLuma 进程活着，哪怕 QQ 还没登录）。任一成立都算「进程可达」。
+  const webuiOk = await probeClientWebui();
+  const clientReachable = webuiOk || !!(napcat && napcat.reachable === true);
+  const clientLogin = !!(napcat && napcat.isLogin === true);
+  const level = bridgeOnline
+    ? (clientReachable ? 'connected' : 'bridge-only')
+    : (clientReachable ? 'client-only' : 'offline');
+  const text = {
+    connected: 'Molly 已连接 QQ',
+    'bridge-only': 'Molly 已连接 QQ（客户端状态信息不可用）',
+    'client-only': 'QQ 在运行，但 Molly 还没连上',
+    offline: 'QQ 未连接',
+  }[level];
+  const nextStep = {
+    connected: '',
+    'bridge-only': '链路已通，消息能正常收发就不用管；持续异常去「运维」看日志。',
+    'client-only': '到「执行块」点「重新检查连接」；刚重启过 QQ 就等 10~25 秒再刷新，或去「守护」看 watchdog 结论。',
+    offline: '点「重新登录 QQ（扫码）」（「QQ 连接」页，或总览页的提示条）。',
+  }[level];
+  return {
+    level,
+    text,
+    nextStep,
+    bridgeState,
+    bridgeReady,
+    bridgeOnline,
+    clientReachable,
+    clientLogin,
+    backend,
+    backendName: backend === 'snowluma' ? 'SnowLuma' : '回滚后端（NapCat）',
+    webui: backend === 'snowluma' ? SNOWLUMA_WEBUI : NAPCAT,
+    uin: (napcat && napcat.uin) || (plugin && plugin.bot && plugin.bot.userId) || null,
+    nickname: (napcat && napcat.nickname) || (plugin && plugin.bot && plugin.bot.nickname) || null,
+    // 语义：QQ 链路当前能不能用（桥接优先；客户端在线且已登录也算）
+    isLogin: bridgeOnline || (clientReachable && clientLogin),
+    napcat: napcat || null, // 旧字段原样带一份，兼容仍读 ov.qq.napcat 的调用方
+    at: Date.now(),
+  };
 }
 
 // ── 守护：状态/配置读文件，quiet 由配置算，taskEnabled 查计划任务 ───────────
@@ -1453,6 +1546,11 @@ async function readLogTail(source, tail) {
     napcat: path.join(OUT, 'napcat.log'),
     // 心跳推送器（tools\heartbeat-push.mjs）自己的日志。刚开始推的时候文件可能还不存在。
     heartbeat: path.join(OUT, 'heartbeat.log'),
+    // SnowLuma 后端（2026-10-25 加）：扫码/重启失败时，这两个日志是第一现场。
+    //  - snowluma-boot：tools\snowluma-start.ps1 的启动过程日志
+    //  - snowluma-runtime：SnowLuma 进程自己的 stdout/err
+    'snowluma-boot': path.join(OUT, 'snowluma-boot.log'),
+    'snowluma-runtime': path.join(OUT, 'snowluma-runtime.out.log'),
   };
   const known = Object.prototype.hasOwnProperty.call(MAP, source);
   const file = known ? MAP[source] : MAP.watchdog;

@@ -7,6 +7,22 @@
 
 ---
 
+## 2026-10-25 · v1.1.3-preview.1：戳一戳改模型回话 + 控制台改版（预览版）
+
+> 预览版，只含这两项供提前验收；正式版本号沿用 1.1.x 线。
+> 主人要求（m02205）：「先推这两个到github作为1.1.2preview」。因 `v1.1.2` 已于 2026-10-24 21:31 发布并推送，经主人确认改用 `1.1.3-preview.1`。
+
+**戳一戳「说一句」改为模型回复（`lib/poke.js`、`lib/engine.js`、`lib/main.js`、`lib/web.js`）**
+- 新增配置 `pokeUseModel`（默认 `true`）、`pokeModelTimeoutMs`（默认 `10000`）、`pokeModelMaxChars`（默认 `40`）；`engine.pokeReplyText()` 让模型结合上下文与她此刻情绪说一句短的，超过 10 秒或失败自动回退原固定句池，失败计入 `stats.pokeModelFail`。
+- 真机验证：私聊连戳两次 → 第 1 次回戳；第 2 次她用模型回「又戳，手是闲不住是吧。」（OneBot 日志确认发送成功）。
+- 回滚：`cordis.patch.yml` 里 `pokeUseModel: false` 即退回固定句池，无需改代码。
+
+**控制台改版（`console/index.html`、`console/console.js`、`console/console.css`、`tools/console-server.mjs`）**
+- QQ 状态改四态判定：`connected` / `bridge-only` / `client-only` / `offline`，每种状态一句人话 + 下一步提示；`/api/overview` 新增 `qq` 字段（状态、后端、`webui`、`uin`、`nickname`、`nextStep`），侧车探测 800ms 超时 + 10s 缓存。
+- 顶部灯与总览卡读同一份判定；侧栏按「她 / 行为 / QQ / 运维 / 系统」六组重组；「QQ 连接」页把状态与扫码登录分两块；全仓清掉 NapCat 品牌（旧 `#/napcat` 自动跳到 `#/qq`）。
+- 已用真实浏览器验收：总览、QQ 连接、登录三页渲染正常，其它依赖未动。
+- 回滚：用 `console\*.bak-20261025` 四个备份覆盖回去，再重启控制台进程（`schtasks /End /TN Molly-Console` → `/Run`）。
+
 ## 2026-10-24 · 音色包：molly_own（自录 54 句微调）上线并开源
 
 **换音色（`tools/voice-sovits-start.ps1`、`cordis.patch.yml`）**

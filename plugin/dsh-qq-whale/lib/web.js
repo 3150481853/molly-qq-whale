@@ -346,6 +346,16 @@ export class WebWidget {
           // recent 是最近 6 条，够定位了。
           last: e.pokes?.last || null,
           recent: Array.isArray(e.pokes?.recent) ? e.pokes.recent.slice(-6) : [],
+          /*
+           * 模型回话（2026-10-25，主人 m01908 第 3 条）：原来"说一句"是固定文案，
+           * 现在改走一次小模型。验收要看三件事：开没开、真走了几次模型、
+           * 失败退回固定文案几次——所以把配置和两个计数一起暴露出来。
+           */
+          useModel: e.config?.pokeUseModel !== false,
+          modelTimeoutMs: Number(e.config?.pokeModelTimeoutMs ?? 10000),
+          modelChars: Number(e.config?.pokeModelMaxChars ?? 40),
+          model: e.stats?.pokeModel || 0,
+          modelFail: e.stats?.pokeModelFail || 0,
         }
       }
     } catch {}

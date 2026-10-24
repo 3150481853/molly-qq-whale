@@ -258,6 +258,13 @@ export class ChatEngine {
       // 2026-10-23：QQ 语音条硬上限 60 秒，超过的音频不发（voice.js 按 wav 头核对真实时长）。
       maxSeconds: config.voiceMaxSeconds,
       maxKeep: config.voiceMaxKeep,
+      /*
+       * 2026-10-25 用户反馈「语速有点快、断句不清晰」：
+       * voiceSpeed → GPT-SoVITS 的 speed_factor（0.9 = 比默认慢 10%）；
+       * voicePauseMs → 逐句合成后句间插入的静音毫秒数（默认 100）。
+       */
+      speed: config.voiceSpeed,
+      pauseMs: config.voicePauseMs,
     })
 
     /**
@@ -304,14 +311,17 @@ export class ChatEngine {
       pokeBack: 0,
       pokeSay: 0,
       pokeAngry: 0,
+      // 戳一戳用模型现说一句（2026-10-24，主人 m01908）：成功几次、退回固定文案几次
+      pokeModel: 0,
+      pokeModelFail: 0,
     }
 
     /**
      * 戳一戳回应（2026-10-23，主人 m01231）。
      *
      * 为什么不放在 deliver/模型链路里：戳一戳是 notice 事件、没有消息内容，
-     * 也不该走一次模型（1~5 秒 + token）。这里用小的状态机做"反射"：
-     * 反戳（概率）、说一句（概率）、被同一个人连戳多次会生气（计数 + 冷却）。
+     * 反戳/计数/冷却这些"反射"必须立刻做，不能排队等模型。2026-10-24 起
+     * 「说一句」改成让模型现编（主人 m01908），但生成失败时退回固定文案。
      * 文案与概率都在 lib/poke.js，配置键 poke*（见 main.js DEFAULTS）。
      */
     this.pokes = config.pokeEnabled === false
@@ -332,6 +342,9 @@ export class ChatEngine {
             if (String(config.ownerUin || '') === q) return true
             return (config.allowedUsers || []).map(String).includes(q)
           },
+          // 2026-10-24（主人 m01908）：说一句时让模型现编；失败/超时/关掉 pokeUseModel
+          // 时 poke.js 会用固定文案兜底。
+          replyText: (poke) => this.pokeReplyText(poke),
         })
 
     /**
@@ -2475,6 +2488,63 @@ export class ChatEngine {
     // 跨午夜（23:50 > 09:00）：命中 [start, 24:00) ∪ [00:00, end)
     if (s > e) return cur >= s || cur < e
     return cur >= s && cur < e
+  }
+
+  /**
+   * 戳一戳的「说一句」：让模型现编一句（2026-10-24，主人 m01908 要求把固定文案改成模型回复）。
+   *
+   * 为什么单独一条小请求而不是走主对话链路：
+   *   - 戳一戳是高频小互动，塞进主对话会把上下文和温度都搞乱；
+   *   - 这里只需要一句 40 字以内的话，maxTokens 给小、system 也短，成本比一次正常回复低一个量级；
+   *   - 失败绝不抛：poke.js 有固定文案兜底，模型挂了也要有反应。
+   *
+   * 返回空串 = 让 poke.js 用固定文案。
+   *
+   * @param {{scene?:string, gid?:string, uid?:string, userName?:string,
+   *          count?:number, angry?:boolean, stranger?:boolean}} poke
+   * @returns {Promise<string>}
+   */
+  async pokeReplyText(poke = {}) {
+    if (this.config.pokeUseModel === false) return ''
+    if (!this.gateway && !this.model) return ''
+    const cfg = this.config
+    const maxChars = Math.max(8, Number(cfg.pokeModelMaxChars ?? 40) || 40)
+    const who = String(poke.userName || '').trim()
+    const stranger = poke.stranger === true
+    const angry = poke.angry === true
+    const count = Number(poke.count) || 1
+    const rel = stranger ? '不太熟的人' : '熟人'
+    const system = [
+      '你是「Molly」，一只在网上到处游的鲸鱼娘，说话口语、短、有点懒散，偶尔嘴硬心软。',
+      '现在有人用 QQ 的「戳一戳」戳了你一下，你要回一句话（不是聊天回复）。',
+      `只输出这一句话：不超过 ${maxChars} 个字，单行；不要解释、不要加引号、不要写动作或心理描写、不要自称 AI。`,
+      angry
+        ? '你已经被同一个人连续戳了好几次，有点烦了：语气可以明显不高兴，但别骂人、别威胁，一句就够。'
+        : '语气随意：可以反问、嫌弃、撒娇、装凶或者接一句梗，别太礼貌也别太热情。',
+    ].join('\n')
+    const user = `（${rel}${who ? `「${who}」` : ''}戳了你一下，这是 180 秒内第 ${count} 次${angry ? '，你已经不耐烦了' : ''}）`
+    const timeoutMs = Math.max(3000, Number(cfg.pokeModelTimeoutMs ?? 10000) || 10000)
+    const signal =
+      typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+        ? AbortSignal.timeout(timeoutMs)
+        : undefined
+    try {
+      const res = await this.callModel({
+        system,
+        messages: [{ role: 'user', content: user }],
+        maxTokens: 160,
+        signal,
+      })
+      if (res?.ok && res.text) {
+        this.logger('debug', `戳一戳模型回话：${String(res.text).replace(/\s+/g, ' ').slice(0, 60)}`)
+        return String(res.text)
+      }
+      if (res && !res.ok) this.logger('debug', `戳一戳模型回话失败：${res.error || res.code || '?'}`)
+      return ''
+    } catch (err) {
+      this.logger('debug', `戳一戳模型回话异常：${err?.message || err}`)
+      return ''
+    }
   }
 
   /* ———————————————— QQ 空间（P3，SnowLuma 扩展动作） ————————————————

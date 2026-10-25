@@ -66,6 +66,7 @@
     pendingHint: false,   /* 轮询发现条数变了但列表没重绘，显示「有新条目」提示 */
     stickers: null,
     stickerError: null,
+    stkQuery: '',         /* 表情包搜索词：只影响渲染，不触发请求 */
     /* 扫码登录页：生成的码、有效期、等待状态全放这儿，重绘不会丢 */
     login: {
       generating: false,
@@ -1368,6 +1369,30 @@
     return '/api/sticker/' + encodeURIComponent(f);
   }
 
+  /* 表情包搜索（2026-10-25 主人要求「表情包做一个搜索功能」）：
+     数据源 /api/stickers 的 item 只有 name/file（关键词就是文件名用 _ 分隔），
+     插件侧另有 keywords 数组；两条路径都兼容。把 _ 换成空格，
+     这样「白猫 偷笑」能命中「白猫_眯眼_偷笑_坏笑」。 */
+  function stkSearchText(it) {
+    var parts = [it && it.name, it && it.file];
+    if (it && Array.isArray(it.keywords)) parts = parts.concat(it.keywords);
+    return String(parts.filter(Boolean).join(' ')).replace(/_/g, ' ').toLowerCase();
+  }
+
+  function stkTokens(q) {
+    return String(q || '').trim().toLowerCase().split(/[\s,，]+/).filter(Boolean);
+  }
+
+  /* 多词 = AND：每个词都要出现在名字 / 文件名 / 关键词任一里 */
+  function stickerHit(it, tokens) {
+    if (!tokens || !tokens.length) return true;
+    var hay = stkSearchText(it);
+    for (var i = 0; i < tokens.length; i++) {
+      if (hay.indexOf(tokens[i]) < 0) return false;
+    }
+    return true;
+  }
+
   function loadStickers(force) {
     if (state.stickers && !force) return;
     if (!state.stickers) {
@@ -1416,7 +1441,15 @@
     var stk = data.stickers || data;
     var items = Array.isArray(stk.items) ? stk.items : [];
 
-    sub.textContent = '共 ' + num(stk.count, 0) + ' 张 · 点击看大图';
+    var q = String(state.stkQuery || '').trim();
+    var tokens = stkTokens(q);
+    var shown = tokens.length
+      ? items.filter(function (it) { return stickerHit(it, tokens); })
+      : items;
+
+    sub.textContent = tokens.length
+      ? '「' + q + '」命中 ' + shown.length + ' / 共 ' + num(stk.count, 0) + ' 张'
+      : '共 ' + num(stk.count, 0) + ' 张 · 点击看大图';
 
     if (!items.length) {
       setHtml(grid, '');
@@ -1425,8 +1458,22 @@
       return;
     }
 
+    if (!shown.length) {
+      /* 搜不到时给一键清空，免得看起来像表情包丢了 */
+      setHtml(grid, '');
+      empty.hidden = false;
+      setHtml(empty, emptyHtml('没有匹配「' + esc(q) + '」的表情包。', '清空搜索'));
+      bindRetry(empty, function () {
+        var box = $('#stkSearch');
+        if (box) box.value = '';
+        state.stkQuery = '';
+        safe(renderStickers);
+      });
+      return;
+    }
+
     empty.hidden = true;
-    setHtml(grid, items.map(function (it) {
+    setHtml(grid, shown.map(function (it) {
       var url = stickerUrl(it);
       var file = it.file || it.name || '';
       /* 卡片外壳拆成两层：外层放操作条，内层 button 继续负责「点开大图」。
@@ -4081,6 +4128,23 @@
 
     var stkReload = $('#stkReload');
     if (stkReload) stkReload.addEventListener('click', function () { loadStickers(true); });
+
+    /* 表情包搜索框：输入即过滤（纯前端，不重新请求）；Esc 清空 */
+    var stkSearch = $('#stkSearch');
+    if (stkSearch) {
+      stkSearch.addEventListener('input', function () {
+        state.stkQuery = stkSearch.value || '';
+        safe(renderStickers);
+      });
+      stkSearch.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Escape') {
+          ev.preventDefault();
+          stkSearch.value = '';
+          state.stkQuery = '';
+          safe(renderStickers);
+        }
+      });
+    }
 
     /* 待核实：刷新 / 全部丢弃 / 每条行内按钮（事件委托，行被移除后不用重绑） */
     var pendReload = $('#pendReload');

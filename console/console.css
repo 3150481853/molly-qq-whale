@@ -546,6 +546,8 @@ select.input{ cursor: pointer; }
   margin-bottom: var(--s-4);
 }
 .toolbar .input{ max-width: 360px; }
+/* 表情包搜索框吃掉剩余宽度，和右侧按钮排一行 */
+.toolbar .stk-search{ flex: 1 1 280px; max-width: none; }
 
 /* ---------- 11. 表格 ---------- */
 .tbl{

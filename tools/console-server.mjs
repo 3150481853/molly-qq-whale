@@ -102,7 +102,22 @@ const TOOLS = path.join(ROOT, 'tools');
 // 监听地址：默认只听本机回环（默认值不变）；要对外网卡开放设 MOLLY_CONSOLE_HOST=0.0.0.0
 const HOST = pick('MOLLY_CONSOLE_HOST', 'host', '127.0.0.1');
 const PORT = Number(pick('MOLLY_CONSOLE_PORT', 'port', 19392)) || 19392;
-const VERSION = '1.0.0';
+// 控制台版本：以插件 package.json 为唯一真源，别在这里写死（2026-10-25 主人 m03522：
+// 左下角一直显示 v1.0.0 就是这一行写死的；发布版本与插件版本从此自动同步）。
+// exe 模式读不到 package.json 时退回 FALLBACK_VERSION，保证打包版也有版本号。
+const FALLBACK_VERSION = '1.1.3';
+const VERSION = (() => {
+  try {
+    const pkg = JSON.parse(
+      fs.readFileSync(path.join(ROOT, 'plugin', 'dsh-qq-whale', 'package.json'), 'utf8'),
+    );
+    const v = String(pkg.version || '').trim();
+    if (v) return v;
+  } catch {
+    /* 读不到就用兜底值，不阻断启动 */
+  }
+  return FALLBACK_VERSION;
+})();
 
 // 鉴权：默认关闭（本机免鉴权，行为不变）。MOLLY_CONSOLE_TOKEN 有值才校验请求头
 // x-molly-token —— 放请求头不放 query，避免密钥进访问日志（契约 §7.1.3）

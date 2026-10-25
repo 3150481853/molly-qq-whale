@@ -199,6 +199,26 @@ export function pickQuoteTarget(input = {}) {
   }
 }
 
+/**
+ * 引用回复不能带语音（主人 m03353：QQ 端「引用 + 语音」这条根本发不出去）。
+ * 一次回复只要决定挂引用框，就把所有语音段降级成文字：内容不丢，
+ * 只是不再发 record 段，也不会因为 record 被拒收而整条丢消息。
+ */
+export function shouldDemoteVoice({ isGroup = false, quoteTarget = '' } = {}) {
+  return Boolean(isGroup && quoteTarget)
+}
+
+/**
+ * 语音段 → 文字段：保留文字内容、丢掉文件引用，不改原对象。
+ * 文字为空时返回 null（调用方应丢弃这一段，不要发空消息）。
+ */
+export function voicePartToText(part) {
+  const text = String(part?.text || '').trim()
+  if (!text) return null
+  const { file, ...rest } = part || {}
+  return { ...rest, type: 'text', text }
+}
+
 export default {
   QUOTE_DEFAULTS,
   isPureNudge,
@@ -207,4 +227,6 @@ export default {
   lastOtherMessage,
   resolveExplicitAt,
   pickQuoteTarget,
+  shouldDemoteVoice,
+  voicePartToText,
 }

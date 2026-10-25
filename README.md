@@ -1,11 +1,11 @@
 <div align="center">
 
-<img src="assets/hero-v112.svg" width="880" alt="Molly QQ Whale">
+<img src="assets/hero-v113.svg" width="880" alt="Molly QQ Whale">
 
 基于 **DeepSeek Harness** 的 QQ 通道插件：稳定的人设、长期记忆、表情包习惯、会发语音，
 以及一个能看懂她此刻在干什么的控制台。
 
-**v1.1.3-preview.3**（预览版）—— 修「@ 错人」：她不再靠猜着 @ 人——模型写的 @ 号必须先过校验（只认最近 20 条里真说过话的人），回话时按条件带「引用」（30 秒内 ≥3 条且 ≥2 人在聊、或有人只发了个空「@」、或明确点名）；引用发不出去会自动退回纯文字，不会丢消息。上一版 **v1.1.3-preview.2**：记忆池新增「梗」类 + 上下文体积优化 A（一轮完整提示词 6,869 → 5,935 token，省 13.6%）。更早 **v1.1.3-preview.1**：戳一戳改用模型回一句、控制台清掉 NapCat 品牌并改四态 QQ 状态判定。
+**v1.1.3**（正式版）—— 三个预览版合并发布：戳一戳改用模型回一句；控制台清掉 NapCat 品牌、改四态 QQ 状态判定，**左下角版本号改为从插件版本自动读取**（以前写死显示 1.0）；记忆池新增「梗」类；上下文体积优化 A（一轮完整提示词 6,869 → 5,935 token，省 13.6%）；修「@ 错人」——她不再靠猜着 @ 人，模型写的 @ 号必须先过校验（只认最近 20 条里真说过话的人），拥挤/被空 @/点名时按条件带「引用」，引用发不出去自动退回纯文字；QQ 不支持「引用 + 语音」，引用时语音段会自动降级成文字。**控制台表情包页新增搜索**：按名字 / 关键词即时过滤（空格分隔多个词 = 同时匹配，`_` 当空格，「白猫 偷笑」能直接找到「白猫_眯眼_偷笑_坏笑」），副标题显示「命中 M / 共 N 张」，没搜到时空态里一键清空。上一版 **v1.1.3-preview.3** 只含 @ 修复；更早 **v1.1.3-preview.1** 是戳一戳模型回话 + 控制台改版。
 
 [![license](https://img.shields.io/badge/license-MIT-1aae39?style=flat-square)](LICENSE) [![node](https://img.shields.io/badge/node-22%2B-1aae39?style=flat-square)](https://nodejs.org) [![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0075de?style=flat-square)](#环境要求) [![host](https://img.shields.io/badge/host-DeepSeek%20Harness-5645d4?style=flat-square)](#环境要求) [![QQ](https://img.shields.io/badge/QQ-OneBot%2011-0075de?style=flat-square)](#环境要求)
 

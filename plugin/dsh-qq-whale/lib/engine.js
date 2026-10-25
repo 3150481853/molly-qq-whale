@@ -90,7 +90,7 @@ const { VoiceMaker, cleanVoiceText } = await import(sub('./voice.js'))
 // 戳一戳回应（2026-10-23，主人 m01231）：反戳 / 被戳多了生气，不走模型。
 const { PokeReactor, isPokeNotice } = await import(sub('./poke.js'))
 // 「@ 谁 / 引用哪条」（2026-10-25，主人 m02736 + m02835）：纯函数模块，单测直接跑。
-const { isPureNudge, resolveExplicitAt, pickQuoteTarget } = await import(sub('./quote-at.js'))
+const { isPureNudge, resolveExplicitAt, pickQuoteTarget, shouldDemoteVoice, voicePartToText } = await import(sub('./quote-at.js'))
 // 撤回处理（2026-10-24，主人 m00480）：纯函数模块（字段解析/TTL 清理/history 剔除）。
 // 撤回带来的状态（recalled Map、计数）留在这个类里，方便 /state 观察。
 const recallUtil = await import(sub('./engine-recall.js'))
@@ -321,6 +321,8 @@ export class ChatEngine {
       quoteFail: 0,
       quoteAtDropped: 0,
       quoteLast: null,
+      // 引用回复里语音段降级成文字的次数（2026-10-25，主人 m03353）
+      voiceDemoted: 0,
     }
 
     /**
@@ -4606,6 +4608,12 @@ export class ChatEngine {
       : null
     const quoteTarget = quotePick?.messageId || ''
     const triggerNudge = isGroup && isPureNudge(ev)
+    /*
+     * 引用回复里不能带语音（主人 m03353：QQ 端「引用+语音」这条根本发不出去）。
+     * 一旦本次回复要挂引用，就把所有语音段降级成文字——内容不丢，
+     * 只是不再发 record 段；否则整条消息会被 QQ 拒收或变成空壳。
+     */
+    const demoteVoice = shouldDemoteVoice({ isGroup, quoteTarget })
     let quoteDone = false
     if (quotePick) this.logger('debug', `引用回复：${quotePick.why} → ${quotePick.messageId}`)
 
@@ -4615,7 +4623,19 @@ export class ChatEngine {
       if (wait > 0) await sleep(wait)
       if (signal?.aborted) break
 
-      const part = step.part
+      let part = step.part
+      /*
+       * 带引用的回复把语音降级成文字（见上面 demoteVoice 的说明）。
+       * 直接替换 plan 里的这一段，后面 payload / 历史记账都按文字走，
+       * 否则历史里会记成「我发了一条语音」而实际发的是文字。
+       */
+      if (demoteVoice && part && part.type === 'voice') {
+        this.stats.voiceDemoted = (this.stats.voiceDemoted || 0) + 1
+        const asText = voicePartToText(part)
+        if (!asText) continue
+        step.part = asText
+        part = asText
+      }
       let payload = null
 
       if (part.type === 'sticker') {

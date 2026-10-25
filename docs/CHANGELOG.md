@@ -7,7 +7,49 @@
 
 ---
 
-## 2026-10-25 · v1.1.3-preview.3：@ 错人修复（@ 号校验 + 条件引用）（预览版）
+## 2026-10-25 · v1.1.3 正式版：三个预览版合并 + 引用不带语音 + 控制台版本自动同步 + 表情包搜索
+
+> 主人 m03522「控制台左下角还显示 1.0，刷一下，一起作为 1.1.3 正式版上线」、m03530「上新版本时把挂在上面的旧版本打包作为 release 传上去，注意隐私管理」。
+> 版本号从 `1.1.3-preview.3` → `1.1.3`；此前预览版 tags（`v1.1.3-preview.1/.2/.3`）保留不动，GitHub Releases 另建正式版条目。
+
+**合并进来的内容（详见下面三个预览版条目）**
+- 戳一戳改用模型回一句（`pokeReplyText`，失败回退固定句）。
+- 控制台改版：去 NapCat 品牌、QQ 连接四态判定、导航分组、`#/qq` 页面。
+- 记忆池新增「梗」类（`meme`）。
+- 上下文体积优化 A：记忆窗口 `large→balanced`（每轮 6,869 → 5,935 token，-13.6%）。
+- @ 错人修复：`lib/quote-at.js`（@ 号校验、纯叫醒不算目标、条件引用、提示词两句）。
+
+**本次新增：引用回复不带语音（m03353「QQ 里引用的消息回复不能使用语音」）**
+- `lib/quote-at.js`：`shouldDemoteVoice(parts)` / `voicePartToText(part)`——引用了某条消息时，把语音段降级成纯文字（保留内容，不丢话）；不被引用时语音照常。
+- `lib/engine.js` `deliver`：挂引用前先做降级，`/state.stats.quoteVoiceDemoted` 计数。
+- 自测 `out/_quote_voice_test.mjs` 13 项全过；真机：`SnowLuma` 日志确认引用消息只发文字、`get_msg` 段里没有 `record`。
+
+**本次新增：控制台版本号以插件版本为真源（m03522）**
+- `tools/console-server.mjs`：`VERSION` 改为读 `plugin/dsh-qq-whale/package.json` 的 `version`（exe 打包模式读不到时兜底 `1.1.3`）。以前这里写死 `1.0.0`，所以左下角一直显示 v1.0.0。
+- `console/index.html`：无 JS 时的默认文本 `v1` → `v1.1.3`。
+- `/api/health` 与页面 `#footVersion` 都跟着插件版本走，以后发版不再需要手改控制台。
+
+**本次新增：控制台表情包搜索（m03735「表情包做一个搜索功能并推github」）**
+- `console/index.html`：表情包页 `.toolbar` 增加搜索框 `#stkSearch`（占满剩余宽度，placeholder「搜索表情包：名字 / 关键词，空格分隔多个」）。
+- `console/console.js`：`stkSearchText()` / `stkTokens()` / `stickerHit()` 把 `name`、`file`、`keywords` 拼成检索串（文件名里的 `_` 当空格），多词 = AND、大小写不敏感；`renderStickers()` 按 `state.stkQuery` 过滤，副标题显示「「词」命中 M / 共 N 张」，无命中显示空态 +「清空搜索」；`input` 即时过滤（纯前端，不重新请求 `/api/stickers`），`Esc` 清空。
+- `console/console.css`：`.toolbar .stk-search{ flex:1 1 280px; max-width:none }`。
+- 真机浏览器验证（1400×900）：「白猫 偷笑」→ 命中 1 / 共 222 张；不存在的词 → 空态；点「清空搜索」→ 回到 222 张全量。
+- 回滚：纯前端改动，`git revert` 本提交即可，不影响插件运行时。
+
+**本次新增：GitHub Releases 发布包（m03530）**
+- 新脚本 `tools/release-assets.mjs`：给每个 tag 打 `molly-qq-whale-<tag>.zip`（`git archive`，不含 `.git`），上传为对应 GitHub Release 的附件；新版本发布时会顺带补齐旧版本的包。
+- **隐私门**：上传前对 tag 树做敏感串扫描（真实 QQ 号 / 群号 / OneBot token / 本机用户目录），命中即拒绝上传并报文件行号；发布版正文写明「扫描 0 命中 + sha256」。
+
+**验证**
+- 全量 15 个自测脚本全绿（`_quote_at` 26、`_quote_voice` 13、`_poke` 21、`_voice_trigger` 16、`_meme` 10、`domtest` 17、`_memory_crypt` 27、`_voice_guard`、`_testD` 26 等）；3 个过时脚本的假设已修正（见 §3「测试脚本刷新」）。
+- 发布副本：159+ 文件 / ~2.6 MB，二次脱敏扫描 0 命中。
+
+**回滚**
+- 引用语音降级：`quote-at.js` 里 `shouldDemoteVoice` 直接 `return false` 即恢复旧行为。
+- 控制台版本：把 `tools/console-server.mjs` 的 `VERSION` 改回固定字符串并重启 console-server。
+- 版本号：`plugin/dsh-qq-whale/package.json` 回退即可（GitHub 发版包与 tag 需一并回退）。
+
+---
 
 > 第三个预览版，只含这一项；正式版本号仍走 1.1.x 线。起因（m02736 第 1 件）：「Molly 现在在那个交流群里，出现了 a 提问却 @ b 进行回复」；做法按主人 m02835「试着让她引用精准回复」、m02846「引用也不用每条，同一时间发的人特别多才引用」。
 

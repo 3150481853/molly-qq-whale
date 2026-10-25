@@ -102,6 +102,9 @@ const FILES = [
   ['tools/build-exe.mjs', 'tools/build-exe.mjs'],
   ['tools/scan-secrets.mjs', 'tools/scan-secrets.mjs'],
   ['tools/build-publish.mjs', 'tools/build-publish.mjs'],
+  // 2026-10-25 m03530：把每个 tag 的提交树打包成 GitHub Release 附件（导出→隐私扫→就地脱敏→zip→API）。
+  // 发布版带上它，接手的人重发/补发 release 时不用再找脚本。
+  ['tools/release-assets.mjs', 'tools/release-assets.mjs'],
   ['tools/backup-memory.ps1', 'tools/backup-memory.ps1'],
   ['tools/install-memory-backup-task.cmd', 'tools/install-memory-backup-task.cmd'],
   ['tools/uninstall-memory-backup-task.cmd', 'tools/uninstall-memory-backup-task.cmd'],
@@ -111,7 +114,8 @@ const FILES = [
   // 同名更新不生效，换文件名让新图立刻渲染（README 引用同步改成 assets/hero-v11.svg）。
   // 2026-10-24 v1.1.1 再改名 hero-v11.svg → hero-v111.svg（主图里的版本字样跟着改，同样是为了绕缓存）。
   // 2026-10-24 v1.1.2 再改名 hero-v111.svg → hero-v112.svg（同上）。
-  ['publish-assets/assets/hero-v112.svg', 'assets/hero-v112.svg'],
+  // 2026-10-25 v1.1.3 再改名 hero-v112.svg → hero-v113.svg（主图里的版本字样 V1.1.2 → V1.1.3，同样为了绕缓存）。
+  ['publish-assets/assets/hero-v113.svg', 'assets/hero-v113.svg'],
 ]
 
 /** 文档白名单：只发「讲怎么装、怎么用」的，运维流水账一律不发 */

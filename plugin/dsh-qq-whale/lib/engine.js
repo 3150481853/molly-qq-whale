@@ -89,6 +89,8 @@ const { SwitchBoard, sanitizeGroupText, looksLikeCodeOrLog } = await import(sub(
 const { VoiceMaker, cleanVoiceText } = await import(sub('./voice.js'))
 // 戳一戳回应（2026-10-23，主人 m01231）：反戳 / 被戳多了生气，不走模型。
 const { PokeReactor, isPokeNotice } = await import(sub('./poke.js'))
+// 「@ 谁 / 引用哪条」（2026-10-25，主人 m02736 + m02835）：纯函数模块，单测直接跑。
+const { isPureNudge, resolveExplicitAt, pickQuoteTarget } = await import(sub('./quote-at.js'))
 // 撤回处理（2026-10-24，主人 m00480）：纯函数模块（字段解析/TTL 清理/history 剔除）。
 // 撤回带来的状态（recalled Map、计数）留在这个类里，方便 /state 观察。
 const recallUtil = await import(sub('./engine-recall.js'))
@@ -314,6 +316,11 @@ export class ChatEngine {
       // 戳一戳用模型现说一句（2026-10-24，主人 m01908）：成功几次、退回固定文案几次
       pokeModel: 0,
       pokeModelFail: 0,
+      // @/引用（2026-10-25，主人 m02736 + m02835）：引用发出几条、引用失败回退几条、@ 号被丢弃几次、最近一次引用
+      quoteSent: 0,
+      quoteFail: 0,
+      quoteAtDropped: 0,
+      quoteLast: null,
     }
 
     /**
@@ -2334,7 +2341,7 @@ export class ChatEngine {
    * persona.splitReply 会把两种东西翻成 `{ type: 'voice', text }`：
    *   ① 模型自己写的 `<voice>…</voice>`——它是"想用声音说这句话"；
    *   ② history 里「（我发了一条语音：…）」被抄进正文——修「假宣告」事故
-   *      （2026-10-23 群 1092417231：她发了条纯文字，里面写着"我发了一条语音"）。
+   *      （2026-10-23 群 666666666：她发了条纯文字，里面写着"我发了一条语音"）。
    *
    * 这里负责把它们变成真音频：
    *   - 能合成 → 该段保留为 voice（带 file），交给 deliver 按语音发；
@@ -4270,7 +4277,7 @@ export class ChatEngine {
        * 查资料期间把「agent 自己发 QQ 消息」这道门关上（2026-10-24 14:17）。
        *
        * 干活会话手里也有 qq_onebot，而查资料任务里根本不知道这条问题来自哪个
-       * 群——它照着会话历史里最熟的群号猜，就把答案发到了 1092417231（两条），
+       * 群——它照着会话历史里最熟的群号猜，就把答案发到了 666666666（两条），
        * 引擎再把结论发回真正的群。qqtools 里看这个计数，命中就拒绝发送。
        */
       const client = self.client
@@ -4561,8 +4568,46 @@ export class ChatEngine {
      *
      * 一次回复最多 @ 一个人（atDone 兜住），免得连着几条各 @ 一个。
      */
-    const explicitAt = (reply.parts || []).map((p) => (p && p.atQq) || '').find(Boolean) || ''
+    const explicitAtRaw = (reply.parts || []).map((p) => (p && p.atQq) || '').find(Boolean) || ''
+    /*
+     * @ 号校验（2026-10-25，主人 m02736）。
+     * 模型写的号以前无条件信：真机事故就是它从名册里挑错人，@ 落到不相干的人头上。
+     * 现在只认「最近 20 条消息里说过话的人」；不在里面，除非历史里出现过、且正文点了
+     * 他的名字，否则丢弃（退回不加 @）。
+     */
+    const explicitInfo = explicitAtRaw
+      ? resolveExplicitAt({
+          raw: explicitAtRaw,
+          history: conv?.history,
+          selfId: this.selfId,
+          text: String(reply?.raw || ''),
+        })
+      : null
+    if (explicitAtRaw && !explicitInfo) {
+      this.stats.quoteAtDropped = (this.stats.quoteAtDropped || 0) + 1
+      this.logger('warn', `丢弃 @ 目标（不在最近说话人里）：${explicitAtRaw}`)
+    }
+    const explicitAt = explicitInfo ? explicitInfo.qq : ''
     let atDone = false
+    /*
+     * 引用回复（2026-10-25，主人 m02835 / m02846）。
+     * 只在「同一时间说话的人特别多」/「对方只是 @ 了她、没正文」/「模型显式点名了别人」
+     * 这三种情况下引用，平时不挂引用框；目标优先「上一条非自己的消息」。
+     */
+    const quotePick = isGroup
+      ? pickQuoteTarget({
+          ev,
+          history: conv?.history,
+          scene,
+          explicitAt,
+          config: this.config,
+          nowMs: this.now(),
+        })
+      : null
+    const quoteTarget = quotePick?.messageId || ''
+    const triggerNudge = isGroup && isPureNudge(ev)
+    let quoteDone = false
+    if (quotePick) this.logger('debug', `引用回复：${quotePick.why} → ${quotePick.messageId}`)
 
     for (const step of plan) {
       if (signal?.aborted) break
@@ -4660,6 +4705,12 @@ export class ChatEngine {
               { type: 'at', qq: String(explicitAt) },
               { type: 'text', text: ` ${text}` },
             ])
+          } else if (quoteTarget || triggerNudge) {
+            /*
+             * 有引用、或对方只是叫醒：不再按概率乱 @（真机事故就是这里 @ 错了人）。
+             * 靠引用说清在回哪条，比 @ 一个不对的人更准。
+             */
+            payload = buildMessage([{ type: 'text', text }])
           } else if (firstBubble) {
             const p = scene === SCENE_MENTION ? 0.82 : 0.22
             if (Math.random() < p) {
@@ -4678,11 +4729,44 @@ export class ChatEngine {
         }
       }
 
+      /*
+       * 把引用挂到本次回复的第一条气泡上（只挂一次）。
+       * 只有群里、且 pickQuoteTarget 给了目标时才挂；挂上后如果发送失败，
+       * 下面会回退成纯文本再发一次，绝不让回复丢。
+       */
+      if (isGroup && quoteTarget && !quoteDone && Array.isArray(payload)) {
+        payload = [{ type: 'reply', data: { id: String(quoteTarget) } }, ...payload]
+        quoteDone = true
+      }
+
+      const quoted = Boolean(payload && payload[0] && payload[0].type === 'reply')
+      const sendPayload = async (pl) => {
+        if (isGroup) await this.client.sendGroupMsg(key, pl)
+        else await this.client.sendPrivateMsg(key, pl)
+      }
       try {
-        if (isGroup) {
-          await this.client.sendGroupMsg(key, payload)
-        } else {
-          await this.client.sendPrivateMsg(key, payload)
+        try {
+          await sendPayload(payload)
+          if (quoted) {
+            this.stats.quoteSent++
+            this.stats.quoteLast = {
+              id: String(quoteTarget),
+              why: quotePick?.why || '',
+              at: this.now(),
+            }
+          }
+        } catch (err) {
+          if (!quoted) throw err
+          // 引用失效（被撤回/太老/SnowLuma 拿不到 seq）：退回纯文本，不能连回复一起丢
+          this.stats.quoteFail++
+          this.stats.quoteLast = {
+            id: String(quoteTarget),
+            why: 'failed',
+            at: this.now(),
+            error: String(err?.message || err).slice(0, 80),
+          }
+          this.logger('warn', `引用发送失败，回退纯文本：${err?.message || err}`)
+          await sendPayload(payload.slice(1))
         }
         conv.lastSelfAt = this.now()
         /*

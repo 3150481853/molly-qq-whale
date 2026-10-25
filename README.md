@@ -5,7 +5,7 @@
 基于 **DeepSeek Harness** 的 QQ 通道插件：稳定的人设、长期记忆、表情包习惯、会发语音，
 以及一个能看懂她此刻在干什么的控制台。
 
-**v1.1.3-preview.2**（预览版）—— 记忆池新增「梗」类：她能从聊天里学网络梗、名场面和你们的口头禅，下次自己接梗；顺带做了上下文体积优化 A（记忆窗口降档，一轮完整提示词实测 6,869 → 5,935 token，省 13.6%，人设与硬性规则一行没动）。上一版 **v1.1.3-preview.1**：戳一戳改用模型回一句、控制台清掉 NapCat 品牌并改四态 QQ 状态判定。更早 **v1.1.2**：撤回不追回、群里明确要求就直发、查资料不外发、好友申请不漏报。
+**v1.1.3-preview.3**（预览版）—— 修「@ 错人」：她不再靠猜着 @ 人——模型写的 @ 号必须先过校验（只认最近 20 条里真说过话的人），回话时按条件带「引用」（30 秒内 ≥3 条且 ≥2 人在聊、或有人只发了个空「@」、或明确点名）；引用发不出去会自动退回纯文字，不会丢消息。上一版 **v1.1.3-preview.2**：记忆池新增「梗」类 + 上下文体积优化 A（一轮完整提示词 6,869 → 5,935 token，省 13.6%）。更早 **v1.1.3-preview.1**：戳一戳改用模型回一句、控制台清掉 NapCat 品牌并改四态 QQ 状态判定。
 
 [![license](https://img.shields.io/badge/license-MIT-1aae39?style=flat-square)](LICENSE) [![node](https://img.shields.io/badge/node-22%2B-1aae39?style=flat-square)](https://nodejs.org) [![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0075de?style=flat-square)](#环境要求) [![host](https://img.shields.io/badge/host-DeepSeek%20Harness-5645d4?style=flat-square)](#环境要求) [![QQ](https://img.shields.io/badge/QQ-OneBot%2011-0075de?style=flat-square)](#环境要求)
 

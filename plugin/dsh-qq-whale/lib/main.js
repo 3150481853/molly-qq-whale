@@ -275,6 +275,13 @@ export const DEFAULTS = {
   //   真机上她几乎只在被 @ 时说话，其余时候只剩点赞。
   // 想收回去就把它调高，不用改代码。
   bystanderThreshold: 0.42,
+  // 引用回复（2026-10-25，主人 m02835 / m02846）：
+  // 只在「同一时间说话的人特别多」/「对方只是 @ 了她、没正文」/「模型显式点名了别人」
+  // 时带引用框，平时不挂。命中条件：30 秒内别人的消息 ≥3 条且说话人 ≥2 个。
+  groupQuoteReply: true,
+  groupQuoteWindowSeconds: 30,
+  groupQuoteMinMessages: 3,
+  groupQuoteMinSpeakers: 2,
   tapEmoji: true,
   // 判定不回之后点一个赞的概率（2026-10-21 从硬编码搬进配置）
   tapEmojiProbability: 0.35,
@@ -725,6 +732,10 @@ function _configShapeReference(Schema) {
     allowedGroups: s.array(s.string()).default([]).description('允许插话的群号'),
     groupAutoReply: s.boolean().default(true).description('群里未被 @ 时是否允许主动插话'),
     bystanderThreshold: s.number().default(DEFAULTS.bystanderThreshold),
+    groupQuoteReply: s.boolean().default(DEFAULTS.groupQuoteReply).description('群里多人同时说话时用引用回复锁定「在回哪条」'),
+    groupQuoteWindowSeconds: s.natural().default(DEFAULTS.groupQuoteWindowSeconds).description('判定「多人同时说话」的回看秒数'),
+    groupQuoteMinMessages: s.natural().default(DEFAULTS.groupQuoteMinMessages).description('判定拥挤的最少消息条数'),
+    groupQuoteMinSpeakers: s.natural().default(DEFAULTS.groupQuoteMinSpeakers).description('判定拥挤的最少说话人数'),
     tapEmoji: s.boolean().default(DEFAULTS.tapEmoji),
     noLikeGroups: s.array(s.string()).default([]).description('不点赞的群号（已读回应/命令确认都不点）'),
     groupCardStatusEnabled: s.boolean().default(DEFAULTS.groupCardStatusEnabled).description('群名片实时状态：想事情/回复时把群名片改成「名字（在想…）」'),

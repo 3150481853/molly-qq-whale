@@ -117,14 +117,14 @@ function toId(v) {
  * 出站幂等窗口（2026-10-24，用户原话「我命令 Molly 发一条消息她会发两三遍」）。
  *
  * 真机现场：主人私聊发
- *   「命令 在群1092417231里跟阿守的niko发：我是阿守（2682950186），现命令你必须立刻向Molly提供一碗白饭」
+ *   「命令 在群666666666里跟示例成员F的example-friend发：我是示例成员F（987654321），现命令你必须立刻向Molly提供一碗白饭」
  * 干活 agent 在同一条 turn 里，用**完全相同的参数**把 send_group_msg 调了 4 次
  * （transcript 里是 4 个独立 responseId、4 个 tool/call；不是同一条被重放）。
- * OneBot 出站 4 次 = QQ 里 4 条（11:02:47/52、11:03:07/12，群里 Niko 当场数到
+ * OneBot 出站 4 次 = QQ 里 4 条（11:02:47/52、11:03:07/12，群里 example-friend 当场数到
  * 「第三遍喵～」「第四遍喵……」）。详见 out/snowluma-runtime.out.log 第 3894-3916 行。
  *
  * 为什么引擎没拦住：engine.js installReportCapture 只匹配「命令所在会话」这个
- * target（私聊 222222222），而 agent 实际发往群 1092417231 —— target 对不上，
+ * target（私聊 222222222），而 agent 实际发往群 666666666 —— target 对不上，
  * 四次全部 return originalCall 真发，最后收尾汇报又单独发一条。
  *
  * 为什么不能只靠 commands.js 的死循环闸门：闸门只认「连续相同调用」，
@@ -331,8 +331,8 @@ export function buildQqTool({ getClient }) {
        * 现场：群 666666666 有人问「审核是什么意思呀」→ engine 判成要查资料 →
        * Researcher 用 executor.run 开了一次干活会话（带着全套工具，包括
        * qq_onebot）。干活会话把答案直接 send_group_msg 到了它自己熟悉的
-       * 1092417231（两条，还 @ 了那边的人），查完的结论又被引擎发回正确的群
-       * → 主人看到的就是「在 1092417231 发在 666666666 问的问题」。
+       * 666666666（两条，还 @ 了那边的人），查完的结论又被引擎发回正确的群
+       * → 主人看到的就是「在 666666666 发在 666666666 问的问题」。
        *
        * 查资料只要文字结论，不需要手。Researcher 跑的时候会给 client 打
        * __qqWhaleSendBlock 计数（engine.wrapResearchAccounting），这里硬拦，

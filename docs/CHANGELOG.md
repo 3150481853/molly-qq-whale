@@ -7,6 +7,35 @@
 
 ---
 
+## 2026-10-25 · v1.1.3-preview.3：@ 错人修复（@ 号校验 + 条件引用）（预览版）
+
+> 第三个预览版，只含这一项；正式版本号仍走 1.1.x 线。起因（m02736 第 1 件）：「Molly 现在在那个交流群里，出现了 a 提问却 @ b 进行回复」；做法按主人 m02835「试着让她引用精准回复」、m02846「引用也不用每条，同一时间发的人特别多才引用」。
+
+**新增 `lib/quote-at.js`（纯函数，无依赖）**
+- `isPureNudge(ev)`：只有 @ / 表情 / 空白 = 纯叫醒，不算「要回谁」。
+- `crowdStats(history, now)`：30 秒窗口内的条数与说话人数；`recentSpeakers(history)`：最近 20 条里说过话的人。
+- `resolveExplicitAt({ raw, history, selfId, text })`：模型写的 `<at>` 号必须是 5–12 位数字、且不是自己；在最近说话人里 → 认；否则若历史里出现过且正文点名 → 认；其余**丢弃**（不再乱 @）。
+- `pickQuoteTarget(...)`：纯叫醒 / 人群拥挤 / 显式点名三者命中才给引用目标（纯叫醒引用上一条非自己消息，否则引用触发消息）。
+
+**`lib/engine.js`**
+- `deliver` 里模型显式 `<at>` 先过校验（丢弃时 warn + `quoteAtDropped++`）；有引用目标或纯叫醒时**不再按概率 @ 触发者**。
+- 发送前把 `{ type: "reply", data: { id } }` 挂到第一条气泡；引用发送失败（被撤回 / 太老 / 拿不到 seq）自动去掉引用、纯文本重发（`quoteFail++`）。
+- `/state.stats` 新增 `quoteSent / quoteFail / quoteAtDropped / quoteLast`。
+
+**提示词 / 配置**
+- `lib/engine-context.js` 名册段补两句：对方只是 @ 你、一个字没说，那不算你要回的人（代码会自动引用上一条）；引用是代码自动加的，别自己写。
+- 新配置 `groupQuoteReply`（默认 true）、`groupQuoteWindowSeconds`（30）、`groupQuoteMinMessages`（3）、`groupQuoteMinSpeakers`（2），已写入示例配置与文档。
+
+**验证**
+- `out/_quote_at_test.mjs` 26 项离线自测全过；`_poke_test` 21、`_voice_trigger_test` 16、`_meme_test` 10 回归全过。
+- 真机：发送侧引用自检通过（引用后 `get_msg` 能看到 `reply,text` 段）；上线后 12:54:07 首次自然命中（多人同时发图的拥挤场景，自动引用了被讨论的那张图），`/state.stats.quoteSent = 1`。
+- 已热重载 `gen-mvncpntd-l294fe`。
+
+**回滚**
+- 配置 `groupQuoteReply: false` 即关闭引用（仍保留 @ 号校验）；要整体回退，删除 `lib/quote-at.js` 并把 `engine.deliver` 里 `quotePick` / `triggerNudge` 相关分支还原。
+
+---
+
 ## 2026-10-25 · v1.1.3-preview.2：记忆「梗」类 + 上下文体积优化 A（预览版）
 
 > 第二个预览版，只含这两项；正式版本号仍走 1.1.x 线。主人要求（m02619）：「推github，作为第二个预览」。

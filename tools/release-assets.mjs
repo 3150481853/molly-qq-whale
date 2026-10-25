@@ -90,6 +90,7 @@ const RELEASE_FEATURES = {
     '控制台「本次更新说明」：左下角版本号可点击，弹层直接读 docs/CHANGELOG.md 最新一节；新增 GET /api/changelog',
   ],
   'v1.1.5-preview.3': [
+    '⚠️ 本 tag 于 2026-10-25 重建：并入群趣味（抽奖 / 口令抽奖 / 新人欢迎）与 @我 # 小玩具入口',
     '时间感知：每轮提示词带「北京时间」（timeContextEnabled），问几点/星期几不再靠猜',
     '唱歌（暂缓，默认关闭）：算法已实现（逐字合成 + ACF 基频搬移 + WSOLA 保时长，42 个音平均误差 14.6 音分），但语音包只有 54 句 / 3.5 分钟、音色未达标，按主人要求先下架；等训练数据齐后改用社区歌唱模型再开',
     '动图表情重扫：新增 tools/rescan-gif-stickers.mjs（默认预览，--apply 改名，报告在 out/rescan-gif-report.json）',
@@ -97,12 +98,14 @@ const RELEASE_FEATURES = {
     '升级后请运行：node tools/rescan-gif-stickers.mjs（先预览）→ node tools/rescan-gif-stickers.mjs --apply',
   ],
   'v1.1.5-preview.2': [
+    '⚠️ 本 tag 于 2026-10-25 重建：并入群趣味（抽奖 / 口令抽奖 / 新人欢迎）与 @我 # 小玩具入口',
     '动图理解：GIF / 动画表情在发模型前用本机 Pillow 拆成多帧拼图（默认 6 帧 / 3 列 / 320px，左上角帧号），模型能按顺序看懂动作；单帧 GIF、缺 Pillow、超时都会回退原图',
     '新增 6 个 gifFrames* 配置（开关 / 帧数 / 列数 / 帧宽 / Python 路径 / 超时），/state.stats 新增 gifSheets / gifSheetFail',
     '带图轮次不再「看了不吭声」：输出预算抬到 imageMaxTokens（默认 3200）并传 reasoning_effort=minimal，避免思考 token 吃光正文',
     '两个回归脚本：out/_gif_frames_test.mjs（16 项）、out/_image_effort_test.mjs（5 项）',
   ],
   'v1.1.5-preview.1': [
+    '⚠️ 本 tag 于 2026-10-25 重建：并入群趣味（抽奖 / 口令抽奖 / 新人欢迎）与 @我 # 小玩具入口',
     '控制台数据补齐：学习器（累计/今日）、群数（SnowLuma 群列表）、记忆条数（加密后走插件兜底并标注来源）、表情包「已学」不再显示「—」',
     'QQ 下「登录」「QQ 连接」合并为一页：连接状态卡 + 扫码登录同页，旧 #/login 自动跳转 #/qq',
   ],
@@ -116,6 +119,12 @@ const RELEASE_FEATURES = {
   ],
   'v1.1.3-preview.3': [
     '@ 错人修复（新 lib/quote-at.js）：@ 号必须是最近说话人、纯叫醒不算回复对象、人群拥挤时才引用、提示词补两句',
+  ],
+  'v1.1.3-plus.2': [
+    '小玩具统一入口：@我 # 打开小玩具菜单，@我 #抽奖 直达抽奖菜单（以后新玩具都挂这里）',
+    '口令抽奖：抽奖 口令 干饭 3人 60秒 —— 窗口内整句发出口令的人才算参加，到点只从这些人里抽',
+    '抽奖全家桶：开一场 / 参加 / 提前开奖 / 取消 / 名单，到点自动开奖，每群同时一场',
+    '新人欢迎：有人入群自动欢迎，welcomeTexts 支持 {name}/{group}/{molly} 模板，60 秒冷却',
   ],
   'v1.1.3-plus.1': [
     '群内抽奖（新 lib/groupfun.js）：@Molly 抽奖 出菜单，支持 开一场 / 报名 / 开奖 / 取消 / 看名单；默认 3 人 120 秒、到点自动开奖并 @ 中奖者',

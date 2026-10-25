@@ -93,7 +93,7 @@ const { VoiceMaker, cleanVoiceText } = await import(sub('./voice.js'))
 // 戳一戳回应（2026-10-23，主人 m01231）：反戳 / 被戳多了生气，不走模型。
 const { PokeReactor, isPokeNotice } = await import(sub('./poke.js'))
 // 群趣味（2026-10-25，主人 m06096）：抽奖 + 新人欢迎。
-const { LotteryBox, LOTTERY_MENU_TIPS, parseLotteryCommand, buildWelcome, parseGroupIncrease } =
+const { LotteryBox, LOTTERY_MENU_TIPS, TOY_MENU_TIPS, buildToyMenu, parseLotteryCommand, buildWelcome, parseGroupIncrease } =
   await import(sub('./groupfun.js'))
 // 「@ 谁 / 引用哪条」（2026-10-25，主人 m02736 + m02835）：纯函数模块，单测直接跑。
 const { isPureNudge, resolveExplicitAt, pickQuoteTarget, shouldDemoteVoice, voicePartToText } = await import(sub('./quote-at.js'))
@@ -1503,8 +1503,6 @@ export class ChatEngine {
     if (String(ev?.message_type || '') !== 'group') return null
     const gid = String(ev?.group_id || '')
     if (!gid) return null
-    const parsed = parseLotteryCommand(text, { joinKeyword: this.config?.lotteryJoinKeyword })
-    if (!parsed) return null
     const uid = String(ev.user_id || '')
     const nick = String(ev.sender?.card || ev.sender?.nickname || uid)
     const reply = async (res) => {
@@ -1518,6 +1516,27 @@ export class ChatEngine {
         this.logger('warn', `群趣味回话失败：${err?.message || err}`)
       }
     }
+    // 小玩具统一入口（2026-10-25 主人 m06563）：@我 # 打开玩具菜单，#抽奖 直达抽奖菜单
+    const toyCmd = String(text || '').trim()
+    if (toyCmd === '#') {
+      await reply({ message: buildToyMenu(this.config) })
+      return { handled: true, reply: '' }
+    }
+    if (toyCmd === '#抽奖') {
+      await reply({ message: LOTTERY_MENU_TIPS })
+      return { handled: true, reply: '' }
+    }
+    // 口令场：窗口内发出口令 = 报名（只认整句，和指令解析用同一套规整）
+    const kwRes = this.groupfun.keywordJoin({ gid, qq: uid, nick, text })
+    if (kwRes) {
+      if (kwRes.ok) this.stats.lotteryJoined += 1
+      await reply(kwRes)
+      return { handled: true, reply: '' }
+    }
+
+    const parsed = parseLotteryCommand(text, { joinKeyword: this.config?.lotteryJoinKeyword })
+    if (!parsed) return null
+
     if (parsed.kind === 'menu') {
       await reply({ message: LOTTERY_MENU_TIPS })
       return { handled: true, reply: '' }
@@ -1549,6 +1568,7 @@ export class ChatEngine {
       ownerName: nick,
       count: parsed.count,
       seconds: parsed.seconds,
+      keyword: parsed.keyword,
       config: this.config,
     })
     if (res.ok) this.stats.lotteryStarted += 1

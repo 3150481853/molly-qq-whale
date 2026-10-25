@@ -123,7 +123,7 @@ flowchart LR
     P["1.2.0-preview.1 → .2 → .3"] -->|合并全部 preview| R["1.2.0 正式版"]
     R -->|只修 bug| H["1.2.0-Hotfix.1"]
     R -->|只加功能| A["1.2.0-Plus.1"]
-    H -.并列，可互相继承.- A
+    H -.-> A
     H --> N["1.3.0-preview.1"]
     A --> N
     N -->|合并全部 preview| R2["1.3.0 正式版"]
@@ -136,6 +136,8 @@ flowchart LR
     class A feat
     class P,N pre
 ```
+
+> 图中虚线 = Hotfix 与 Plus 的并列关系：地位相同，可互相继承。
 
 | 版本 | 命名 | 什么时候发 | 必须包含 |
 |:--|:--|:--|:--|

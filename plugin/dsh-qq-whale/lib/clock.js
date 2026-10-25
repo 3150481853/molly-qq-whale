@@ -81,4 +81,42 @@ export function clockSection(nowMs = Date.now(), offsetMinutes = DEFAULT_OFFSET_
   )
 }
 
-export default { clockParts, clockText, dateText, clockSection, zoneLabel, DEFAULT_OFFSET_MINUTES }
+/**
+ * 把 "HH:mm" 解析成当天分钟数；不合法返回 null。
+ * 作息窗口（睡觉）用它，跨午夜由 inClockWindow 处理。
+ */
+export function parseHHMM(text) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(text ?? '').trim())
+  if (!m) return null
+  const h = Number(m[1])
+  const mi = Number(m[2])
+  if (!(h >= 0 && h <= 23) || !(mi >= 0 && mi <= 59)) return null
+  return h * 60 + mi
+}
+
+/**
+ * 当前时刻（clockParts 结果）是否落在 [start, end) 窗口里。跨午夜安全。
+ * start === end 视为空窗（永不命中）。
+ */
+export function inClockWindow(parts, startText, endText) {
+  const s = parseHHMM(startText)
+  const e = parseHHMM(endText)
+  if (s === null || e === null || s === e) return false
+  const cur = Number(parts?.hour) * 60 + Number(parts?.minute)
+  if (!Number.isFinite(cur)) return false
+  if (s > e) return cur >= s || cur < e
+  return cur >= s && cur < e
+}
+
+/**
+ * 分钟的 HH:mm 文案（给提示词/接口回显用）。
+ */
+export function minutesText(minutes) {
+  const n = Number(minutes)
+  if (!Number.isFinite(n)) return ''
+  const h = Math.floor(n / 60) % 24
+  const mi = Math.floor(n % 60)
+  return String(h).padStart(2, '0') + ':' + String(mi).padStart(2, '0')
+}
+
+export default { clockParts, clockText, dateText, clockSection, zoneLabel, parseHHMM, inClockWindow, minutesText, DEFAULT_OFFSET_MINUTES }

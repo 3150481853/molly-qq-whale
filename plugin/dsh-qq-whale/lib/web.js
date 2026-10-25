@@ -25,7 +25,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import { addLearnedHash, removeLearnedHash } from './sticker-learn.js'
-import { clockText } from './clock.js'
+import { clockText, parseHHMM } from './clock.js'
 // qq 是记忆的唯一身份（2026-10-19）：校验规则只写在 memory.js 一处，
 // 免得控制台和引擎两边各写一套正则、慢慢就跑偏了。
 import { isValidQq } from './memory.js'
@@ -344,6 +344,21 @@ export class WebWidget {
      */
     try {
       if (e) {
+    /* 作息（2026-10-25）：控制台回显用；判睡看北京时间。 */
+    try {
+      const e1 = this.engineRef?.()
+      if (e1 && typeof e1.sleepWindow === "function") {
+        const w1 = e1.sleepWindow()
+        out.sleep = {
+          enabled: Boolean(w1),
+          start: w1?.start ?? "",
+          end: w1?.end ?? "",
+          sleeping: e1.inSleepWindow(),
+          now: e1.clockNowParts(),
+          timezone: "北京时间",
+        }
+      }
+    } catch {}
         out.poke = {
           enabled: e.config?.pokeEnabled !== false,
           backChance: Number(e.config?.pokeBackChance ?? 0.7),
@@ -841,6 +856,108 @@ export class WebWidget {
           `控制台设置骂人模式：${snap.enabled ? '开' : '关'}｜对象 ${snap.targets.join(',') || '（空）'}｜日额度 ${snap.dailyCap}｜间隔 ${snap.intervalMinutes} 分`,
         )
         sendJson(res, 200, { ok: true, state: snap })
+      }),
+    })
+
+    /*
+     * 作息（2026-10-25 主人 m05189-3：按北京时间判断该不该睡，控制台可设时间）。
+     * GET  → 当前窗口 + 现在是否在睡（北京时间）
+     * POST → { enabled?, start?, end? } 写 dataDir/sleep-window.json，引擎现读即生效。
+     */
+    add({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/sleep`,
+      ...wrap(async (req, res) => {
+        const e = this.engineRef?.()
+        if (!e || typeof e.inSleepWindow !== 'function') {
+          sendJson(res, 503, { ok: false, error: '引擎还没就绪，稍后再试' })
+          return
+        }
+        if (req.method === 'GET') {
+          const w = e.sleepWindow()
+          sendJson(res, 200, {
+            ok: true,
+            enabled: Boolean(w),
+            start: w?.start ?? '',
+            end: w?.end ?? '',
+            sleeping: e.inSleepWindow(),
+            now: e.clockNowParts(),
+            timezone: '北京时间',
+          })
+          return
+        }
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          return
+        }
+        const raw = await readBody(req)
+        let body
+        try {
+          body = JSON.parse(raw || '{}')
+        } catch {
+          sendJson(res, 400, { ok: false, error: '请求体不是合法 JSON' })
+          return
+        }
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+          sendJson(res, 400, { ok: false, error: '请求体不是合法 JSON 对象' })
+          return
+        }
+        const next = {}
+        if (body.enabled !== undefined) {
+          if (typeof body.enabled !== 'boolean') {
+            sendJson(res, 400, { ok: false, error: 'enabled 必须是 true / false' })
+            return
+          }
+          next.enabled = body.enabled
+        }
+        for (const k of ['start', 'end']) {
+          if (body[k] === undefined) continue
+          const v = String(body[k] ?? '').trim()
+          if (parseHHMM(v) === null) {
+            sendJson(res, 400, { ok: false, error: k + ' 必须是 HH:mm（例：23:50）' })
+            return
+          }
+          next[k] = v
+        }
+        if (!Object.keys(next).length) {
+          sendJson(res, 400, { ok: false, error: '没有要改的字段' })
+          return
+        }
+        try {
+          const fsx = await import('node:fs/promises')
+          const file = e.sleepOverridePath()
+          let cur = {}
+          try {
+            cur = JSON.parse(await fsx.readFile(file, 'utf8'))
+          } catch {
+            cur = {}
+          }
+          const merged = {
+            enabled: next.enabled ?? cur.enabled ?? true,
+            start: next.start ?? cur.start ?? '23:50',
+            end: next.end ?? cur.end ?? '09:00',
+            updatedAt: new Date().toISOString(),
+            by: 'console',
+          }
+          await fsx.mkdir(path.dirname(file), { recursive: true })
+          await fsx.writeFile(file, JSON.stringify(merged, null, 2), 'utf8')
+          const w = e.sleepWindow()
+          try {
+            this.logger?.('info', '控制台改作息：' + (w ? w.start + '–' + w.end : '已关闭'))
+          } catch {}
+          sendJson(res, 200, {
+            ok: true,
+            enabled: Boolean(w),
+            start: w?.start ?? '',
+            end: w?.end ?? '',
+            sleeping: e.inSleepWindow(),
+            now: e.clockNowParts(),
+            timezone: '北京时间',
+            file,
+          })
+        } catch (err) {
+          sendJson(res, 500, { ok: false, error: '写作息失败：' + ((err && err.message) || err) })
+        }
       }),
     })
 

@@ -198,6 +198,9 @@ function splitForQQ(text, maxLen = 180) {
   return out.filter(Boolean)
 }
 
+import fs from 'node:fs'
+import { clockParts, inClockWindow, parseHHMM } from './clock.js'
+
 export class ChatEngine {
   constructor({ ctx, logger, config, client, llm }) {
     this.ctx = ctx
@@ -2206,7 +2209,7 @@ export class ChatEngine {
 
     // 判断要不要理
     if (this.config.blindMode) return
-    if (inRestWindow(this.config.restWindows, new Date()) && scene !== SCENE_PRIVATE) {
+    if (this.inSleepWindow() && scene !== SCENE_PRIVATE) {
       // 睡觉时间里群里的事不掺和；私聊另算（见下行）
       this.logger('debug', `休息窗口内，跳过群消息 ${ev.group_id}`)
       return
@@ -2221,7 +2224,7 @@ export class ChatEngine {
      * 睡觉时间里群里仍然不执行（rest 边界不变）。
      */
     {
-      const inRestNow = inRestWindow(this.config.restWindows, new Date())
+      const inRestNow = this.inSleepWindow()
       const cmdScene =
         !inRestNow || scene === SCENE_PRIVATE || (this.executor?.isCommandGroup?.(ev) ?? false)
       if (cmdScene) {
@@ -2315,8 +2318,12 @@ export class ChatEngine {
     }
 
     // 睡觉时间里私聊被叫醒：带情绪地回一句（这是活人感的重要细节）
-    const rest = inRestWindow(this.config.restWindows, new Date())
-    let mood = rest ? { text: `现在是 ${new Date().getHours()} 点，你被吵醒了，很不爽很想继续睡。语气简短、带起床气，但别真的凶。` } : null
+    const rest = this.inSleepWindow()
+    let mood = rest
+      ? {
+          text: `现在是北京时间 ${this.clockNowParts().hour} 点，你正在睡觉，被这条消息叫醒了：很不爽、很想继续睡。语气简短、带起床气，但别真的凶；回一句就够，别顺势开聊。`,
+        }
+      : null
     // 静音/回复关但被点名：先交代状态再回，别装没事人（用户 m03849 第 2 条）
     if (swDecision.penetrate) {
       mood = { text: `你本来不该说话的（${swDecision.reason}），但对方 @ 你/叫了你的名字。先用一句话交代状态：${swDecision.prefix}然后正常回他。` }
@@ -2632,6 +2639,62 @@ export class ChatEngine {
     this.logger('debug', `语音：${scene} 转成一条语音（${text.length} 字，${seconds.toFixed(1)} 秒）`)
   }
 
+
+  /**
+   * 现在时刻（北京时间）。
+   * 2026-10-25 主人 m05189-3：作息判断一律看北京时间，不看宿主时区。
+   */
+  clockNowParts(now = this.now()) {
+    const offset = Number(this.config?.timeOffsetMinutes ?? 480)
+    return clockParts(Number(now) || Date.now(), Number.isFinite(offset) ? offset : 480)
+  }
+
+  /** 控制台写入的作息覆盖文件（运行期可改，重启后仍在） */
+  sleepOverridePath() {
+    const dir = this.config?.dataDir || this.config?.memoryDir || 'G:\\Molly\\data\\qq-whale'
+    return path.join(dir, 'sleep-window.json')
+  }
+
+  /**
+   * 当前生效的作息窗口。
+   * 优先级：控制台覆盖文件 > yml 配置 > 默认 23:50–09:00。
+   * sleepEnabled === false 时返回 null（关闭后不再有"睡觉"概念）。
+   */
+  sleepWindow() {
+    const cfg = this.config || {}
+    if (cfg.sleepEnabled === false) return null
+    let start = String(cfg.sleepStart ?? '23:50').trim()
+    let end = String(cfg.sleepEnd ?? '09:00').trim()
+    let enabled = true
+    try {
+      const file = this.sleepOverridePath()
+      const st = fs.statSync(file)
+      const cached = this._sleepOverride
+      if (!cached || cached.mtimeMs !== st.mtimeMs) {
+        const j = JSON.parse(fs.readFileSync(file, 'utf8'))
+        this._sleepOverride = { mtimeMs: st.mtimeMs, value: j }
+      }
+      const v = this._sleepOverride?.value
+      if (v && typeof v === 'object') {
+        if (v.enabled === false) enabled = false
+        if (typeof v.start === 'string' && parseHHMM(v.start) !== null) start = v.start
+        if (typeof v.end === 'string' && parseHHMM(v.end) !== null) end = v.end
+      }
+    } catch {
+      /* 没有覆盖文件就走 yml */
+    }
+    if (!enabled) return null
+    if (parseHHMM(start) === null || parseHHMM(end) === null) return null
+    return { start, end }
+  }
+
+  /** 现在是否在她的睡觉时间里（北京时间） */
+  inSleepWindow(now = this.now()) {
+    const w = this.sleepWindow()
+    if (!w) return false
+    return inClockWindow(this.clockNowParts(now), w.start, w.end)
+  }
+
   /**
    * 语音静默时段（2026-10-22 用户 m05352）：默认 23:50–09:00 不发语音。
    * 配置 `voiceQuietStart` / `voiceQuietEnd`（HH:mm）可改，置空串可关闭。
@@ -2651,8 +2714,8 @@ export class ChatEngine {
     const s = parse(start)
     const e = parse(end)
     if (s === null || e === null) return false
-    const d = new Date(now)
-    const cur = d.getHours() * 60 + d.getMinutes()
+    const parts = this.clockNowParts(now)
+    const cur = parts.hour * 60 + parts.minute
     if (s === e) return false
     // 跨午夜（23:50 > 09:00）：命中 [start, 24:00) ∪ [00:00, end)
     if (s > e) return cur >= s || cur < e
@@ -5563,7 +5626,7 @@ export class ChatEngine {
     }
 
     // 睡觉时间不打扰（除非配置里允许）
-    if (inRestWindow(this.config.restWindows, new Date()) && !this.config.proactiveDuringRest) {
+    if (this.inSleepWindow() && !this.config.proactiveDuringRest) {
       this.logger('debug', '主动联系：休息时段，闭嘴')
       return
     }
@@ -5573,7 +5636,7 @@ export class ChatEngine {
 
     // 让模型自己挑话题：给她真实的时间、状态、上次的话题
     const lastTopic = this.lastTopicOf(conv)
-    const hour = new Date().getHours()
+    const hour = this.clockNowParts().hour
     const partOfDay = hour < 6 ? '凌晨' : hour < 11 ? '上午' : hour < 14 ? '中午' : hour < 18 ? '下午' : hour < 23 ? '晚上' : '深夜'
     const activity = pickActivity()
     const moodText = [

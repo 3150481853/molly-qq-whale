@@ -23,7 +23,7 @@
  * 决策产物一律由编排层算好后当参数传进来。
  */
 
-import { clockSection } from './clock.js'
+import { clockSection, clockParts, inClockWindow } from './clock.js'
 
 export function buildSystemPrompt(input, deps) {
   const {
@@ -105,6 +105,12 @@ export function buildSystemPrompt(input, deps) {
      */
     if (deps.config?.timeContextEnabled !== false) {
       sp += `\n\n${clockSection(deps.now ? deps.now() : Date.now(), deps.config?.timeOffsetMinutes ?? 480)}`
+  if (deps.config?.sleepEnabled !== false) {
+    const sleepParts = clockParts(deps.now ? deps.now() : Date.now(), deps.config?.timeOffsetMinutes ?? 480)
+    if (inClockWindow(sleepParts, deps.config?.sleepStart ?? '23:50', deps.config?.sleepEnd ?? '09:00')) {
+      sp += '\n\n（现在是你的睡觉时间，你正在睡觉：被直接叫到才回一句短的，别主动找话题，也别宣布「我要睡了 / 我去睡了」。）'
+    }
+  }
     }
 
     // 记忆：这个人的 + 跟他相关关键词的

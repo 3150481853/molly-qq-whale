@@ -2738,6 +2738,58 @@
 
   /* ---------------- 设置 ---------------- */
 
+  function readSleepForm() {
+    var en = $('#sleepEnabled');
+    var st = $('#sleepStart');
+    var ed = $('#sleepEnd');
+    return {
+      enabled: !en || en.value !== 'false',
+      start: (st && st.value) || '',
+      end: (ed && ed.value) || ''
+    };
+  }
+
+  function fillSleepForm(sleep) {
+    var en = $('#sleepEnabled');
+    var st = $('#sleepStart');
+    var ed = $('#sleepEnd');
+    var hint = $('#sleepHint');
+    if (!sleep) return;
+    if (en) en.value = sleep.enabled === false ? 'false' : 'true';
+    if (st && sleep.start) st.value = sleep.start;
+    if (ed && sleep.end) ed.value = sleep.end;
+    if (hint) hint.textContent = sleep.sleeping ? "（现在正在睡觉时间里）" : "";
+  }
+
+  function refreshSleep() {
+    fetch('/api/sleep', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (j) { if (j && j.ok) fillSleepForm(j); })
+      .catch(function () {});
+  }
+
+  window.__mollySaveSleep = function () {
+    var body = readSleepForm();
+    var btn = $('#sleepSave');
+    if (btn) btn.disabled = true;
+    fetch('/api/sleep', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body)
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (j && j.ok) {
+          fillSleepForm(j);
+          toast("作息已保存：" + (j.enabled ? j.start + "–" + j.end : "不睡"));
+        } else {
+          toast("保存失败：" + ((j && j.error) || "未知错误"));
+        }
+      })
+      .catch(function (e) { toast("保存失败：" + (e && e.message ? e.message : e)); })
+      .then(function () { if (btn) btn.disabled = false; });
+  };
+
   function renderSettings() {
     var box = $('#setCards');
     if (!box) return;
@@ -2776,7 +2828,7 @@
         state.health = j || {};
         var fv = $('#footVersion');
         if (fv && state.health.version) fv.textContent = 'v' + state.health.version;
-        if (state.page === 'settings') safe(renderSettings);
+        if (state.page === 'settings') { safe(renderSettings); safe(refreshSleep); }
       })
       .catch(function (err) { console.warn('[molly-console] health 读取失败：', err); });
   }

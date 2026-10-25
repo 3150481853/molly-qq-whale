@@ -1294,6 +1294,24 @@ async function route(req, res) {
   }
 
   // 数据接口
+  // 作息时间（2026-10-25 主人 m05189-3：控制台可设睡觉时间）
+  if (p === '/api/sleep') {
+    const base = await resolveHostBase();
+    if (!base) return sendJson(res, 503, { ok: false, error: '宿主端口还没探测到' });
+    if (req.method === 'POST') {
+      let body = {};
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        return sendJson(res, 400, { ok: false, error: '请求体不是合法 JSON' });
+      }
+      const r = await jpost(base + '/dsh-qq-whale/sleep', body, 6000);
+      return sendJson(res, r.ok ? 200 : 502, r.ok ? r.data : { ok: false, error: r.error });
+    }
+    const r = await jget(base + '/dsh-qq-whale/sleep', 3000);
+    return sendJson(res, r.ok ? 200 : 502, r.ok ? r.data : { ok: false, error: r.error });
+  }
+
   if (p === '/api/health') {
     return sendJson(res, 200, { ok: true, version: VERSION, build: consoleBuild(), at: Date.now() });
   }

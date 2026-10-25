@@ -334,6 +334,26 @@
           <p class="page-sub">连接信息与诊断。这里只读，真正的开关都在「执行块」。</p>
         </div>
         <div class="card-grid" id="setCards"></div>
+        <div class="card card-block" id="sleepCard">
+          <h2 class="card-title">作息时间（北京时间）</h2>
+          <p class="card-sub">这段时间里她在睡觉：群里不掺和，私聊/@ 被叫醒才会短回一句。时间按北京时间算，改完立即生效（不用重启）。</p>
+          <div class="row-actions" style="flex-wrap:wrap;gap:10px;align-items:flex-end">
+            <label class="card-sub" style="margin:0">开关
+              <select class="input" id="sleepEnabled" style="width:96px;margin-left:6px">
+                <option value="true">睡着</option>
+                <option value="false">不睡</option>
+              </select>
+            </label>
+            <label class="card-sub" style="margin:0">入睡
+              <input class="input" id="sleepStart" type="time" value="23:50" style="width:120px;margin-left:6px" />
+            </label>
+            <label class="card-sub" style="margin:0">起床
+              <input class="input" id="sleepEnd" type="time" value="09:00" style="width:120px;margin-left:6px" />
+            </label>
+            <button class="btn btn-primary" id="sleepSave" type="button" onclick="window.__mollySaveSleep && window.__mollySaveSleep()">保存作息</button>
+            <span class="card-sub" id="sleepHint" style="margin:0"></span>
+          </div>
+        </div>
         <div class="card card-block">
           <h2 class="card-title">后端切换（回滚备注）</h2>
           <p class="card-sub">QQ 后端由 <span class="mono">${MOLLY_ROOT}\qq-whale\watchdog-config.json</span> 的 <span class="mono">backend</span> 决定：默认 <b>SnowLuma</b>；历史回滚后端的名字是 <b>NapCat</b>。切换属于运维操作，不在这里改。</p>

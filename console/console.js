@@ -27,7 +27,8 @@
     ['person', '人物'],
     ['event', '事件'],
     ['work', '干活'],
-    ['sticker', '表情包']
+    ['sticker', '表情包'],
+    ['meme', '梗']
   ];
 
   /* 入队原因：插件端 lib/memory.js 的 reason 字符串，只做展示。

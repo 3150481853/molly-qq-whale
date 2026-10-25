@@ -131,6 +131,7 @@ const DOCS = [
   'llm-adapter.md',
   'persona-guide.md',
   'memory-guide.md',
+  'AUDIT-2026-10-25-context-budget.md',
   'github-upload.md',
 ]
 

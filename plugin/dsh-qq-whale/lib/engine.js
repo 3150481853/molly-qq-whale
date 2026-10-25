@@ -5665,6 +5665,11 @@ export class ChatEngine {
        * 这种当天最该接得上的话全被当成寒暄丢掉。
        */
       '- 他今天在干什么、心情怎么样、在吐槽什么、最近有什么打算',
+      /*
+       * 2026-10-25（主人第 5 条）：把「梗」也当记忆收——她要能在闲聊里把梗接回来。
+       * 梗类要求原样记短句，不要解释/翻译，否则玩梗时一股说明书味。
+       */
+      '- 聊天里出现的网络热梗/名场面/她自己造的口头禅（原样记那句梗，不要解释）',
       '',
       '不要记：寒暄、语气词、你无法确定的内容、重复的东西（同一件事只记一条）。',
       /*
@@ -5676,6 +5681,7 @@ export class ChatEngine {
       '最多 8 条，每条 40~180 字。写成"他……"的第三人称，但要把信息写全：',
       '谁、什么时候、因为什么、他当时是什么态度/心情。别只写"他吐槽工作"这种空壳。',
       '一条只讲一件事，宁可写得具体一点，也别为凑字数注水。',
+      '梗类例外：短句照抄即可（3~40 字），不用写成"他……"的句子。',
       '有具体信息就记，重复的不要；宠物、家人、身体、住处、工作内容这类以后一定会被问到的优先。',
       '一条都不值得记就只输出两个字：无',
     ].join('\n')
@@ -5730,14 +5736,26 @@ export class ChatEngine {
       text = text.replace(/^(?:[-·*—–]|\d+[.、)]|\(\d+\))\s*/, '').trim()
       // 去掉模型爱加的引号、书名号包装
       text = text.replace(/^[「『"'“”](.*)[」』"'“”]$/, '$1').trim()
+      /*
+       * 2026-10-25（主人第 5 条）：模型常写「梗：xxx」显式分类，标了就按梗入库；
+       * 没标但看着像梗的，交给 guessKind 兜底。
+       */
+      let kindHint = ''
+      const mKind = text.match(/^(梗|热梗|名场面)[:：]\s*/)
+      if (mKind) {
+        kindHint = 'meme'
+        text = text.slice(mKind[0].length).trim()
+      }
+      const kind = kindHint || guessKind(text)
       // 2026-10-22：上限 120→200（主人要「每条写全」，prompt 也放宽到 180 字）
-      if (text.length < 3 || text.length > 200) continue
+      // 2026-10-25：梗类只要短句，上限 60（再长就不像梗了）
+      if (text.length < 3 || text.length > (kind === 'meme' ? 60 : 200)) continue
       if (/^(无|没有|none|null)$/i.test(text)) continue
       // 明显是解释性废话的整行丢掉（"以下是…" / "这些事实…" / "注意："）
       if (/^(以下是|这些|注意|说明|备注|其中|综上)/.test(text)) continue
       // 一条里被塞进多个事实时（罕见）不强行拆，原样记下即可
       const e = this.remember({
-        kind: guessKind(text),
+        kind,
         who: userName,
         qq: String(ev?.user_id || ''),
         text,
@@ -5766,6 +5784,11 @@ export class ChatEngine {
  */
 function guessKind(text) {
   const t = String(text || '')
+  // 2026-10-25（主人第 5 条）：梗类线索。宁可粗分，也别把梗全塞 fact——
+  // 塞 fact 之后「说个梗」这类提问按 kind 过滤就召回不到。
+  if (/(梗|名场面|口头禅|绷不住|抽象|乐子|整活|典中典|哈基|牢大|小丑|上大分|遥遥领先)/.test(t)) {
+    return 'meme'
+  }
   if (/(喜欢|爱吃|爱喝|讨厌|受不了|忌口|口味|最爱)/.test(t)) return 'preference'
   if (/(答应|说好|约好|承诺|打算|计划要|准备去)/.test(t)) return 'promise'
   if (/(生日|结婚|考试|面试|搬家|出差|住院|手术|放假|毕业)/.test(t)) return 'event'

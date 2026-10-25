@@ -54,7 +54,15 @@ import {
  * 三档用途：small = 省钱/小模型，balanced = 线上默认，large = 排查
  * 「是不是喂太少」时对照用。切档只改 WINDOW_PROFILE 一个字符串，不动任何调用点。
  */
-export const WINDOW_PROFILE = 'large'
+/*
+ * 2026-10-25（体积审计 A 项，主人拍板「A 记忆窗口」）：
+ *   large → balanced。审计实测（docs/AUDIT-2026-10-25-context-budget.md）：
+ *   large 档 48 条记忆段 3,329 字 ≈ 2,145 token，是 system prompt 里最大单块；
+ *   切 balanced 后 上下文 48→32 条、关键词召回 16→12 条、单条上限 320→240，
+ *   一轮完整 prompt 省 ~931 token（约 -13.6%），人设/硬性规则一行不动。
+ *   要回退：把这行改回 'large' 即恢复，不动任何调用点。
+ */
+export const WINDOW_PROFILE = 'balanced'
 
 export const MEMORY_WINDOW_PROFILES = Object.freeze({
   small: Object.freeze({
@@ -90,7 +98,8 @@ if (!MEMORY_WINDOW) {
 
 /**
  * 记忆条目：
- *   { id, kind: 'fact'|'preference'|'promise'|'person'|'event', who, qq, text, weight, at }
+ *   { id, kind: 'fact'|'preference'|'promise'|'person'|'event'|'work'|'sticker'|'meme', who, qq, text, weight, at }
+ * 2026-10-25（主人第 5 条）：新增 'meme'（梗/名场面/口头禅），她闲聊时能直接拿来玩。
  * weight 1..5，越高越不该被压缩掉。
  *
  * `who` 与 `qq`（2026-10-19 用户需求）：
@@ -537,6 +546,13 @@ export class MemoryStore {
       return Math.log(1 + N / d) // 越罕见的词越大
     }
 
+    /*
+     * 2026-10-25（主人第 5 条）：问句里出现「梗」时，梗类条目直接加成，
+     * 否则按身份命中排序时会被更新的普通事实压过去（问「说个梗」先甩一条"他住广州"）。
+     * 只对梗类加，避免扰动其他意图的既有召回顺序。
+     */
+    const wantMeme = /梗/.test(q)
+
     const scored = this.entries.map((e) => {
       const id = identity(e)
       let s = 0
@@ -564,6 +580,7 @@ export class MemoryStore {
        */
       if (id.qqHit || id.sameName) strongHit = true
       s += (e.weight || 3) * 0.3
+      if (wantMeme && e.kind === 'meme') s += 3 // 问梗时梗优先
       // 越新越值钱，但只值一点点，避免"全是刚说的废话"
       const ageDays = (Date.now() - e.at) / 86400000
       s += Math.max(0, 2 - ageDays / 30) * 0.3
@@ -596,12 +613,21 @@ export class MemoryStore {
     if (pool.length === 0 && (name || qqStr) && q) {
       const kinds = intentKinds(q)
       if (kinds) {
+        /*
+         * 按意图的 kind 优先级排序（2026-10-25，第 5 条）：
+         * 问「有什么梗」时，梗类要排在 fact 前面；同 kind 再按权重/新鲜度。
+         * 之前只按权重排，导致问梗却先甩过来一条事实。
+         */
+        const kindRank = (e) => {
+          const i = kinds.indexOf(e.kind)
+          return i < 0 ? 99 : i
+        }
         const fallback = this.entries
           .filter((e) => {
             const id = identity(e)
             return (id.qqHit || id.sameName || !e.who) && kinds.includes(e.kind)
           })
-          .sort((a, b) => (b.weight - a.weight) || (b.at - a.at))
+          .sort((a, b) => kindRank(a) - kindRank(b) || b.weight - a.weight || b.at - a.at)
         if (fallback.length) {
           this.logger?.('debug', `泛问兜底召回：${q} → ${fallback.length} 条`)
           return fallback.slice(0, limit)
@@ -675,6 +701,11 @@ function intentKinds(q) {
   }
   if (/(答应|说好|约好|承诺|计划|打算)/.test(s)) {
     return ['promise', 'event']
+  }
+  // 2026-10-25（主人第 5 条）：问「有什么梗/说个梗」时优先召回梗类
+  // 放在 promise 之后、近况之前：以「梗」为实义词的提问才命中
+  if (/(梗|玩梗|接梗|烂梗|热梗|梗图|名场面|口头禅|乐子|整活)/.test(s)) {
+    return ['meme', 'fact']
   }
   // 「最近怎么样」必须带自我指代，否则「今天天气怎么样」也会被当成问自己的近况
   if (/((我|俺|咱).{0,4}(最近|怎么样|还好吗|忙什么|在干嘛|过得))|^(最近|最近在)/.test(s)) {

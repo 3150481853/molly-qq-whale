@@ -161,15 +161,19 @@ export const RULES = [
     // 待核实区里「为什么被拦」比「太短」有用得多
     test: (c) => isInsult(c.text, c.kind),
   },
-  { id: 'too-short', test: (c) => c.plain.length < 4 },
+  // 2026-10-25（主人第 5 条）：梗类天然很短（「典中典」「绷不住了」），
+  // 不适用「不到 4 字算太短」这条；其余规则（骂人/自说自话/空断言）照常拦。
+  { id: 'too-short', test: (c) => c.plain.length < 4 && c.kind !== 'meme' },
   { id: 'self-talk', test: (c) => SELF_TALK_RE.test(c.text) },
   { id: 'meta-narration', test: (c) => c.kind !== 'work' && META_RE.test(c.text) },
-  { id: 'fragment', test: (c) => isFragment(c.text) },
+  // 梗类经常就是半句话（「这波啊，这波是」），不按转述碎片拦
+  { id: 'fragment', test: (c) => c.kind !== 'meme' && isFragment(c.text) },
   { id: 'vacuous', test: (c) => isVacuous(c.text) },
   {
     id: 'no-content',
-    // 去掉标点/emoji 之后不到 4 个实字；纯数字也不算内容
-    test: (c) => c.core.length < 4 || /^\d+$/.test(c.core),
+    // 去掉标点/emoji 之后不到 4 个实字；纯数字也不算内容。
+    // 2026-10-25（第 5 条）：梗类放宽到 2 个实字（「典中典」三个字就是完整梗）。
+    test: (c) => (c.kind === 'meme' ? c.core.length < 2 : c.core.length < 4) || /^\d+$/.test(c.core),
   },
   { id: 'duplicate', test: (c) => findDuplicate(c) !== null },
 ]

@@ -83,7 +83,7 @@ function pyHash(obj) {
  *   - kind 是白名单，前端下拉框跟着它走
  *   - 单张表情包 ≤ 8 MB；正文上限按 base64 膨胀（约 4/3）+ JSON 外壳放宽
  */
-const MEMORY_KINDS = ['fact', 'preference', 'promise', 'person', 'event', 'work', 'sticker']
+const MEMORY_KINDS = ['fact', 'preference', 'promise', 'person', 'event', 'work', 'sticker', 'meme']
 const MEMORY_TEXT_MAX = 200
 const MEMORY_WHO_MAX = 40
 const STICKER_MAX_BYTES = 8 * 1024 * 1024

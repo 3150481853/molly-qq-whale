@@ -359,6 +359,19 @@ export class WebWidget {
         }
       }
     } catch {}
+        out.groupfun = {
+          enabled: e.config?.groupfunEnabled !== false,
+          lotteryEnabled: e.config?.lotteryEnabled !== false,
+          welcomeEnabled: e.config?.welcomeEnabled !== false,
+          rooms: e.groupfun?.rooms?.size || 0,
+          stats: {
+            started: e.stats?.lotteryStarted || 0,
+            joined: e.stats?.lotteryJoined || 0,
+            drawn: e.stats?.lotteryDrawn || 0,
+            welcomed: e.stats?.welcomeSent || 0,
+            failed: e.stats?.lotterySendFail || 0,
+          },
+        }
         out.poke = {
           enabled: e.config?.pokeEnabled !== false,
           backChance: Number(e.config?.pokeBackChance ?? 0.7),

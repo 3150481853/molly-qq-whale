@@ -117,6 +117,11 @@ const RELEASE_FEATURES = {
   'v1.1.3-preview.3': [
     '@ 错人修复（新 lib/quote-at.js）：@ 号必须是最近说话人、纯叫醒不算回复对象、人群拥挤时才引用、提示词补两句',
   ],
+  'v1.1.3-plus.1': [
+    '群内抽奖（新 lib/groupfun.js）：@Molly 抽奖 出菜单，支持 开一场 / 报名 / 开奖 / 取消 / 看名单；默认 3 人 120 秒、到点自动开奖并 @ 中奖者',
+    '新人入群自动欢迎：识别 group_increase 通知，按群名 / 昵称生成欢迎语，可配文案、默认 60 秒冷却',
+    '全部走纯逻辑不进模型（不花 token）；配置 13 个 groupfun*/lottery*/welcome* 键；/state.groupfun 暴露状态',
+  ],
   'voice-pack-v1.0': [
     'Molly 自录 54 句微调音色包：GPT / SoVITS 权重 + 参考音频 + 切好的训练片段 + 训练配置与脚本',
     '授权 CC BY-NC-SA 4.0（禁止冒充真人 / 商用）；不含原始连续录音，只发切好的片段',
@@ -128,6 +133,7 @@ const RELEASE_ASSET_FILES = {
   'v1.0.0': 150, 'v1.1.0': 155, 'v1.1.1': 156, 'v1.1.2': 158,
   'v1.1.3-preview.1': 158, 'v1.1.3-preview.2': 159, 'v1.1.3-preview.3': 160,
   'v1.1.3': 161, 'v1.1.3-Hotfix.1': 161, 'v1.1.3-Hotfix.2': 162, 'v1.1.5-preview.1': 162, 
+  'v1.1.3-plus.1': 166,
   'v1.1.5-preview.3': 166, 'v1.1.5-preview.2': 162, 'voice-pack-v1.0': 76,
 }
 

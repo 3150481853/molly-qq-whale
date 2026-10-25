@@ -13,7 +13,9 @@
 基于 **DeepSeek Harness** 的 QQ 通道插件：稳定的人设、长期记忆、表情包习惯、会发语音，
 以及一个能看懂她此刻在干什么的控制台。
 
-**v1.1.5-preview.3**（预览）—— 她会看时间、按北京时间作息、表情包里的动图也能重新打 tag（唱歌暂缓）：①每轮提示词都带「北京时间」，问几点/星期几不再靠猜（`timeContextEnabled`，默认北京时间）；②作息改由北京时间判断（`sleepWindowStart/End`，默认 23:50–09:00）：窗口内不主动找人、群聊不插话，私聊叫醒带起床气；控制台「设置 → 作息时间」可改，保存立即生效（`${MOLLY_ROOT}\data\qq-whale\sleep-window.json`）；③新增 `tools/rescan-gif-stickers.mjs`：升级后跑一遍就能用新的动图识别把表情包库里的 GIF 重新打 tag（默认 dry-run，`--apply` 才改名，报告在 `out/rescan-gif-report.json`）；④唱歌能力已内置但**默认关闭**（`singingEnabled: false`）——算法做完了，音色没过关：她的语音包 fine-tune 数据只有 54 句 / 3.5 分钟，等收集到足够原始录音后改用社区歌唱模型再开。
+**v1.1.3-plus.1** —— 群趣味：**抽奖**（群里 @我 + 「抽奖」发菜单；「抽奖 开 3 人 60秒」开局，「参加」报名，「开奖」「取消」「名单」，到点自动开奖，每群同时只能一场）+ **新人欢迎**（有人入群自动欢迎，`welcomeTexts` 可自定义模板与 `{name}/{group}/{molly}` 占位符，60 秒冷却）；总开关 `groupfunEnabled`，分开关 `lotteryEnabled` / `welcomeEnabled`，都在 `cordis.patch.yml`。
+
+上一版 **v1.1.5-preview.3**（预览）—— 她会看时间、按北京时间作息、表情包里的动图也能重新打 tag（唱歌暂缓）：①每轮提示词都带「北京时间」，问几点/星期几不再靠猜（`timeContextEnabled`，默认北京时间）；②作息改由北京时间判断（`sleepWindowStart/End`，默认 23:50–09:00）：窗口内不主动找人、群聊不插话，私聊叫醒带起床气；控制台「设置 → 作息时间」可改，保存立即生效（`${MOLLY_ROOT}\data\qq-whale\sleep-window.json`）；③新增 `tools/rescan-gif-stickers.mjs`：升级后跑一遍就能用新的动图识别把表情包库里的 GIF 重新打 tag（默认 dry-run，`--apply` 才改名，报告在 `out/rescan-gif-report.json`）；④唱歌能力已内置但**默认关闭**（`singingEnabled: false`）——算法做完了，音色没过关：她的语音包 fine-tune 数据只有 54 句 / 3.5 分钟，等收集到足够原始录音后改用社区歌唱模型再开。
 
 上一版 **v1.1.5-preview.2**（预览）—— 让她看懂动图：以前群里的 GIF / 动画表情她只能看见第一帧（多模态模型对 `image/gif` 只解码首帧），现在发模型前用本机 Pillow 把 GIF 采样成 6 帧拼成一张带帧号的图，模型能按顺序看懂整个动作；没装 Pillow / 拆帧超时会自动回退原图，不影响回复。顺带修了「她看了图却一声不响」——带图轮次的思考 token 波动极大，会把输出预算吃光、正文变成空串，现在带图请求统一抬预算并用 `reasoning_effort: minimal`。
 

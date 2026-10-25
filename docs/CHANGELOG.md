@@ -7,6 +7,48 @@
 
 ---
 
+## 2026-10-25 · v1.1.3-plus.1：群趣味——抽奖 + 新人欢迎
+
+> 主人 m06096：「加两个群趣味功能作为1.1.3plus.1上线：1.群内抽奖小插件…2.新人欢迎小插件」。
+
+**1）群内抽奖（纯代码，不进模型）**
+
+- 触发：「@Molly 抽奖」或「@Molly 抽个奖」→ 发菜单（菜单同时也是使用说明）。
+- 指令（整句匹配，防误触）：
+  - `抽奖 开 3 人 60秒`：开局（名额 1–10，默认 3；时长 30–600 秒，默认 120，可省略）
+  - `参加`：报名（开奖前都能报，重复报名会被拦下）
+  - `抽奖 开奖`：提前开奖（只有发起人能开）
+  - `抽奖 取消` / `抽奖 名单`
+- 到点自动开奖；同一时间每群只能有一场；抽签不放回、每人最多中一次。
+- 实现：`lib/groupfun.js`（纯逻辑状态机，注入 now/random/send 便于测试）+ `engine.maybeGroupFun` 在会话路由之前接管，命中后不再走模型。
+
+**2）新人欢迎**
+
+- 监听 `group_increase` 通知（含 `sub_type=increase` 的兼容形态），新人入群自动发欢迎语。
+- 模板在 `welcomeTexts`（`|` 分隔多条，随机一条），占位符 `{name}` `{group}` `{molly}`；60 秒冷却（`welcomeCooldownSeconds`）。
+- 欢迎语只发一次、不进历史，也不花 token。
+
+**观测**
+
+- `/state.groupfun` 回读开关与房间数；`/state.stats` 新增 `lotteryStarted` / `lotteryJoined` / `lotteryDrawn` / `welcomeSent`。
+- 自测：`out/_groupfun_test.mjs` 51 项全过（解析、状态机、抽签均匀性、欢迎模板、入群事件）。
+
+**配置（cordis.patch.yml）**
+
+```yaml
+groupfunEnabled: true
+lotteryEnabled: true
+lotteryDefaultCount: 3
+lotteryMaxCount: 10
+lotteryDefaultSeconds: 120
+lotteryMinSeconds: 30
+lotteryMaxSeconds: 600
+lotteryJoinKeyword: 参加
+welcomeEnabled: true
+welcomeTexts: 欢迎 {name} 加入 {group}！我是 {molly}，有不懂的可以问我喵~
+welcomeCooldownSeconds: 60
+```
+
 ## 2026-10-25 · v1.1.5-preview.3：看得见时间、按点睡觉、动图表情重扫（唱歌暂缓）
 
 > 主人 m05189：「1.给鱼加一个能看时间的插件功能，要求北京时间 2.鱼想唱歌，优化一下语音模型写一下算法，让鱼能唱出歌来 3.利用新的动图识别功能，重新给表情包库的gif打tag，同时推preview.3的时候,增加脚本提示，让更新者获得提示：请利用新功能重新扫描gif库」。

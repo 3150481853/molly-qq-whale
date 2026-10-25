@@ -92,6 +92,9 @@ const { SwitchBoard, sanitizeGroupText, looksLikeCodeOrLog } = await import(sub(
 const { VoiceMaker, cleanVoiceText } = await import(sub('./voice.js'))
 // 戳一戳回应（2026-10-23，主人 m01231）：反戳 / 被戳多了生气，不走模型。
 const { PokeReactor, isPokeNotice } = await import(sub('./poke.js'))
+// 群趣味（2026-10-25，主人 m06096）：抽奖 + 新人欢迎。
+const { LotteryBox, LOTTERY_MENU_TIPS, parseLotteryCommand, buildWelcome, parseGroupIncrease } =
+  await import(sub('./groupfun.js'))
 // 「@ 谁 / 引用哪条」（2026-10-25，主人 m02736 + m02835）：纯函数模块，单测直接跑。
 const { isPureNudge, resolveExplicitAt, pickQuoteTarget, shouldDemoteVoice, voicePartToText } = await import(sub('./quote-at.js'))
 // 动图理解（2026-10-26，主人 m04893）：GIF 只解码首帧 → 采样成多帧拼图再给模型。
@@ -384,6 +387,10 @@ export class ChatEngine {
       // 唱歌（2026-10-25，主人 m05189-2）：唱成功几条 / 没唱出来几条
       singSent: 0,
       singFail: 0,
+      lotteryStarted: 0,
+      lotteryJoined: 0,
+      lotteryDrawn: 0,
+      welcomeSent: 0,
     }
 
     /**
@@ -416,6 +423,24 @@ export class ChatEngine {
           // 时 poke.js 会用固定文案兜底。
           replyText: (poke) => this.pokeReplyText(poke),
         })
+    // 群趣味（2026-10-25，主人 m06096）：抽奖房间 + 新人欢迎冷却
+    this.groupfun =
+      config.groupfunEnabled === false
+        ? null
+        : new LotteryBox({
+            logger: (level, msg) => this.logger(level, msg),
+            now: () => this.now(),
+            random: Math.random,
+            send: async (gid, payload) => {
+              const text = String(payload?.text || '')
+              const ats = Array.isArray(payload?.at) ? payload.at.filter(Boolean) : []
+              const parts = ats.map((qq) => ({ type: 'at', data: { qq: String(qq) } }))
+              if (text) parts.push({ type: 'text', text })
+              if (!parts.length) return
+              await this.client.sendGroupMsg(gid, buildMessage(parts))
+            },
+          })
+    this.welcomeAt = new Map()
 
     /**
      * 逐条决策记录（2026-10-21，真机验收用）。
@@ -1468,7 +1493,113 @@ export class ChatEngine {
    * main.js 的 onOneBotEvent 把 notice 事件递到这里；这里包一层 try，
    * 通知处理失败绝不往上抛——不该影响聊天主链路。
    */
+  /**
+   * 群趣味（2026-10-25，主人 m06096）：群内抽奖。
+   *
+   * 只在群里、且整句被认成抽奖指令时接走；回话走纯文本，不经过模型。
+   */
+  async maybeGroupFun({ ev, text }) {
+    if (!this.groupfun) return null
+    if (String(ev?.message_type || '') !== 'group') return null
+    const gid = String(ev?.group_id || '')
+    if (!gid) return null
+    const parsed = parseLotteryCommand(text, { joinKeyword: this.config?.lotteryJoinKeyword })
+    if (!parsed) return null
+    const uid = String(ev.user_id || '')
+    const nick = String(ev.sender?.card || ev.sender?.nickname || uid)
+    const reply = async (res) => {
+      if (!res?.message) return
+      const ats = Array.isArray(res.at) ? res.at.filter(Boolean) : []
+      const parts = ats.map((qq) => ({ type: 'at', data: { qq: String(qq) } }))
+      parts.push({ type: 'text', text: res.message })
+      try {
+        await this.client.sendGroupMsg(gid, buildMessage(parts))
+      } catch (err) {
+        this.logger('warn', `群趣味回话失败：${err?.message || err}`)
+      }
+    }
+    if (parsed.kind === 'menu') {
+      await reply({ message: LOTTERY_MENU_TIPS })
+      return { handled: true, reply: '' }
+    }
+    if (parsed.kind === 'join') {
+      const res = this.groupfun.join({ gid, qq: uid, nick })
+      if (!res) return null
+      if (res.ok) this.stats.lotteryJoined += 1
+      await reply(res)
+      return { handled: true, reply: '' }
+    }
+    if (parsed.kind === 'list') {
+      await reply(this.groupfun.status({ gid }))
+      return { handled: true, reply: '' }
+    }
+    if (parsed.kind === 'draw') {
+      const res = await this.groupfun.draw({ gid, by: uid, config: this.config })
+      if (res.ok) this.stats.lotteryDrawn += 1
+      await reply(res)
+      return { handled: true, reply: '' }
+    }
+    if (parsed.kind === 'cancel') {
+      await reply(await this.groupfun.cancel({ gid, by: uid }))
+      return { handled: true, reply: '' }
+    }
+    const res = await this.groupfun.start({
+      gid,
+      owner: uid,
+      ownerName: nick,
+      count: parsed.count,
+      seconds: parsed.seconds,
+      config: this.config,
+    })
+    if (res.ok) this.stats.lotteryStarted += 1
+    await reply(res)
+    return { handled: true, reply: '' }
+  }
+
+  /**
+   * 新人入群欢迎（2026-10-25，主人 m06096）：模板 + 冷却，不走模型。
+   */
+  async handleGroupIncrease({ gid, qq }) {
+    if (!this.groupfun) return { acted: false }
+    if (this.config?.welcomeEnabled === false) return { acted: false, reason: 'disabled' }
+    const now = this.now()
+    const last = this.welcomeAt.get(String(gid)) || 0
+    const cooldownMs = (Number(this.config?.welcomeCooldownSeconds) || 60) * 1000
+    if (now - last < cooldownMs) return { acted: false, reason: 'cooldown' }
+    let nickname = ''
+    try {
+      const info = await this.client.getGroupMemberInfo(gid, qq)
+      nickname = String(info?.card || info?.nickname || '')
+    } catch {
+      // 拉不到名片不影响欢迎，用空昵称
+    }
+    const text = buildWelcome({
+      texts: this.config?.welcomeTexts,
+      nickname,
+      groupName: '',
+      mollyName: 'Molly',
+      random: Math.random,
+    })
+    if (!text) return { acted: false, reason: 'empty' }
+    this.welcomeAt.set(String(gid), now)
+    try {
+      await this.client.sendGroupMsg(gid, buildMessage([{ type: 'text', text }]))
+      this.stats.welcomeSent += 1
+      this.logger('debug', `新人欢迎：${qq} 进入群 ${gid}`)
+      return { acted: true, text }
+    } catch (err) {
+      this.logger('warn', `新人欢迎发送失败：${err?.message || err}`)
+      return { acted: false, reason: 'send-failed' }
+    }
+  }
+
   async onNotice(ev) {
+    // 新人入群：自动欢迎（2026-10-25，主人 m06096）
+    const joined = parseGroupIncrease(ev)
+    if (joined) {
+      const res = await this.handleGroupIncrease(joined)
+      if (res?.acted) return { acted: true, kind: 'welcome', text: res.text }
+    }
     if (!this.pokes) return { acted: false, reason: 'disabled' }
     if (!isPokeNotice(ev)) return { acted: false, reason: 'ignored' }
     try {
@@ -3167,6 +3298,10 @@ export class ChatEngine {
      */
     const allowlist = await this.maybeAllowlistCommand({ ev, text })
     if (allowlist) return { handled: true, allowlist: true, reply: allowlist.reply }
+
+    // 群趣味（2026-10-25，主人 m06096）：抽奖指令，不进模型
+    const groupfun = await this.maybeGroupFun({ ev, text })
+    if (groupfun) return groupfun
     const prefixes = this.config.commandPrefixes || ['命令 ']
     const route = await routeMessage({
       text,

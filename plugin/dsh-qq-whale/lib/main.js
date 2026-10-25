@@ -630,6 +630,19 @@ export const DEFAULTS = {
   pokeUseModel: true,
   pokeModelTimeoutMs: 10000,
   pokeModelMaxChars: 40,
+  // 群趣味（2026-10-25，主人 m06096）：抽奖 + 新人欢迎
+  groupfunEnabled: true,
+  lotteryEnabled: true,
+  lotteryDefaultCount: 3,
+  lotteryMaxCount: 10,
+  lotteryDefaultSeconds: 120,
+  lotteryMinSeconds: 30,
+  lotteryMaxSeconds: 600,
+  lotteryJoinKeyword: '参加',
+  welcomeEnabled: true,
+  welcomeCooldownSeconds: 60,
+  welcomeTexts:
+    '欢迎 {name} 加入 {group}～我是 {molly}，有问题随时 @我|来啦来啦，群里又多了个 {name}，欢迎欢迎|欢迎新人 {name}！先看看群公告，别潜水太深呀',
   // —— 撤回（2026-10-24，主人 m00480 需求②）——
   // 有人撤回消息后：清历史 / 作废在途回复是硬行为（不留配置）；
   // 「轻回一句」是可配置的软行为。用户 m00585 明确要求**群里也轻回一句**
@@ -915,6 +928,18 @@ function _configShapeReference(Schema) {
     pokeAngryWindowSeconds: s.natural().default(DEFAULTS.pokeAngryWindowSeconds).description('生气计数的窗口（秒，默认 180）'),
     pokeCooldownSeconds: s.natural().default(DEFAULTS.pokeCooldownSeconds).description('两次戳回应的最小间隔（秒，默认 8）'),
     pokeAngryCooldownSeconds: s.natural().default(DEFAULTS.pokeAngryCooldownSeconds).description('生气之后的冷却（秒，默认 90）'),
+    // —— 群趣味（2026-10-25，主人 m06096）——
+    groupfunEnabled: s.boolean().default(DEFAULTS.groupfunEnabled).description('群趣味总开关（抽奖 + 新人欢迎）'),
+    lotteryEnabled: s.boolean().default(DEFAULTS.lotteryEnabled).description('群内抽奖（「@我 抽奖」发菜单；「@我 抽 N 个 60 秒」开奖；参加 / 开奖 / 取消）'),
+    lotteryDefaultCount: s.natural().default(DEFAULTS.lotteryDefaultCount).description('默认抽几个人（默认 3）'),
+    lotteryMaxCount: s.natural().default(DEFAULTS.lotteryMaxCount).description('一次最多抽几个人（默认 10）'),
+    lotteryDefaultSeconds: s.natural().default(DEFAULTS.lotteryDefaultSeconds).description('默认报名时长（秒，默认 120）'),
+    lotteryMinSeconds: s.natural().default(DEFAULTS.lotteryMinSeconds).description('报名时长下限（秒，默认 30）'),
+    lotteryMaxSeconds: s.natural().default(DEFAULTS.lotteryMaxSeconds).description('报名时长上限（秒，默认 600）'),
+    lotteryJoinKeyword: s.string().default(DEFAULTS.lotteryJoinKeyword).description('报名关键词（默认「参加」）'),
+    welcomeEnabled: s.boolean().default(DEFAULTS.welcomeEnabled).description('新人入群自动欢迎'),
+    welcomeCooldownSeconds: s.natural().default(DEFAULTS.welcomeCooldownSeconds).description('同一群两次欢迎的最小间隔（秒，默认 60）'),
+    welcomeTexts: s.string().default(DEFAULTS.welcomeTexts).description('欢迎语候选（用 | 分隔；可用 {name} {group} {molly} 占位）'),
     recallWhisperEnabled: s.boolean().default(DEFAULTS.recallWhisperEnabled).description('对方撤回消息后是否轻回一句（清历史/作废在途回复不受此开关影响）'),
     recallWhisperChance: s.number().min(0).max(1).default(DEFAULTS.recallWhisperChance).description('撤回后轻回一句的概率（0~1，默认 0.45；群聊私聊都会掷骰）'),
     recallWhisperDelaySeconds: s.natural().default(DEFAULTS.recallWhisperDelaySeconds).description('撤回后等多少秒再轻回（默认 20；期间对方重发就不插嘴）'),

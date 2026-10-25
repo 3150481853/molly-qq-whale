@@ -89,6 +89,10 @@ const RELEASE_FEATURES = {
     '新增 7 个 voiceAsr* 配置（开关 / Python 解释器 / 模型 / 线程 / 超时 / 空闲退出 / 最长识别时长），/state.stats 新增 voiceAsrTranscribed / voiceAsrFail',
     '控制台「本次更新说明」：左下角版本号可点击，弹层直接读 docs/CHANGELOG.md 最新一节；新增 GET /api/changelog',
   ],
+  'v1.1.5-preview.1': [
+    '控制台数据补齐：学习器（累计/今日）、群数（SnowLuma 群列表）、记忆条数（加密后走插件兜底并标注来源）、表情包「已学」不再显示「—」',
+    'QQ 下「登录」「QQ 连接」合并为一页：连接状态卡 + 扫码登录同页，旧 #/login 自动跳转 #/qq',
+  ],
   'v1.1.3-preview.1': [
     '戳一戳「说一句」改为模型回复：pokeUseModel，超时/失败回退原固定句池',
     '控制台改版：去掉 NapCat 品牌、QQ 连接四态判定、导航六组、新增 #/qq 页面',
@@ -110,7 +114,7 @@ const RELEASE_FEATURES = {
 const RELEASE_ASSET_FILES = {
   'v1.0.0': 150, 'v1.1.0': 155, 'v1.1.1': 156, 'v1.1.2': 158,
   'v1.1.3-preview.1': 158, 'v1.1.3-preview.2': 159, 'v1.1.3-preview.3': 160,
-  'v1.1.3': 161, 'v1.1.3-Hotfix.1': 161, 'voice-pack-v1.0': 76,
+  'v1.1.3': 161, 'v1.1.3-Hotfix.1': 161, 'v1.1.3-Hotfix.2': 162, 'v1.1.5-preview.1': 162, 'voice-pack-v1.0': 76,
 }
 
 /* 旧版本脱敏命中数（正文里如实披露，body-only 刷新时沿用） */

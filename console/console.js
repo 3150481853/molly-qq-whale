@@ -16,7 +16,7 @@
   var QR_TTL_MS = (typeof window !== 'undefined' && typeof window.__QR_TTL_MS__ === 'number' && window.__QR_TTL_MS__ > 0)
     ? window.__QR_TTL_MS__
     : 120000;
-  var PAGES = ['overview', 'chats', 'memory', 'pending', 'stickers', 'switches', 'budget', 'work', 'watchdog', 'ops', 'external', 'qq', 'login', 'exec', 'settings'];
+  var PAGES = ['overview', 'chats', 'memory', 'pending', 'stickers', 'switches', 'budget', 'work', 'watchdog', 'ops', 'external', 'qq', 'exec', 'settings'];
 
   /* 记忆类型：顺序即页面分组顺序。值和插件端 lib/memory.js 的 kind 枚举一一对应，
      中文标签只在前端出现，不参与任何写请求。 */
@@ -771,7 +771,7 @@
       var sideRows = side.reachable
         ? [
           kv('状态', pill('ok', '已连接')),
-          kv('记忆', mono(side.memory && side.memory.count) + ' 条'),
+          kv('记忆', mono((side.memory && side.memory.count) || (p.memory && p.memory.count)) + ' 条'),
           kv('表情', mono(side.stickers && side.stickers.count) + ' 张'),
           kv('预算上限', mono(side.budget && side.budget.cap))
         ].join('')
@@ -838,7 +838,7 @@
 
     var sideRows = side.reachable
       ? [
-        kv('记忆条数', mono(side.memory && side.memory.count)),
+        kv('记忆条数', mono((side.memory && side.memory.count) || (p.memory && p.memory.count))),
         kv('表情张数', mono(side.stickers && side.stickers.count)),
         kv('消息（旁路）', mono(side.metrics && side.metrics.messages))
       ].join('')
@@ -2247,8 +2247,10 @@
           kv('核心就绪', nc.coreReady ? '是' : '否')
         ];
 
+    /* 合并页里「登录状态」由下半部分的扫码登录卡负责，这里连上时不再重复一句；
+       没连上时仍给一句下一步提示（总览黄条也指到这一页）。 */
     var nextStep = q.level === 'connected'
-      ? '<p class="card-sub">Molly 已经连上 QQ，能正常收发消息，不需要扫码。</p>'
+      ? ''
       : '<p class="card-sub">' + esc(q.nextStep || '先点下面的「重新登录 QQ（扫码）」，再回来看这个状态。') + '</p>';
 
     setHtml(box, [
@@ -2263,10 +2265,7 @@
         kv('昵称', nick ? esc(nick) : '—'),
         nc.loginError ? kv('错误', esc(nc.loginError), 'is-bad') : ''
       ].join('') + nextStep),
-      card('服务', svcRows.join('')),
-      card('扫码登录', flowBody + (nc.qrcodeurl
-        ? '<p class="card-sub">当前二维码地址：<a href="' + esc(nc.qrcodeurl) + '" target="_blank" rel="noreferrer">打开</a></p>'
-        : ''))
+      card('服务', svcRows.join(''))
     ].join(''));
   }
 
@@ -2488,7 +2487,7 @@
     stopLoginPoll();
     qrPollTimer = setInterval(function () {
       /* 人离开登录页就停：后台不该一直问 overview，4 秒的全局轮询已经够用 */
-      if (state.page !== 'login') { stopLoginPoll(); return; }
+      if (state.page !== 'qq') { stopLoginPoll(); return; }
       safe(loginPollTick);
     }, QR_POLL_MS);
   }
@@ -2553,7 +2552,7 @@
     var lg = state.login;
     if (!lg.waiting) return;
     lg.waiting = false;
-    if (state.page !== 'login') {
+    if (state.page !== 'qq') {
       lg.hint = '二维码已过期；回到本页会自动换新码，也可以手动点「换一张」。';
       safe(renderLogin);
       return;
@@ -3233,13 +3232,6 @@
           return;
         }
         if (t.closest('.js-pest-word')) copyPestWord();
-      });
-    }
-
-    var ncQr = $('#ncQr');
-    if (ncQr) {
-      ncQr.addEventListener('click', function () {
-        runAction('napcat/qr', {}, { btn: ncQr, box: $('#ncOut') });
       });
     }
 
@@ -4104,6 +4096,8 @@
     var h = String(location.hash || '').replace(/^#\/?/, '');
     /* 老链接兼容：#/napcat 是这一页改名前叫「QQ 连接」的地址，收藏夹里可能还留着 */
     if (h === 'napcat') h = 'qq';
+    /* 「登录」页已并进「QQ 连接」：收藏夹里的 #/login 也落到同一页 */
+    if (h === 'login') h = 'qq';
     return PAGES.indexOf(h) >= 0 ? h : 'overview';
   }
 
@@ -4116,8 +4110,8 @@
       case 'watchdog': renderWatchdog(); break;
       case 'ops': renderOps(); break;
       case 'external': renderExternal(); break;
-      case 'qq': renderQq(); break;
-      case 'login': renderLogin(); break;
+      /* 合并成一页：QQ 连接 = 链路状态 + 扫码登录（原独立「登录」页已删） */
+      case 'qq': renderQq(); renderLogin(); break;
       case 'settings': renderSettings(); break;
       case 'switches': if (!swInputFocused()) renderSwitches(); break;
       default: break;
@@ -4142,8 +4136,8 @@
     if (name === 'ops') loadOpsHeartbeat();
     if (name === 'external') loadExternal();
     if (name === 'switches') loadSwitches();
-    /* 登录页只在等待扫码时轮询，离开就停，别在后台空转 */
-    if (name === 'login') enterLoginPage();
+    /* 扫码轮询只挂在「QQ 连接」页：离开就停，别在后台空转 */
+    if (name === 'qq') enterLoginPage();
     else stopLoginPoll();
   }
 

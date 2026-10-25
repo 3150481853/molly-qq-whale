@@ -105,7 +105,7 @@ const PORT = Number(pick('MOLLY_CONSOLE_PORT', 'port', 19392)) || 19392;
 // 控制台版本：以插件 package.json 为唯一真源，别在这里写死（2026-10-25 主人 m03522：
 // 左下角一直显示 v1.0.0 就是这一行写死的；发布版本与插件版本从此自动同步）。
 // exe 模式读不到 package.json 时退回 FALLBACK_VERSION，保证打包版也有版本号。
-const FALLBACK_VERSION = '1.1.3-Hotfix.2';
+const FALLBACK_VERSION = '1.1.5-preview.1';
 const VERSION = (() => {
   try {
     const pkg = JSON.parse(
@@ -432,7 +432,9 @@ async function buildOverview() {
         stickers: s.stickers
           ? {
               count: isNum(s.stickers.count) ? s.stickers.count : null,
-              learned: isNum(s.stickers.learned) ? s.stickers.learned : null,
+              learned: isNum(s.stickers.learned)
+                ? s.stickers.learned
+                : (isNum(s.learner && s.learner.total) ? s.learner.total : null),
             }
           : null,
         budget: s.budget
@@ -448,6 +450,19 @@ async function buildOverview() {
               kept: isNum(s.learner.kept) ? s.learner.kept : null,
               rejected: isNum(s.learner.rejected) ? s.learner.rejected : null,
               dup: isNum(s.learner.dup) ? s.learner.dup : null,
+              /* 累计 / 今日：插件 learner.total / learner.today 原样透出。
+                 不在这里算「累计 = lifetime.kept」，免得两套口径对不上。 */
+              total: isNum(s.learner.total) ? s.learner.total : null,
+              today: s.learner.today && typeof s.learner.today === 'object'
+                ? {
+                    date: s.learner.today.date || null,
+                    seen: isNum(s.learner.today.seen) ? s.learner.today.seen : null,
+                    kept: isNum(s.learner.today.kept) ? s.learner.today.kept : null,
+                    rejected: isNum(s.learner.today.rejected) ? s.learner.today.rejected : null,
+                    dup: isNum(s.learner.today.dup) ? s.learner.today.dup : null,
+                    skipped: isNum(s.learner.today.skipped) ? s.learner.today.skipped : null,
+                  }
+                : null,
               // 入库闸门计数（task-27 插件侧 learner.memory）。插件没上线这段时
               // 整个对象为 null —— 契约要求「拿不到就用 null」，绝不编造 0。
               // queued 与 pending 是两个数：pending 是「被拦了 N 次」，queued 才是
@@ -484,6 +499,18 @@ async function buildOverview() {
           : null,
         base: pluginBase,
       };
+
+      /* 群数：插件 /state 只报 bot 身份，群列表要去 SnowLuma 的 get_group_list 拿。
+         拿不到就保持 null —— 前端显示「—」，绝不编造 0。 */
+      if (out.plugin.bot) {
+        try {
+          const gl = await snowlumaAction('get_group_list', {}, 2000);
+          const list = gl && gl.retcode === 0 && Array.isArray(gl.data) ? gl.data : null;
+          if (list) out.plugin.bot.groupCount = list.length;
+        } catch {
+          /* 探测失败不拖累总览：这一项留空即可 */
+        }
+      }
     }
   }
 
@@ -494,6 +521,22 @@ async function buildOverview() {
   } else {
     const d = sd.data || {};
     out.sidecar = { reachable: true, ...d };
+  }
+
+  /* 记忆条数兜底：数据服务（19391）读的是 memory.md 明文，记忆加密后它读不到，
+     count 会是空的。这里用插件侧 memory.count 补上，并标 source=plugin，
+     只做展示、不落盘。 */
+  if (out.plugin && out.plugin.memory && isNum(out.plugin.memory.count)) {
+    if (!out.sidecar || typeof out.sidecar !== 'object') out.sidecar = { reachable: false };
+    const sideCount = isNum(out.sidecar.memory && out.sidecar.memory.count)
+      ? out.sidecar.memory.count
+      : null;
+    if (sideCount === null) {
+      out.sidecar.memory = Object.assign({}, out.sidecar.memory || {}, {
+        count: out.plugin.memory.count,
+        source: 'plugin',
+      });
+    }
   }
 
   // 3) QQ 客户端探测（SnowLuma 走 OneBot HTTP 3000；回滚后端 NapCat 走 WebUI 6099。

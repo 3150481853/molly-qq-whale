@@ -7,6 +7,32 @@
 
 ---
 
+## 2026-10-25 · v1.1.5-preview.1：控制台数据补齐 + QQ 页合并
+
+> 主人 m04755「控制台里的学习器，记忆，群数等数据还是none，看看怎么弄一下」+「QQ这里两个模块功能有点重复了吧，看看是合并还是清晰区分一下」。
+
+**为什么是「—」**
+- 学习器：插件 `/state.learner` 本来就有 `total` 和 `today{kept,...}`，`console-server` 的 `out.learner` 没透传。
+- 群数：`out.plugin.bot` 没有 `groupCount`。
+- 记忆：QQ 记忆池 10-23 改成加密存储，控制台旧数据面（19391 的 panel-data）读不到明文 `memory.md` 就返回空。
+- 表情包「已学」：`out.stickers.learned` 缺失。
+- 都是控制台聚合层/取值链的问题，**Molly 插件本身数据是好的**。
+
+**改了什么**
+- `tools/console-server.mjs`：`out.learner` 补 `total` + `today`；`out.plugin.bot.groupCount` 用已有的 `snowlumaAction('get_group_list')` 取群列表长度（retcode 0 且为数组才算）；`out.stickers.learned` 回落 `learner.total`；`out.sidecar.memory` 为空时回落插件 `/state.memory.count` 并标 `source:'plugin'`。
+- `console/console.js`：取值链改 `p.bot.groupCount`、`learner.total`、`learner.today.kept`、`stk.learned`、`(side.memory.count)||(p.memory.count)`；`PAGES` 去 `login`、`#/login` 与 `#/napcat` 都别名到 `#/qq`；`renderPageNow('qq')` 同时渲染连接页与登录块；`startLoginPoll()`/`handleQrExpired()` 页面判断改 `qq`；连上时不再重复「不需要扫码」。
+- `console/index.html`：左侧 QQ 组只留一项「QQ 连接」（`#loginBadge` 移到该项）；QQ 页 = 连接状态卡 + 服务信息 + 扫码登录块（重新登录/二维码/状态/倒计时/进度/复制链接/诊断）；删掉独立「登录」页。
+
+**验证**
+- `node --check` 通过（`tools/console-server.mjs`、`console/console.js`）；重启 `Molly-Console` 后 `/api/health` 版本号跟随 `plugin/dsh-qq-whale/package.json`。
+- `/api/overview`：`bot.groupCount=10`、`learner.total=234`、`learner.today.kept=45`、`stickers.learned=234`、`memory.count=911`、`sidecar.memory={count:911,source:'plugin'}`。
+- 浏览器实测：总览「群数 10 / 累计学会 234 张 / 今日学会 45 条 / 记忆 911 条」；QQ 页只剩一个导航项，状态卡与扫码登录同页。
+
+**回退**
+- 纯控制台（前端 + 一个 server 文件）：`git checkout` 回 `tools/console-server.mjs`、`console/index.html`、`console/console.js`，重启 `Molly-Console`。不涉及插件运行时和线上 Molly 行为。
+
+---
+
 ## 2026-10-25 · v1.1.3-Hotfix.2：群聊语音本地 ASR 兜底 + 控制台「本次更新说明」
 
 > 主人 m04446「把语音识别加进这个版本呢，然后一起发」、m04404 选「本地兜底」、m04452「控制台上的版本更新一下，注释一下这次更新了什么」。

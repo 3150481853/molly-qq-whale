@@ -91,7 +91,7 @@ const RELEASE_FEATURES = {
   ],
   'v1.1.5-preview.3': [
     '时间感知：每轮提示词带「北京时间」（timeContextEnabled），问几点/星期几不再靠猜',
-    '唱歌：新增 lib/singing.js + 内嵌 numpy 渲染器，逐字合成 + ACF 基频搬移 + WSOLA 保时长，会唱《小星星》《虫儿飞》《两只老虎》《生日快乐》',
+    '唱歌（暂缓，默认关闭）：算法已实现（逐字合成 + ACF 基频搬移 + WSOLA 保时长，42 个音平均误差 14.6 音分），但语音包只有 54 句 / 3.5 分钟、音色未达标，按主人要求先下架；等训练数据齐后改用社区歌唱模型再开',
     '动图表情重扫：新增 tools/rescan-gif-stickers.mjs（默认预览，--apply 改名，报告在 out/rescan-gif-report.json）',
     '升级后请运行：node tools/rescan-gif-stickers.mjs（先预览）→ node tools/rescan-gif-stickers.mjs --apply',
   ],

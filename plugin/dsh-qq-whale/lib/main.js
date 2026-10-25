@@ -612,7 +612,7 @@ export const DEFAULTS = {
   // —— 唱歌（2026-10-25，主人 m05189-2「鱼想唱歌…让鱼能唱出歌来」）——
   // 有人私聊/群里 @ 她说「唱歌 小星星」时，逐字合成 + 音高搬移 + WSOLA 拉伸，
   // 直接发一条语音条（不走模型）。算法与曲库在 lib/singing.js。
-  singingEnabled: true,
+  singingEnabled: false, // 2026-10-25 下架：音色未达标（训练数据只有 3.5 分钟），代码保留待社区歌唱模型接入
   // 渲染用 python（复用本地 ASR 那个 venv：numpy 已在，不需要新装依赖）
   singingPython: 'G:\\Molly\\data\\video\\venv\\Scripts\\python.exe',
   // 整首渲染超时（毫秒）：40 音节实测 4~20 秒
@@ -901,7 +901,7 @@ function _configShapeReference(Schema) {
     imageMaxTokens: s.natural().default(DEFAULTS.imageMaxTokens).description('带图轮次的输出 token 上限（默认 3200；思考 token 波动大，给多了不亏）'),
     imageReasoningEffort: s.string().default(DEFAULTS.imageReasoningEffort).description('带图轮次的思考强度（minimal/空串=不传）'),
     // —— 唱歌（2026-10-25，主人 m05189-2）——
-    singingEnabled: s.boolean().default(DEFAULTS.singingEnabled).description('唱歌：私聊/群里 @ 她说「唱歌 小星星」时发一条真人声唱的语音条'),
+    singingEnabled: s.boolean().default(DEFAULTS.singingEnabled).description('唱歌（实验性，默认关闭）：音色未达标已下架，等训练数据够了一起换社区歌唱模型再开'),
     singingPython: s.string().default(DEFAULTS.singingPython).description('唱歌渲染用的 Python 解释器（需 numpy；默认复用本地 ASR 的 venv）'),
     singingTimeoutMs: s.natural().default(DEFAULTS.singingTimeoutMs).description('整首渲染超时（毫秒，默认 180000）'),
     // —— 戳一戳回应（2026-10-23，主人 m01231）——

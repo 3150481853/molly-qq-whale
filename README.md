@@ -5,7 +5,7 @@
 基于 **DeepSeek Harness** 的 QQ 通道插件：稳定的人设、长期记忆、表情包习惯、会发语音，
 以及一个能看懂她此刻在干什么的控制台。
 
-**v1.1.5-preview.3**（预览）—— 她会看时间、会唱歌，表情包里的动图也能重新打 tag：①每轮提示词都带「北京时间」，问几点/星期几不再靠猜（`timeContextEnabled`，默认北京时间）；②新增唱歌能力——歌词按简谱逐字合成她的音色、再逐音搬音高（ACF 测基频 + 重采样 + WSOLA 保时长 + 逐音校准），会唱《小星星》《虫儿飞》《两只老虎》《生日快乐》；③新增 `tools/rescan-gif-stickers.mjs`：升级后跑一遍就能用新的动图识别把表情包库里的 GIF 重新打 tag（默认 dry-run，`--apply` 才改名，报告在 `out/rescan-gif-report.json`）。
+**v1.1.5-preview.3**（预览）—— 她会看时间、表情包里的动图也能重新打 tag（唱歌暂缓）：①每轮提示词都带「北京时间」，问几点/星期几不再靠猜（`timeContextEnabled`，默认北京时间）；②新增 `tools/rescan-gif-stickers.mjs`：升级后跑一遍就能用新的动图识别把表情包库里的 GIF 重新打 tag（默认 dry-run，`--apply` 才改名，报告在 `out/rescan-gif-report.json`）；③唱歌能力已内置但**默认关闭**（`singingEnabled: false`）——算法做完了，音色没过关：她的语音包 fine-tune 数据只有 54 句 / 3.5 分钟，等收集到足够原始录音后改用社区歌唱模型再开。
 
 上一版 **v1.1.5-preview.2**（预览）—— 让她看懂动图：以前群里的 GIF / 动画表情她只能看见第一帧（多模态模型对 `image/gif` 只解码首帧），现在发模型前用本机 Pillow 把 GIF 采样成 6 帧拼成一张带帧号的图，模型能按顺序看懂整个动作；没装 Pillow / 拆帧超时会自动回退原图，不影响回复。顺带修了「她看了图却一声不响」——带图轮次的思考 token 波动极大，会把输出预算吃光、正文变成空串，现在带图请求统一抬预算并用 `reasoning_effort: minimal`。
 

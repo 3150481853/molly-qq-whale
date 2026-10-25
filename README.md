@@ -114,6 +114,51 @@ flowchart LR
 - **自愈** —— 掉线 30 秒重连；群名片被改成「（在想…）」会自己撕回去；积分额度状态落盘，重启不丢。
   边界：只修复自己造成的状态，不碰别人的名片。
 
+## 版本与发版规则
+
+一条版本线长这样：**preview 迭代 → 正式版收口 → 正式版之后分 Hotfix（修 bug）/ Plus（加功能），二者并列、可互相继承；下个版本的 preview 会带着它们的改动继续往前。**
+
+```mermaid
+flowchart LR
+    P["1.2.0-preview.1 → .2 → .3"] -->|合并全部 preview| R["1.2.0 正式版"]
+    R -->|只修 bug| H["1.2.0-Hotfix.1"]
+    R -->|只加功能| A["1.2.0-Plus.1"]
+    H -.并列，可互相继承.- A
+    H --> N["1.3.0-preview.1"]
+    A --> N
+    N -->|合并全部 preview| R2["1.3.0 正式版"]
+    classDef rel fill:#e8f7ee,stroke:#1aae39,color:#0b3d1f
+    classDef fix fill:#fff4e5,stroke:#d97706,color:#5b3700
+    classDef feat fill:#e8f0ff,stroke:#2563eb,color:#0b2559
+    classDef pre fill:#f3f4f6,stroke:#9ca3af,color:#374151
+    class R,R2 rel
+    class H fix
+    class A feat
+    class P,N pre
+```
+
+| 版本 | 命名 | 什么时候发 | 必须包含 |
+|:--|:--|:--|:--|
+| **正式版** | `1.2.0` | 一条版本线收口 | 该版本**全部 preview** 的内容 |
+| **preview** | `1.2.0-preview.1/.2/.3` | 正式版之前的迭代 | 上一个正式版的 Hotfix / Plus 改动（若期间发过） |
+| **Hotfix** | `1.2.0-Hotfix.1` | 正式版之后**只修 bug** | 先前的 Hotfix / Plus 改动 |
+| **Plus** | `1.2.0-Plus.1` | 正式版之后**只加功能** | 先前的 Hotfix / Plus 改动 |
+
+几条硬规则：
+
+- **正式版独立于其他版本**，但它不是从零开始——发布时会整合同一版本号之前的**所有 preview**。
+- **Hotfix 与 Plus 是并列替换关系**，地位相同、互不替代；但后发的那个必须**继承**先发的改动。
+- **下个版本的 preview 跟着更新**：老版本线又发了 Hotfix / Plus，新版本线的 preview 要把这些修复和功能同步进来。
+- **版本号由维护者定**：不确定就问，别自己起版本号。
+
+发版前三问：
+
+1. 这次是「修 bug」还是「加功能」？→ 决定 Hotfix 还是 Plus。
+2. 版本号是谁定的？→ 不确定先问。
+3. 这份代码带上先前的 Hotfix / Plus 了吗？→ 没有就先合进来，再发。
+
+> 规则原文与历次实操记录在仓库 `docs/STATE.md` §10，发布流程（构建、脱敏、tag、Release、附件）见 §9。
+
 ## 环境要求
 
 | 你需要 | 说明 |

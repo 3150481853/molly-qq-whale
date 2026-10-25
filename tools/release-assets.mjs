@@ -89,6 +89,12 @@ const RELEASE_FEATURES = {
     '新增 7 个 voiceAsr* 配置（开关 / Python 解释器 / 模型 / 线程 / 超时 / 空闲退出 / 最长识别时长），/state.stats 新增 voiceAsrTranscribed / voiceAsrFail',
     '控制台「本次更新说明」：左下角版本号可点击，弹层直接读 docs/CHANGELOG.md 最新一节；新增 GET /api/changelog',
   ],
+  'v1.1.5-preview.2': [
+    '动图理解：GIF / 动画表情在发模型前用本机 Pillow 拆成多帧拼图（默认 6 帧 / 3 列 / 320px，左上角帧号），模型能按顺序看懂动作；单帧 GIF、缺 Pillow、超时都会回退原图',
+    '新增 6 个 gifFrames* 配置（开关 / 帧数 / 列数 / 帧宽 / Python 路径 / 超时），/state.stats 新增 gifSheets / gifSheetFail',
+    '带图轮次不再「看了不吭声」：输出预算抬到 imageMaxTokens（默认 3200）并传 reasoning_effort=minimal，避免思考 token 吃光正文',
+    '两个回归脚本：out/_gif_frames_test.mjs（16 项）、out/_image_effort_test.mjs（5 项）',
+  ],
   'v1.1.5-preview.1': [
     '控制台数据补齐：学习器（累计/今日）、群数（SnowLuma 群列表）、记忆条数（加密后走插件兜底并标注来源）、表情包「已学」不再显示「—」',
     'QQ 下「登录」「QQ 连接」合并为一页：连接状态卡 + 扫码登录同页，旧 #/login 自动跳转 #/qq',

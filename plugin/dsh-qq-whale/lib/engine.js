@@ -94,6 +94,9 @@ const { VoiceMaker, cleanVoiceText } = await import(sub('./voice.js'))
 const { PokeReactor, isPokeNotice } = await import(sub('./poke.js'))
 // 「@ 谁 / 引用哪条」（2026-10-25，主人 m02736 + m02835）：纯函数模块，单测直接跑。
 const { isPureNudge, resolveExplicitAt, pickQuoteTarget, shouldDemoteVoice, voicePartToText } = await import(sub('./quote-at.js'))
+// 动图理解（2026-10-26，主人 m04893）：GIF 只解码首帧 → 采样成多帧拼图再给模型。
+// 依赖 python+PIL（lib/gif-frames.js 内联脚本），缺环境时自动回退原图。
+const { gifContactSheet } = await import(sub('./gif-frames.js'))
 // 撤回处理（2026-10-24，主人 m00480）：纯函数模块（字段解析/TTL 清理/history 剔除）。
 // 撤回带来的状态（recalled Map、计数）留在这个类里，方便 /state 观察。
 const recallUtil = await import(sub('./engine-recall.js'))
@@ -347,6 +350,9 @@ export class ChatEngine {
       // 本地 ASR 兜底（2026-10-25，主人 m04404）：QQ 群聊 pttTrans 拿不到时本地识别
       voiceAsrTranscribed: 0,
       voiceAsrFail: 0,
+      // 动图理解（2026-10-26，主人 m04893）：拆帧成功 / 拆帧失败回退首帧
+      gifSheets: 0,
+      gifSheetFail: 0,
     }
 
     /**
@@ -3885,6 +3891,23 @@ export class ChatEngine {
     if (stall.hardStop) system += `\n\n${this.stallStopSection(stall.misses)}`
     const messages = await this.buildMessages(conv, norm, userName, { degraded: budgetOut })
 
+    /*
+     * 带图的轮次把输出预算抬高（2026-10-26，主人 m04893「看懂 GIF」连带发现）。
+     *
+     * 实测同一个模型、同样大小的图，思考 token 波动极大：单张图 250~1450 都有。
+     * 默认 1536 的上限一旦被思考吃光，正文就是空串——engine 判成「模型返回空内容，
+     * 沉默」，主人看到的是「她看了图却一声不响」。图类请求本来就不便宜，
+     * 把上限抬到 imageMaxTokens（默认 2600）只影响上限，实际仍按生成量计费。
+     */
+    const hasImages = messages.some(
+      (m) => Array.isArray(m.content) && m.content.some((p) => p && p.type === 'image_url'),
+    )
+    const imageBudget = hasImages
+      ? Math.max(Number(this.config.maxTokens) || 1536, Number(this.config.imageMaxTokens) || 3200)
+      : undefined
+    // 带图轮次的思考强度：minimal 把 900~4000 的思考压到 ~900，正文不再被吃光。
+    const imageEffort = hasImages ? (this.config.imageReasoningEffort || 'minimal') : undefined
+
     // 超预算 + trae 可用 → 走降智接盘；否则走正常的免费额度链路。
     //
     // 注意：这里的 budgetOut 是**旧口径**（主脑积分日限），在 wb-proxy 分层下
@@ -3895,7 +3918,7 @@ export class ChatEngine {
       budgetOut && this.trae
         ? (await this.callSpare({ system, messages, signal })) ||
           (await this.callDegraded({ system, messages, signal }))
-        : await this.callWithFallback({ system, messages, signal })
+        : await this.callWithFallback({ system, messages, signal, maxTokens: imageBudget, reasoningEffort: imageEffort })
     if (!res) {
       // 整条模型链都没接住（含非限流错误直接放弃），记一笔方便对账
       this.traceReply(conv?.key, 'model-null', { degraded: Boolean(budgetOut) })
@@ -4104,8 +4127,8 @@ export class ChatEngine {
    *
    * @returns {Promise<{ok:true, text:string, degraded?:boolean} | null>} null = 该沉默
    */
-  async callWithFallback({ system, messages, signal, maxTokens, skipTrae = false, skipSpare = false }) {
-    let res = await this.callModel({ system, messages, signal, maxTokens })
+  async callWithFallback({ system, messages, signal, maxTokens, reasoningEffort, skipTrae = false, skipSpare = false }) {
+    let res = await this.callModel({ system, messages, signal, maxTokens, reasoningEffort })
 
     if (res.ok) {
       this.noteModelOk()
@@ -4136,7 +4159,7 @@ export class ChatEngine {
       this.logger('info', `限流，${Math.round(retryWaits[i] / 1000)} 秒后重试（第 ${i + 1}/${retryWaits.length} 次）`)
       await sleep(retryWaits[i])
       if (signal?.aborted) return null
-      res = await this.callModel({ system, messages, signal, maxTokens })
+      res = await this.callModel({ system, messages, signal, maxTokens, reasoningEffort })
       if (res.ok) { this.noteModelOk(); return res }
       if (res.code !== 'RATE_LIMIT') break
     }
@@ -4416,7 +4439,7 @@ export class ChatEngine {
   }
 
   /** 两个后端的调用统一走这里，形状对齐成 {ok,text,error,code} */
-  async callModel({ system, messages, signal, maxTokens, model }) {
+  async callModel({ system, messages, signal, maxTokens, model, reasoningEffort }) {
     if (this.gateway) {
       /*
        * 主脑模型的选择（用户 m15210 / m15263 定案）：
@@ -4441,6 +4464,7 @@ export class ChatEngine {
         temperature: this.config.temperature,
         signal,
         model: mainModel,
+        reasoningEffort,
       })
       // 记账（task-54）：成功与否都算一次调用；usage 有就解析，没有就 tokens=null。
       // 真机教训：intl 免费 flash 的 credit 恒为 0，旧代码因此一次都没记。
@@ -4583,7 +4607,14 @@ export class ChatEngine {
    * 限制：单张 8MB 以内，最多 4 张，失败就跳过（不让一张坏图毁掉整轮对话）。
    */
   async loadImages(images) {
-    return engineContext.loadImages(images, this.contextDeps())
+    const imgs = await engineContext.loadImages(images, this.contextDeps())
+    for (const im of imgs) {
+      if (im && im.gifFrames > 1) {
+        if (im.frames > 1) this.stats.gifSheets += 1
+        else this.stats.gifSheetFail += 1
+      }
+    }
+    return imgs
   }
 
   /*
@@ -4615,6 +4646,8 @@ export class ChatEngine {
       memoryWindow: MEMORY_WINDOW,
       degradedContextLimit: this.degradedContextLimit,
       sniffMime,
+      // 动图拆帧能力（engine-context 只负责组装，实现从这里注入）
+      gifContactSheet: (buf, opts) => gifContactSheet(buf, opts),
     }
   }
 

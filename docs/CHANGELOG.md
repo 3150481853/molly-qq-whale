@@ -7,6 +7,30 @@
 
 ---
 
+## 2026-10-26 · v1.1.5-preview.2：让她看懂动图（GIF 多帧）+ 带图轮次不再「看了不吭声」
+
+> 主人 m04893「现在做preview.2，目标是让Molly能看懂gif动图，他现在面对那些gif和gif表情包只能看到首图」。
+
+**为什么只看得到首图**
+- QQ 侧没问题：图片 URL 下载下来就是完整 GIF（实测群历史 14 张图里 2 张是 GIF，最大 1.18 MB）。
+- 是模型侧的问题：多模态模型对 `image/gif` 只解码第一帧，插件原来把 GIF 原样当 data URL 发，等于只给模型看首帧。
+
+**改法（新增 `lib/gif-frames.js`，约 250 行，无新依赖）**
+- 下载后按魔数确认是 GIF → 调本机 `${MOLLY_ROOT}\data\video\venv` 的 Pillow，把整段动画采样成 N 帧（默认 6 帧 / 3 列 / 每帧 320px），拼成一张 PNG，每格左上角标「n/N」帧号。
+- 接入点在 `engine-context.loadImages`：拆帧函数由 engine 通过 deps 注入，该文件保持「只组装、不 import 能力」；没装 Pillow / 超时 / 单帧 GIF 一律回退原图，绝不影响这轮回复。
+- 配置（cordis.patch.yml）：`gifFramesEnabled` / `gifFramesCount` / `gifFramesColumns` / `gifFrameWidth` / `gifFramesPython` / `gifFramesTimeoutMs`。实测拆帧 204–235 ms，拼图输出 21 KB。
+- 真机 A/B：原图首帧 → 「两只小猫抱在一起，一只用爪子捂着另一只的嘴」；拆帧图 → 按帧号讲出「捂嘴 → 蓝色液体漏出 → 又大量溢出」的完整动作。`out/_gif_frames_test.mjs` 16/16；`out/_gif_e2e.mjs` 用群里真实 GIF 跑通（8 帧取 6）。
+
+**连带修：带图轮次会「看了不吭声」**
+- 实测图类请求 reasoning token 934–4094 波动，默认 `maxTokens 1536` 一旦被思考吃光，正文就是空串 → engine 判「模型返回空内容，沉默」。
+- 改法：带图轮次 `maxTokens` 抬到 `imageMaxTokens`（默认 3200），并传 `reasoning_effort: 'minimal'`（思考压到 ~900，回答质量不受影响；gateway 只在显式配置时才带该字段）。新增配置 `imageMaxTokens` / `imageReasoningEffort`；`out/_image_effort_test.mjs` 5/5。
+
+**回滚**
+- 只关动图理解：`gifFramesEnabled: false`。
+- 连「带图轮次预算」也回旧行为：`imageMaxTokens: 1536`、`imageReasoningEffort: ''`。
+- 代码层：`lib/gif-frames.js` 可整体删除（只通过 deps 注入被用到）；`engine-context.js` 里 `mime === 'image/gif'` 那个分支可直接去掉。
+- 提示词没动；记忆 / 戳一戳 / 语音链路不受影响。
+
 ## 2026-10-25 · v1.1.5-preview.1：控制台数据补齐 + QQ 页合并
 
 > 主人 m04755「控制台里的学习器，记忆，群数等数据还是none，看看怎么弄一下」+「QQ这里两个模块功能有点重复了吧，看看是合并还是清晰区分一下」。

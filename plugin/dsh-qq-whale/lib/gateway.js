@@ -124,11 +124,11 @@ export class WbProxyGateway {
    * @param {string} [p.model] 覆盖本次请求的模型（主脑/降级/备用脑各用各的）
    * @param {string} [p.realm] 覆盖本次请求的 realm
    */
-  async chat({ messages, system, maxTokens = 1024, temperature = 0.85, signal, onDelta, model, realm }) {
+  async chat({ messages, system, maxTokens = 1024, temperature = 0.85, signal, onDelta, model, realm, reasoningEffort }) {
     const msgs = []
     if (system) msgs.push({ role: 'system', content: system })
     for (const m of messages) msgs.push({ role: m.role, content: m.content })
-    return this.request({ messages: msgs, maxTokens, temperature, signal, onDelta, model, realm })
+    return this.request({ messages: msgs, maxTokens, temperature, signal, onDelta, model, realm, reasoningEffort })
   }
 
   /**
@@ -187,7 +187,7 @@ export class WbProxyGateway {
    * 底层请求。chat / describeImage 都走这里。
    * @private
    */
-  async request({ messages, maxTokens = 1024, temperature = 0.85, signal, onDelta, model, realm }) {
+  async request({ messages, maxTokens = 1024, temperature = 0.85, signal, onDelta, model, realm, reasoningEffort }) {
     const useModel = model || this.model
     /*
      * 优先级：调用方显式给 > 实例钉死的 realm（配置 gatewayRealm）> 按模型名推断
@@ -201,6 +201,12 @@ export class WbProxyGateway {
       messages,
       max_tokens: maxTokens,
       temperature,
+      /*
+       * 思考强度透传（2026-10-26）：图类请求的 reasoning token 实测 934~4094，
+       * 波动大的时候会把 max_tokens 吃光 → 正文空串（看了图却一声不响）。
+       * 带图轮次传 'minimal'，只影响思考长度，不影响画面信息。
+       */
+      ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
       stream: true,
       stream_options: { include_usage: true },
     }

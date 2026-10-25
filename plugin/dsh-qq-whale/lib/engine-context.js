@@ -15,6 +15,8 @@
  *   memoryWindow    { contextLimit, queryLimit, degradedContextLimit, degradedQueryLimit }
  *   degradedContextLimit  number
  *   sniffMime       (buf) => mime         图片魔数兜底
+ *   gifContactSheet (buf, opts) => sheet  动图拆帧拼图（2026-10-26，主人 m04893）。
+ *                                       传 null/不传 = 不拆帧、按旧行为只发原始 GIF。
  *
  * 这三条规矩来自 lead 的拆层要求：上下文层不许 import 决策层；不许把决策
  * 函数复制回 engine；不许用 this 挂「上一轮结论」让上下文自己来取——
@@ -246,9 +248,13 @@ export async function buildMessages(conv, norm, userName, { degraded = false } =
         if (imgs.length > 0) {
           const parts = []
           // 图在前、文字在后：上游对「先看图再看问题」的识别率明显更高
-          for (const url of imgs) parts.push({ type: 'image_url', image_url: { url } })
+          for (const im of imgs) parts.push({ type: 'image_url', image_url: { url: im.url } })
+          // 动图拆过帧的话补一句说明，模型才知道这张大图是「按时间排的帧」。
+          const gifNote = imgs.some((im) => im.gifFrames > 1)
+            ? '（图中动图已拆成多帧拼成一张：每格左上角「n/N」是第几帧，按顺序看就是完整动作）'
+            : ''
           // 纯图片消息也得带上标签，否则模型不知道这张图是谁发的
-          parts.push({ type: 'text', text: label + (h.text || '[图片]') })
+          parts.push({ type: 'text', text: label + (h.text || '[图片]') + gifNote })
           msgs.push({ role: 'user', content: parts })
         } else {
           msgs.push({ role: 'user', content: label + (h.text || '[图片]') })
@@ -292,7 +298,42 @@ export async function loadImages(images, deps) {
         // 从 content-type 推 mime；QQ 有时不返回，用魔数兜底
         let mime = resp.headers.get('content-type')?.split(';')[0] || ''
         if (!mime.startsWith('image/')) mime = deps.sniffMime(buf)
-        out.push(`data:${mime};base64,${buf.toString('base64')}`)
+
+        /*
+         * 动图（2026-10-26，主人 m04893）：她之前对 GIF/动画表情「只能看到首图」。
+         * 不是 QQ 的问题，也不是下载的问题——多模态模型对 image/gif 本来就只
+         * 解码第一帧。这里在发给模型之前把 GIF 采样成一张多帧拼图（PNG），
+         * 一帧都不丢信息：模型能按帧号顺序看完整个动作。
+         *
+         * 拆帧放在 deps 里（engine 提供实现），本文件保持「只组装、不 import 能力」；
+         * 没装 Python/Pillow 时 deps.gifContactSheet 自己返回 null，这里回退原图，
+         * 降级但绝不影响这轮回复。
+         */
+        const cfg = deps.config || {}
+        if (
+          mime === 'image/gif' &&
+          cfg.gifFramesEnabled !== false &&
+          typeof deps.gifContactSheet === 'function'
+        ) {
+          const sheet = await deps.gifContactSheet(buf, {
+            frames: cfg.gifFramesCount,
+            columns: cfg.gifFramesColumns,
+            frameWidth: cfg.gifFrameWidth,
+            python: cfg.gifFramesPython,
+            timeoutMs: cfg.gifFramesTimeoutMs,
+          })
+          if (sheet && sheet.png && sheet.png.length > 0) {
+            out.push({
+              url: `data:image/png;base64,${sheet.png.toString('base64')}`,
+              frames: sheet.frames,
+              gifFrames: sheet.gifFrames,
+            })
+            deps.logger('debug', `动图拆帧：共 ${sheet.gifFrames} 帧，取 ${sheet.frames} 帧拼成 ${sheet.width}x${sheet.height}`)
+            continue
+          }
+        }
+
+        out.push({ url: `data:${mime};base64,${buf.toString('base64')}`, frames: 1 })
       } catch (e) {
         deps.logger('debug', `图片下载失败，跳过：${e?.message || e}`)
       }

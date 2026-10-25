@@ -585,6 +585,26 @@ export const DEFAULTS = {
   voiceAsrIdleSeconds: 600,
   // 超过这个时长的语音不走本地 ASR（秒，0 = 不限），避免长语音把回复拖到分钟级
   voiceAsrMaxSeconds: 15,
+  // —— 动图理解（2026-10-26，主人 m04893「让她看懂 GIF」）——
+  // 问题：多模态模型对 image/gif 只解码第一帧，所以她一直只看到动图的封面。
+  // 做法：发给模型之前把 GIF 采样成 N 帧、拼成一张带帧号的大图（lib/gif-frames.js）。
+  // 依赖本机 python+Pillow（venv 里已有）；缺环境/超时自动回退原图，不耽误回复。
+  gifFramesEnabled: true,
+  // 采样几帧（0 = 关掉拆帧；4~9 之间信息量与体积比较平衡）
+  gifFramesCount: 6,
+  // 拼图列数（3 列 2 行最适合「按顺序看」）
+  gifFramesColumns: 3,
+  // 每帧缩放后的宽度（像素）：320 → 拼图约 976 宽，视觉得清又不太吃 token
+  gifFrameWidth: 320,
+  gifFramesPython: 'G:\\Molly\\data\\video\\venv\\Scripts\\python.exe',
+  // 拆帧总超时（毫秒）：单张实测 0.2–1.2 秒
+  gifFramesTimeoutMs: 12000,
+  // 带图轮次的输出预算上限（2026-10-26）：同图思考 token 波动 250~1450，
+  // 默认 1536 会被思考吃光导致正文空串（表现为「看了图却一声不响」）。
+  imageMaxTokens: 3200,
+  // 带图轮次的思考强度（2026-10-26）：实测图类 reasoning 934~4094 token 波动，
+  // minimal 能把它压到 ~900，正文不至于被思考吃光；空串 = 不传该参数。
+  imageReasoningEffort: 'minimal',
   // —— 戳一戳回应（2026-10-23，主人 m01231；2026-10-24 主人 m01908 改成模型说一句）——
   // 被 QQ 戳一戳时的反射：反戳 / 说一句 / 被连戳多次生气。
   // 反戳与计数不花模型；「说一句」默认让模型现编（pokeUseModel），失败用 lib/poke.js 的固定文案兜底。
@@ -858,6 +878,14 @@ function _configShapeReference(Schema) {
     voiceAsrTimeoutMs: s.natural().default(DEFAULTS.voiceAsrTimeoutMs).description('本地识别单次超时（毫秒，默认 25000，含首次模型加载）'),
     voiceAsrIdleSeconds: s.natural().default(DEFAULTS.voiceAsrIdleSeconds).description('worker 空闲自动退出（秒，默认 600；0 = 常驻）'),
     voiceAsrMaxSeconds: s.natural().default(DEFAULTS.voiceAsrMaxSeconds).description('超过这个时长的语音不走本地 ASR（秒，默认 15；0 = 不限）'),
+    gifFramesEnabled: s.boolean().default(DEFAULTS.gifFramesEnabled).description('动图理解：把 GIF 采样成多帧拼图再交给模型（默认开）'),
+    gifFramesCount: s.natural().default(DEFAULTS.gifFramesCount).description('动图采样帧数（4~9 较平衡；0 = 不拆帧）'),
+    gifFramesColumns: s.natural().default(DEFAULTS.gifFramesColumns).description('动图拼图列数（默认 3）'),
+    gifFrameWidth: s.natural().default(DEFAULTS.gifFrameWidth).description('动图每帧缩放宽度（像素，默认 320）'),
+    gifFramesPython: s.string().default(DEFAULTS.gifFramesPython).description('拆 GIF 帧用的 Python 解释器（需 Pillow）'),
+    gifFramesTimeoutMs: s.natural().default(DEFAULTS.gifFramesTimeoutMs).description('拆 GIF 帧超时（毫秒，默认 12000）'),
+    imageMaxTokens: s.natural().default(DEFAULTS.imageMaxTokens).description('带图轮次的输出 token 上限（默认 3200；思考 token 波动大，给多了不亏）'),
+    imageReasoningEffort: s.string().default(DEFAULTS.imageReasoningEffort).description('带图轮次的思考强度（minimal/空串=不传）'),
     // —— 戳一戳回应（2026-10-23，主人 m01231）——
     pokeEnabled: s.boolean().default(DEFAULTS.pokeEnabled).description('戳一戳回应：被戳时按概率反戳/说一句，被连戳多次会生气'),
     pokeBackChance: s.number().min(0).max(1).default(DEFAULTS.pokeBackChance).description('被戳时反戳的概率（0~1，默认 0.7）'),

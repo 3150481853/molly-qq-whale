@@ -78,6 +78,11 @@ const RELEASE_FEATURES = {
     '控制台表情包搜索：按名字 / 关键词即时过滤（空格多词 AND，Esc 清空）',
     '每个版本都提供脱敏后的源码 zip 附件（本仓库 Release）',
   ],
+  'v1.1.3-Hotfix.1': [
+    '入站语音转文字：别人发语音时用 QQ 自带转写（SnowLuma fetch_ptt_text，实测 0.2–0.3 秒）把内容带给模型',
+    '转写失败降级成「[语音：没听清]」（不再当成空消息）；10 分钟缓存，同一条语音只转一次',
+    '新配置 voiceTranscribeEnabled / voiceTranscribeTimeoutMs（默认开 / 6000ms）',
+  ],
   'v1.1.3-preview.1': [
     '戳一戳「说一句」改为模型回复：pokeUseModel，超时/失败回退原固定句池',
     '控制台改版：去掉 NapCat 品牌、QQ 连接四态判定、导航六组、新增 #/qq 页面',

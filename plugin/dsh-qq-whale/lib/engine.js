@@ -70,7 +70,7 @@ const {
   shouldTapEmoji,
   pickActivity,
 } = await import(sub('./aliveness.js'))
-const { normalizeMessage, buildMessage, fetchQuoted, fetchForward } = await import(sub('./onebot.js'))
+const { normalizeMessage, buildMessage, fetchQuoted, fetchForward, fetchPttText, PTT_FAIL_TEXT } = await import(sub('./onebot.js'))
 const { mergeReportTexts, coreText, similarity, containment } = await import(sub('./dedupe.js'))
 // 出站 markdown 清洗（P6）。persona.js 的 splitReply 已经挂了这个，
 // 但下面三条直发路径绕过了 splitReply，得自己洗一遍。
@@ -323,6 +323,9 @@ export class ChatEngine {
       quoteLast: null,
       // 引用回复里语音段降级成文字的次数（2026-10-25，主人 m03353）
       voiceDemoted: 0,
+      // 入站语音转文字（2026-10-25，主人 m04041）：转写成功几条、失败几条
+      voiceTranscribed: 0,
+      voiceTranscribeFail: 0,
     }
 
     /**
@@ -1803,6 +1806,39 @@ export class ChatEngine {
   // ———————————————— 主入口 ————————————————
 
   /** 收到一条 QQ 消息（已过滤 bot 自身） */
+  /**
+   * 把一条入站消息里的语音转成文字（带 10 分钟缓存）。
+   *
+   * 2026-10-25（主人 m04041）：群里群友连发语音，她只能回
+   * 「光听你哇啦哇啦，听不出说的啥」——因为 normalizeMessage 把 record 段
+   * 压成 `[语音]` 之后就没有任何地方再去管它。这里用 SnowLuma 的
+   * fetch_ptt_text 走 QQ 服务端转写（零依赖，实测 222–293 ms）。
+   *
+   * 缓存按 message_id 存 10 分钟：同一条语音可能被「旁观者评估」和
+   * 「真回复」各读一遍，别为同一句调两次接口。
+   *
+   * @param {string|number} messageId
+   * @returns {Promise<string>} 转写正文；取不到返回空串（由调用方给降级文案）
+   */
+  async transcribeVoice(messageId) {
+    const key = String(messageId ?? '').trim()
+    if (!key) return ''
+    if (!this._pttCache) this._pttCache = new Map()
+    const nowMs = Date.now()
+    const hit = this._pttCache.get(key)
+    if (hit && nowMs - hit.at < 600000) return hit.text
+
+    const timeoutMs = Number(this.config.voiceTranscribeTimeoutMs) || undefined
+    const res = await fetchPttText(this.client, key, { timeoutMs })
+    const text = res && res.ok ? res.text : ''
+    this._pttCache.set(key, { text, at: nowMs })
+    if (this._pttCache.size > 400) {
+      for (const [k, v] of this._pttCache) if (nowMs - v.at > 600000) this._pttCache.delete(k)
+      while (this._pttCache.size > 400) this._pttCache.delete(this._pttCache.keys().next().value)
+    }
+    return text
+  }
+
   async onMessage(ev) {
     // 双保险：调用方可能忘了过滤自己发的消息，这里再挡一次。
     // 自己发的话如果被当成用户输入回灌，会导致「自己跟自己聊」的死循环。
@@ -1851,6 +1887,29 @@ export class ChatEngine {
     }
 
     const norm = normalizeMessage(ev.message, this.selfId)
+    /*
+     * 入站语音转文字（2026-10-25，主人 m04041「Molly好像还是不能读语音」）。
+     *
+     * 真机：15:05–15:10，群友连发语音，她只能回「换成字」。
+     * 这里把 `[语音]` 换成「（语音转文字：原文）」；转写失败保留降级文案
+     * `[语音：没听清]`，让模型知道「有一条语音但没听清」，而不是当成空消息。
+     *
+     * 默认开；`voiceTranscribeEnabled: false` 可整条关掉（不想多一次接口往返）。
+     */
+    if (this.config.voiceTranscribeEnabled !== false) {
+      const hasVoice = Array.isArray(norm.segments) && norm.segments.some((s) => s && s.type === 'record')
+      if (hasVoice) {
+        const shown = await this.transcribeVoice(ev.message_id)
+        if (shown) {
+          norm.text = String(norm.text || '').replace(/\[语音\]/g, `（语音转文字：${shown}）`)
+          this.stats.voiceTranscribed += 1
+          this.logger('debug', `入站语音转写 ${ev.message_id}：${shown.slice(0, 40)}`)
+        } else {
+          norm.text = String(norm.text || '').replace(/\[语音\]/g, PTT_FAIL_TEXT)
+          this.stats.voiceTranscribeFail += 1
+        }
+      }
+    }
     /*
      * P3：引用消息要把被引用那条的正文取回来。
      *

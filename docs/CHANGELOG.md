@@ -7,6 +7,30 @@
 
 ---
 
+## 2026-10-25 · v1.1.3-Hotfix.1：入站语音转文字（别人发的语音她终于「听」得见了）
+
+> 主人 m04041「Molly好像还是不能读语音啊，你看那个交流群她和群友聊的」、m04153「这个修复推github1.1.3-Hotfix.1」。
+
+**根因**
+- `lib/onebot.js` 的 `normalizeMessage` 把 `record` 段压成占位符 `[语音]` 之后，再没有任何环节去取内容：模型只看见「有一条语音」，只能回「听不出说的啥，换成字」。
+- 真机证据：15:05–15:10，群友连发三条语音，她三次都只能要求对方换成文字。
+
+**改动**
+- `lib/onebot.js`：新增 `fetchPttText(client, messageId, { timeoutMs })`——调 SnowLuma 的 OneBot 扩展动作 `fetch_ptt_text`（走 QQ 自带语音转文字，零依赖）；6 秒硬超时、永不抛异常、失败统一给 `PTT_FAIL_TEXT = '[语音：没听清]'`。
+- `lib/engine.js`：`onMessage` 在归一化之后、空消息判断之前检测 `record` 段 → 转写 → 把正文里的 `[语音]` 换成「（语音转文字：原文）」；新增 `transcribeVoice()`，带 10 分钟 / 按 `message_id` 的缓存（同一条语音可能被「旁观评估」和「真回复」各读一次）；`/state.stats` 新增 `voiceTranscribed / voiceTranscribeFail`。
+- `lib/main.js` + `cordis.patch.yml`：新配置 `voiceTranscribeEnabled`（默认 true）、`voiceTranscribeTimeoutMs`（默认 6000）。
+
+**验证**
+- `out/_ptt_inbound_test.mjs` 6/6：连 WS 3001 取群里真实语音消息，转写 **261 ms**、正文正确；不存在的 `message_id` / 空 id / 无 client 都走降级文案。
+- `out/_ptt_e2e_sim.mjs`：用真实消息段跑 `onMessage` 里的替换表达式，`[语音]` → `（语音转文字：放我出来，我又没被关着…）`（就是她先前没读懂的那条）。
+- 已热重载 `gen-mvnhzoxb-8ct0sa`；`/state` 新计数器就位，语音与引用相关配置未受影响。
+
+**回滚**
+- 配置 `voiceTranscribeEnabled: false` 即退回「只看见 `[语音]`」的老行为。
+- 整体回退：还原 `lib/onebot.js` / `lib/engine.js` / `lib/main.js` 与两个配置键（`git revert` 对应提交即可）。
+
+---
+
 ## 2026-10-25 · v1.1.3 正式版：三个预览版合并 + 引用不带语音 + 控制台版本自动同步 + 表情包搜索
 
 > 主人 m03522「控制台左下角还显示 1.0，刷一下，一起作为 1.1.3 正式版上线」、m03530「上新版本时把挂在上面的旧版本打包作为 release 传上去，注意隐私管理」。

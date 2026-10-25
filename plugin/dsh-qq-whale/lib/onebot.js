@@ -342,6 +342,69 @@ export async function fetchQuoted(client, replyId) {
   }
 }
 
+/* ———————————————— 入站语音转文字（P6，SnowLuma 扩展） ————————————————
+ *
+ * 需求（m02736-2 / m04041）：她只能看见 `[语音]` 两个字，听不懂别人说的内容。
+ * 真机（2026-10-25 15:05）：群友连发语音，她只能回
+ * 「光听你哇啦哇啦，听不出说的啥，麻烦换成字」。
+ *
+ * SnowLuma 提供 `fetch_ptt_text`（别名 get_ptt_text / get_record_text），
+ * 参数只有 `{ message_id }`，返回 `{ text }` —— 走的是 QQ 服务端自带的
+ * 语音转文字（pttTrans），零依赖、不用本地 ASR。
+ * 实测：3/3 正确、222–293 ms（含一次 4 秒长语音）。
+ *
+ * 三条硬规矩与 fetchQuoted 一致：
+ *   1. 6 秒超时（比引用宽松一点，转写要等 QQ 服务端）；
+ *   2. 永远不抛异常（上层在消息主路径上）；
+ *   3. 取不到给固定降级文案，绝不静默 —— 模型至少知道「这里有一条没听清的语音」。
+ */
+
+/** fetch_ptt_text 的默认硬超时。 */
+export const PTT_TIMEOUT_MS = 6000
+
+/** 转写正文的长度上限（字）。 */
+export const PTT_TEXT_MAX = 300
+
+/** 取不到时的统一降级文案。 */
+export const PTT_FAIL_TEXT = '[语音：没听清]'
+
+/**
+ * 把一条消息里的语音转成文字。
+ *
+ * @param {OneBotClient} client 已连接的客户端
+ * @param {string|number} messageId 语音所在的 message_id（不是 segment id）
+ * @param {{timeoutMs?:number}} [opts]
+ * @returns {Promise<{ok:boolean, text:string}>} 永远 resolve
+ */
+export async function fetchPttText(client, messageId, opts = {}) {
+  const fail = { ok: false, text: PTT_FAIL_TEXT }
+  const id = String(messageId ?? '').trim()
+  if (!id) return fail
+  if (!client || typeof client.call !== 'function') return fail
+  const timeoutMs = Number(opts.timeoutMs) > 0 ? Number(opts.timeoutMs) : PTT_TIMEOUT_MS
+
+  let data
+  try {
+    // SnowLuma 的这个 action 不在 OneBot v11 标准里，失败（未实现/超时/未连接）都走降级
+    data = await client.call('fetch_ptt_text', { message_id: id }, timeoutMs)
+  } catch {
+    return fail
+  }
+
+  try {
+    if (!data || typeof data !== 'object') return fail
+    const raw = data.text ?? data.result ?? data.msg ?? ''
+    const text = String(raw ?? '').replace(/\s+/g, ' ').trim()
+    if (!text) return fail
+    return {
+      ok: true,
+      text: text.length > PTT_TEXT_MAX ? `${text.slice(0, PTT_TEXT_MAX - 1)}…` : text,
+    }
+  } catch {
+    return fail
+  }
+}
+
 /* ———————————————— 合并转发（P3，SnowLuma 扩展） ————————————————
  *
  * 用户需求（m02658 / m02682）：让她能看懂「你转发的那段聊天记录」。

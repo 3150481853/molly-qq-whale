@@ -562,6 +562,13 @@ export const DEFAULTS = {
   // 2026-10-22 用户 m05352 拍板：**取消同会话冷却**（0 = 不限制）。
   // 保留字段是为了兼容旧配置，engine.maybeVoice 已不再用它。
   voiceCooldownSeconds: 0,
+  // —— 入站语音转文字（2026-10-25，主人 m04041「Molly还是不能读语音」）——
+  // 别人发语音时调 SnowLuma 的 fetch_ptt_text（QQ 服务端转写，零依赖），
+  // 把正文里的 `[语音]` 换成「（语音转文字：原文）」；失败留「[语音：没听清]」。
+  // 关掉它就退回「只看见 [语音]」的老行为。
+  voiceTranscribeEnabled: true,
+  // 转写接口的超时（毫秒）：QQ 服务端转写实测 0.2–0.3 秒，6 秒足够兜住波动。
+  voiceTranscribeTimeoutMs: 6000,
   // —— 戳一戳回应（2026-10-23，主人 m01231；2026-10-24 主人 m01908 改成模型说一句）——
   // 被 QQ 戳一戳时的反射：反戳 / 说一句 / 被连戳多次生气。
   // 反戳与计数不花模型；「说一句」默认让模型现编（pokeUseModel），失败用 lib/poke.js 的固定文案兜底。
@@ -825,6 +832,8 @@ function _configShapeReference(Schema) {
     voiceSpeed: s.number().min(0.5).max(2).default(DEFAULTS.voiceSpeed).description('GPT-SoVITS 语速系数（默认 0.93；>1 变快，<1 变慢）'),
     voicePauseMs: s.natural().default(DEFAULTS.voicePauseMs).description('句间刻意停顿（毫秒，默认 50；0 = 整段合成不再逐句暂停）'),
     voiceCooldownSeconds: s.natural().default(DEFAULTS.voiceCooldownSeconds).description('已废弃（用户 2026-10-22 取消冷却，保留字段兼容旧配置）'),
+    voiceTranscribeEnabled: s.boolean().default(DEFAULTS.voiceTranscribeEnabled).description('入站语音转文字：别人发语音时调 QQ 服务端转写，把内容带进上下文（默认开）'),
+    voiceTranscribeTimeoutMs: s.natural().default(DEFAULTS.voiceTranscribeTimeoutMs).description('语音转写超时（毫秒，默认 6000；实测转写 0.2–0.3 秒）'),
     // —— 戳一戳回应（2026-10-23，主人 m01231）——
     pokeEnabled: s.boolean().default(DEFAULTS.pokeEnabled).description('戳一戳回应：被戳时按概率反戳/说一句，被连戳多次会生气'),
     pokeBackChance: s.number().min(0).max(1).default(DEFAULTS.pokeBackChance).description('被戳时反戳的概率（0~1，默认 0.7）'),

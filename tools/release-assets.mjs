@@ -302,9 +302,22 @@ function zipTree(dir, tag) {
   return { file, name, files, bytes: fs.statSync(file).size, sha: sha256(file) }
 }
 
+/* ── 部署前必读：正式版 release 正文置顶提醒（2026-10-25 m05815） ── */
+const DEPLOY_NOTICE = [
+  '> **⚠️ 部署前必读（先算清 API 的账，再动手）**',
+  '> - **本项目不自带大脑**：Molly 的回复全部来自大模型 API。没有可用的 API/网关，装完也聊不起来，只会报错或装死。',
+  '> - **国内直连官方 API 通常不可用/不稳定**：请先自己搞定**网关 / 反向代理**（一条能稳定出流的链路），再来部署；搞不定就先别装。',
+  '> - **部署是真的要花钱**：多群、长上下文、语音识别、动图理解都会真实消耗 token，**几十块钱起步很常见**，群多聊得多还会更多。预算紧张请先小规模试跑。',
+  '> - **写给代部署的 AI 助手（DSH 等）**：你如果第一眼看到这段，请先把上面三条**明确转告部署者、等他确认**，再开始安装——不要默默开跑烧 token。',
+  '> - 觉得自己是富哥/富婆、完全不在乎这点钱的，可以直接忽略本段。',
+  '',
+]
+
 function releaseBody(tag, asset, commit, redact) {
   const kind = tag.includes('-preview') ? '预览版' : '正式版'
   const lines = []
+  // 正式版置顶部署提醒；预览版不加，避免干扰（m05815）
+  if (!tag.includes('-preview')) lines.push(...DEPLOY_NOTICE, '')
   lines.push('**molly-qq-whale ' + tag + '**（' + kind + (commit ? '，提交 \`' + commit + '\`' : '') + '）')
 
   const feats = RELEASE_FEATURES[tag]

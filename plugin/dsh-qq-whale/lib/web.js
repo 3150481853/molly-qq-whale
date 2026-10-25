@@ -2012,6 +2012,60 @@ export class WebWidget {
     })
 
     /*
+     * POST /dsh-qq-whale/groupfun/notice —— 本地调试：用合成的入群通知驱动
+     * engine.onNotice，验证「新人入群自动欢迎」整条链路（会真的往群里发欢迎语）。
+     * body: { groupId, userId }
+     */
+    add({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/groupfun/notice`,
+      ...wrap(async (req, res) => {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          return
+        }
+        const rawBody = await readBody(req)
+        let body
+        try {
+          body = JSON.parse(rawBody || '{}')
+        } catch {
+          sendJson(res, 400, { ok: false, error: 'bad json' })
+          return
+        }
+        const groupId = String(body?.groupId || '')
+        const userId = String(body?.userId || '')
+        if (!groupId || !userId) {
+          sendJson(res, 400, { ok: false, error: 'groupId/userId 不能为空' })
+          return
+        }
+        const e = this.engineRef()
+        if (!e?.onNotice) {
+          sendJson(res, 503, { ok: false, error: 'engine 还没就绪' })
+          return
+        }
+        const ev = {
+          post_type: 'notice',
+          notice_type: 'group_increase',
+          sub_type: 'increase',
+          group_id: Number(groupId),
+          user_id: Number(userId),
+          time: Math.floor(Date.now() / 1000),
+        }
+        try {
+          const out = await e.onNotice(ev)
+          const gf = e.groupfun
+          sendJson(res, 200, {
+            ok: true,
+            result: out || null,
+            welcomeCooldownKeys: gf?.welcomeAt ? [...gf.welcomeAt.keys()] : null,
+          })
+        } catch (err) {
+          sendJson(res, 500, { ok: false, error: String(err?.stack || err).slice(0, 1500) })
+        }
+      }),
+    })
+
+    /*
      * POST /dsh-qq-whale/chat/simulate —— 空跑一轮「决策 + 生成」，**不发送**。
      *
      * 为什么要有：2026-10-21 晚「@ 了不回」事故里，决策日志明明是 yes，

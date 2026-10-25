@@ -145,13 +145,22 @@ export class LotteryBox {
    *   now?: () => number,
    *   random?: () => number,
    *   send?: (gid: string, payload: {text: string, at?: string[]}) => Promise<any>,
+   *   onDraw?: (info: {gid: string, winners: any[], mode: string}) => void,
    * }} opts
    */
-  constructor({ logger = () => {}, now = Date.now, random = Math.random, send = async () => {} } = {}) {
+  constructor({
+    logger = () => {},
+    now = Date.now,
+    random = Math.random,
+    send = async () => {},
+    onDraw = () => {},
+  } = {}) {
     this.logger = logger
     this.now = now
     this.random = random
     this.send = send
+    // 2026-10-26（主人 m07064）：自动/兜底开奖也要能被 engine 计数
+    this.onDraw = typeof onDraw === 'function' ? onDraw : () => {}
     /** @type {Map<string, any>} gid → 场次 */
     this.rooms = new Map()
     // 2026-10-26：诊断与自愈（历史事故：定时器没落地/丢失时，房间永远停在待开奖）
@@ -295,6 +304,11 @@ export class LotteryBox {
         if (res?.ok) {
           await this.send(gid, { text: res.message, at: (res.winners || []).map((w) => String(w.qq)) })
           sent = true
+          try {
+            this.onDraw({ gid, winners: res.winners || [], mode: room.mode || 'open' })
+          } catch (err) {
+            this.logger('warn', `抽奖开奖回调失败: ${err?.message || err}`)
+          }
         }
         this.lastAuto = {
           at: new Date().toISOString(),

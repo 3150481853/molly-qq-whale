@@ -7,6 +7,23 @@
 
 ---
 
+## 2026-10-26 · v1.1.3-Hotfix.3：自动开奖计数 + 新人入群自动欢迎修复
+
+> 主人 m07147「先推github，还有，你新人欢迎又是我手动的」。
+
+### 修了什么
+
+- **新人入群不自动欢迎**：`lib/main.js` 的 notice 分支原来只把 `notify/poke` 转给 `engine.onNotice`，`group_increase` 一路落到 `return` 被静默丢弃 —— 表现就是「新人欢迎开关开着，但从来不自动发，只能主人手动补一句」。现在所有 notice 都交给 `engine.onNotice` 判：它内部先看 `group_increase`（新人欢迎），再处理 poke（反戳 / 回话），其它类型一律返回 ignored。
+- **自动开奖不计入统计**：`lib/groupfun.js` 的 `LotteryBox` 新增 `onDraw` 回调，定时器到点 / 心跳兜底开奖成功后都会回调；`lib/engine.js` 构造时接上 `stats.lotteryDrawn += 1`（手动「开奖」仍由命令路径计数，不重复）。
+
+### 新增（调试）
+
+- `POST /dsh-qq-whale/groupfun/notice`（仅本机 127.0.0.1 + 宿主端口可达）：body `{ groupId, userId }`，用合成的入群通知驱动 `engine.onNotice`，用来验证「新人入群自动欢迎」整条链路（会真的往群里发欢迎语）。
+
+### 实测
+
+- 合成入群通知（群 `666666666`、假 QQ `1234567890`）→ 返回 `{"acted":true,"kind":"welcome"}`；群内真实发出「欢迎 新朋友 加入 本群～我是 Molly，有问题随时 @我」（message_id `1160694340`），`/state.groupfun.stats.welcomed` 由 0 → 1。
+
 ## 2026-10-26 · v1.1.3-plus.3：抽奖 @ 段修复（自动开奖能发了）+ 本地调试路由
 
 > 主人 m06713：「Molly刚刚没开奖是因为发言被我关了吗」→ 实为消息段字段错误；m06903：「先自己测一下能不能开奖，而且要模拟真人用@molly # 使用抽奖机，不要用你自己的 LLM 链路」。

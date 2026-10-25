@@ -45,6 +45,11 @@ const SECRETS_FILE = process.env.MOLLY_RELEASE_SECRETS || path.join(process.cwd(
 
 /* ── 每个版本的「本版特性」：写进 release 正文，让仓库读者一眼看到改了什么 ── */
 const RELEASE_FEATURES = {
+  '1.1.3-Hotfix.3': [
+    '新人入群自动欢迎修好：notice 分发不再只转 poke，group_increase 能进引擎（之前欢迎开关开着也从不自动发）',
+    '自动开奖 / 心跳兜底开奖现在计入控制台统计（/state.groupfun.stats.drawn）',
+    '新增本地调试路由 POST /dsh-qq-whale/groupfun/notice，用合成入群通知验证欢迎链路',
+  ],
   'v1.1.3-plus.3': [
     '修复抽奖自动开奖时 @ 消息段字段错位（导致到点开奖消息被拒发、群里看起来没开奖）',
     '群趣味新增 15 秒心跳扫尾（sweep / lastTick / lastAuto），到点漏开会自动补开',
@@ -145,6 +150,7 @@ const RELEASE_FEATURES = {
 
 /* 旧版本附件里的文件数（GitHub API 不回报文件数，这里记住） */
 const RELEASE_ASSET_FILES = {
+  '1.1.3-Hotfix.3': 0,
   'v1.1.3-plus.3': 0,
   'v1.0.0': 150, 'v1.1.0': 155, 'v1.1.1': 156, 'v1.1.2': 158,
   'v1.1.3-preview.1': 158, 'v1.1.3-preview.2': 159, 'v1.1.3-preview.3': 160,

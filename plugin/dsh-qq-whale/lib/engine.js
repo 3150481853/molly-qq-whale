@@ -439,6 +439,12 @@ export class ChatEngine {
               if (!parts.length) return
               await this.client.sendGroupMsg(gid, buildMessage(parts))
             },
+            // 2026-10-26（主人 m07064）：自动/兜底开奖也计入 lotteryDrawn；
+            // 手动「开奖」走 maybeGroupFun 里的 draw 直调，不经过这里，不会重复计数。
+            onDraw: ({ gid, winners, mode }) => {
+              this.stats.lotteryDrawn += 1
+              this.logger('debug', `群趣味：群 ${gid} ${mode === 'keyword' ? '口令' : ''}抽奖自动开奖（${winners.length} 位中奖）`)
+            },
           })
     this.welcomeAt = new Map()
     // 2026-10-26（主人 m06713 事故）：插件进程里的定时器不可靠，

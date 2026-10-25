@@ -1616,11 +1616,18 @@ export function apply(root, rawConfig = {}) {
           return
         }
         if (config.blindMode) return
-        if (ev.notice_type === 'notify' && ev.sub_type === 'poke') {
-          engine
-            ?.onNotice?.(ev)
-            .catch((err) => logger('warn', `处理戳一戳失败: ${err?.message || err}`))
-        }
+        /*
+         * 2026-10-26（主人 m07147：「你新人欢迎又是我手动的」）。
+         *
+         * 这里原来只把 poke 递给 engine，group_increase 一路落到 return 被静默
+         * 丢弃 —— 表现就是「新人入群从不自动欢迎，只能主人手动发一句」。
+         *
+         * 现在所有 notice 都交给 engine.onNotice 判：它在内部先看 group_increase
+         * （新人欢迎），再处理 poke（反戳/回话），其它类型一律返回 ignored。
+         */
+        engine
+          ?.onNotice?.(ev)
+          .catch((err) => logger('warn', `处理通知事件失败: ${err?.message || err}`))
         return
       }
     } catch (err) {

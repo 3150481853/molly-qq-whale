@@ -25,6 +25,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import { addLearnedHash, removeLearnedHash } from './sticker-learn.js'
+import { clockText } from './clock.js'
 // qq 是记忆的唯一身份（2026-10-19）：校验规则只写在 memory.js 一处，
 // 免得控制台和引擎两边各写一套正则、慢慢就跑偏了。
 import { isValidQq } from './memory.js'
@@ -287,6 +288,18 @@ export class WebWidget {
     } catch {
       out.windows = null
     }
+    /*
+     * 时间（2026-10-26，主人 m05189-1）：回读「她看到的那个时间」，
+     * 用来验收偏移算得对不对（也方便排查「她说现在下午三点」这种）。
+     */
+    try {
+      const cfg = e?.config
+      if (cfg && cfg.timeContextEnabled !== false) {
+        const off = Number(cfg.timeOffsetMinutes ?? 480)
+        out.time = { at: new Date().toISOString(), offsetMinutes: off, text: clockText(Date.now(), off) }
+      }
+    } catch {}
+
     /*
      * 语音生效值（2026-10-23）：此前 /state 完全看不到 voice 配置，改完
      * voiceMaxChars / voiceMaxSeconds / voiceTimeoutMs 没法确认到底吃上了没有，

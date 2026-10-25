@@ -23,6 +23,8 @@
  * 决策产物一律由编排层算好后当参数传进来。
  */
 
+import { clockSection } from './clock.js'
+
 export function buildSystemPrompt(input, deps) {
   const {
     scene,
@@ -91,6 +93,18 @@ export function buildSystemPrompt(input, deps) {
      */
     if (degraded) {
       sp = deps.withDegradedNote(sp)
+    }
+
+    /*
+     * 现在时间（2026-10-26，主人 m05189-1「给鱼加一个能看时间的插件功能，要求北京时间」）。
+     *
+     * 每轮重新算、写进 system prompt：她原来只能靠猜，或者去调 engine 里那些
+     * 业务时间（上班/睡觉/静默窗），被问「现在几点」时常常瞎编一个钟点。
+     * 配置 timeContextEnabled=false 可以整段关掉；偏移走 timeOffsetMinutes，
+     * 默认 480（UTC+8）。时区算法在 lib/clock.js 里纯函数实现，不看宿主时区。
+     */
+    if (deps.config?.timeContextEnabled !== false) {
+      sp += `\n\n${clockSection(deps.now ? deps.now() : Date.now(), deps.config?.timeOffsetMinutes ?? 480)}`
     }
 
     // 记忆：这个人的 + 跟他相关关键词的

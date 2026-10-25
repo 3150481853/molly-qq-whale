@@ -7,6 +7,24 @@
 
 ---
 
+## 2026-10-25 · v1.1.5-preview.3：看得见时间、会唱歌、动图表情重扫
+
+> 主人 m05189：「1.给鱼加一个能看时间的插件功能，要求北京时间 2.鱼想唱歌，优化一下语音模型写一下算法，让鱼能唱出歌来 3.利用新的动图识别功能，重新给表情包库的gif打tag，同时推preview.3的时候,增加脚本提示，让更新者获得提示：请利用新功能重新扫描gif库」。
+
+**1）北京时间**
+
+新增 `lib/clock.js`（纯函数、无依赖）+ engine 注入 `clockText`：每轮提示词带一行「现在是 2026-10-25 周日 20:57（北京时间）」，并提醒「不知道具体分钟数就别编」。配置 `timeContextEnabled`（默认开）、`timeZoneOffsetMinutes`（默认 480 = 北京时间）。以前她没有任何时间来源，问几点只能糊弄。
+
+**2）唱歌**
+
+新增 `lib/singing.js` + 内嵌 Python 渲染器（只用 numpy，复用本机 ASR 的 venv）：歌词按简谱逐字合成（沿用 Dania 的 GPT-SoVITS 音色）→ 拆句 → ACF 估基频 → 重采样搬音高 → WSOLA 保时长 → 逐音校准（实测 42 个音平均误差 14.6 音分、最大 35）→ 拼接，输出一条真语音。会唱《小星星》《虫儿飞》《两只老虎》《生日快乐》；点不会的直接说会哪几首，渲染失败降级「嗓子卡住了」。配置 `singingEnabled / singingPython / singingTimeoutMs`。渲染器需要 Python + numpy，没有时自动降级成普通说话，不影响其它功能。
+
+**3）动图表情重扫（升级后建议跑一下）**
+
+新增 `tools/rescan-gif-stickers.mjs`：把表情包库里的 GIF 拆成多帧拼图 → 视觉模型重新概括「角色/画面/动作/情绪」→ 写回文件名（文件名就是 tag）。默认 **dry-run 只预览**，`--apply` 才真正改名；每张的旧名/新名都写进 `out/rescan-gif-report.json`，改错可照报告改回；单帧 GIF 跳过，一张失败不影响其它张。旧的 tag 多是按首帧或人工起的，用新的动图识别能补上「动作」。
+
+> 升级到本版后，先 `node tools/rescan-gif-stickers.mjs` 预览，确认没问题再 `node tools/rescan-gif-stickers.mjs --apply`。
+
 ## 2026-10-26 · v1.1.5-preview.2：让她看懂动图（GIF 多帧）+ 带图轮次不再「看了不吭声」
 
 > 主人 m04893「现在做preview.2，目标是让Molly能看懂gif动图，他现在面对那些gif和gif表情包只能看到首图」。
@@ -96,8 +114,6 @@
 - 整体回退：还原 `lib/local-asr.js`（删除）、`lib/engine.js`、`lib/main.js`、`cordis.patch.yml` 与三个控制台文件。
 
 ---
-
-
 
 > 主人 m04041「Molly好像还是不能读语音啊，你看那个交流群她和群友聊的」、m04153「这个修复推github1.1.3-Hotfix.1」。
 

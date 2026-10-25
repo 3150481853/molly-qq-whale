@@ -101,6 +101,8 @@ const FILES = [
   ['tools/make-desktop-shortcut.ps1', 'tools/make-desktop-shortcut.ps1'],
   ['tools/build-exe.mjs', 'tools/build-exe.mjs'],
   ['tools/scan-secrets.mjs', 'tools/scan-secrets.mjs'],
+  // 2026-10-25 m05189-3：升级到 preview.3 后建议重扫表情包 GIF 的 tag（用新的动图多帧识别）。
+  ['tools/rescan-gif-stickers.mjs', 'tools/rescan-gif-stickers.mjs'],
   ['tools/build-publish.mjs', 'tools/build-publish.mjs'],
   // 2026-10-25 m03530：把每个 tag 的提交树打包成 GitHub Release 附件（导出→隐私扫→就地脱敏→zip→API）。
   // 发布版带上它，接手的人重发/补发 release 时不用再找脚本。

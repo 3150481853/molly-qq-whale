@@ -97,6 +97,9 @@ const { isPureNudge, resolveExplicitAt, pickQuoteTarget, shouldDemoteVoice, voic
 // 动图理解（2026-10-26，主人 m04893）：GIF 只解码首帧 → 采样成多帧拼图再给模型。
 // 依赖 python+PIL（lib/gif-frames.js 内联脚本），缺环境时自动回退原图。
 const { gifContactSheet } = await import(sub('./gif-frames.js'))
+// 唱歌（2026-10-25，主人 m05189-2「鱼想唱歌…让鱼能唱出歌来」）：
+// 逐字 TTS + 音高搬移 + WSOLA 拉伸，见 lib/singing.js。
+const { Singer, SONGS, songNames, parseSingRequest } = await import(sub('./singing.js'))
 // 撤回处理（2026-10-24，主人 m00480）：纯函数模块（字段解析/TTL 清理/history 剔除）。
 // 撤回带来的状态（recalled Map、计数）留在这个类里，方便 /state 观察。
 const recallUtil = await import(sub('./engine-recall.js'))
@@ -275,6 +278,28 @@ export class ChatEngine {
       pauseMs: config.voicePauseMs,
     })
 
+    /*
+     * 唱歌（2026-10-25，主人 m05189-2「鱼想唱歌…让鱼能唱出歌来」）。
+     *
+     * tts 直接复用上面同一个 VoiceMaker（同一副嗓子）；渲染由 python 做音高
+     * 搬移 + 时长拉伸（lib/singing.js 内嵌脚本）。没有嗓子或明确关掉时不建对象，
+     * 后面 maybeSing 自然跳过。
+     */
+    this.singing = config.singingEnabled === false || !this.voice
+      ? null
+      : new Singer({
+        dir: path.join(config.dataDir || config.memoryDir, 'sing'),
+        tts: async (ch) => {
+          // VoiceMaker.synthesize 有「清洗后少于 2 个字就返回 null」的门槛（防 1 字鬼叫），
+          // 唱歌是逐字合成，所以补一个句号凑长度：TTS 只当停顿处理，python 侧会裁静音。
+          const r = await this.voice.synthesize(String(ch) + '。')
+          return r?.file || ''
+        },
+        python: config.singingPython,
+        timeoutMs: config.singingTimeoutMs,
+        logger,
+      })
+
     /**
      * 本地语音识别兜底（2026-10-25，主人 m04404 选「本地 ASR」）。
      *
@@ -353,6 +378,9 @@ export class ChatEngine {
       // 动图理解（2026-10-26，主人 m04893）：拆帧成功 / 拆帧失败回退首帧
       gifSheets: 0,
       gifSheetFail: 0,
+      // 唱歌（2026-10-25，主人 m05189-2）：唱成功几条 / 没唱出来几条
+      singSent: 0,
+      singFail: 0,
     }
 
     /**
@@ -2198,6 +2226,11 @@ export class ChatEngine {
         !inRestNow || scene === SCENE_PRIVATE || (this.executor?.isCommandGroup?.(ev) ?? false)
       if (cmdScene) {
         /*
+         * 唱歌（2026-10-25，主人 m05189-2）：问「唱歌 小星星」时直接由程序唱，
+         * 不进模型——模型没法真的唱。排在路由之前，免得被当成聊天/命令。
+         */
+        if (await this.maybeSing({ ev, scene, text: norm?.text })) return
+        /*
          * task-46：命令块不再只认「命令 」前缀，而是先过路由器：
          *   #chat/#work/#code 显式覆盖 → commandPrefixes → 改代码规则 → chat。
          * 只有 work/code 会真的动会话；chat 落回下面的聊天链路。
@@ -3004,6 +3037,50 @@ export class ChatEngine {
       lists: mergedConfigView(this.config, this.allowlistOverrides),
       overrides: this.allowlistOverrides,
       file: this.allowlistFile,
+    }
+  }
+
+  /**
+   * 唱歌（2026-10-25，主人 m05189-2「鱼想唱歌…让鱼能唱出歌来」）。
+   *
+   * 只在私聊、以及群里被 @ 时触发：「唱歌 小星星」「来一首 两只老虎」直接
+   * 发一条语音条，不进模型链路——让模型自己「唱」只会得到一段文字。
+   * 返回 true 表示这条消息已经被唱歌接走（调用方直接 return）。
+   *
+   * 谱子/算法在 lib/singing.js：逐字 TTS → 量基频 → 重采样搬音高 →
+   * WSOLA 拉回音符时值 → 拼小节；没有 python/嗓子时退回一句「嗓子卡住了」。
+   */
+  async maybeSing({ ev, scene, text }) {
+    if (this.config.singingEnabled === false) return false
+    if (!this.singing) return false
+    if (scene !== SCENE_PRIVATE && scene !== SCENE_MENTION) return false
+    const raw = String(text || '').replace(/^(?:@我|@全体成员)\s*/u, '').trim()
+    const req = parseSingRequest(raw)
+    if (!req) return false
+    const songName = req.song && SONGS[req.song] ? req.song : ''
+    if (!songName) {
+      // 点了一首不会的：直接说会哪几首，别装唱
+      await this.sayQuick(ev, scene, `「${req.requested || '这首'}」我还不会唱，会的是：${songNames().join('、')}。`)
+      return true
+    }
+    try {
+      const res = await this.singing.sing(songName)
+      if (!res?.ok || !res.file) {
+        this.stats.singFail += 1
+        this.logger('warn', `唱歌失败：${res?.error || '未知原因'}`)
+        await this.sayQuick(ev, scene, '嗓子卡住了，这首没唱出来……')
+        return true
+      }
+      const payload = buildMessage([{ type: 'record', file: res.file }])
+      if (ev.message_type === 'group') await this.client.sendGroupMsg(ev.group_id, payload)
+      else await this.client.sendPrivateMsg(ev.user_id, payload)
+      this.stats.singSent += 1
+      this.logger('info', `唱歌：${songName}（${res.notes} 音 / ${(Number(res.seconds) || 0).toFixed(1)}s${res.cached ? '，缓存' : ''}）`)
+      return true
+    } catch (err) {
+      this.stats.singFail += 1
+      this.logger('warn', `唱歌异常：${err?.message || err}`)
+      return false
     }
   }
 
@@ -4648,6 +4725,8 @@ export class ChatEngine {
       sniffMime,
       // 动图拆帧能力（engine-context 只负责组装，实现从这里注入）
       gifContactSheet: (buf, opts) => gifContactSheet(buf, opts),
+      // 现在时间（2026-10-26，主人 m05189-1）：拼提示词时用；走 this.now() 便于回放/单测钉时间。
+      now: () => this.now(),
     }
   }
 

@@ -89,6 +89,12 @@ const RELEASE_FEATURES = {
     '新增 7 个 voiceAsr* 配置（开关 / Python 解释器 / 模型 / 线程 / 超时 / 空闲退出 / 最长识别时长），/state.stats 新增 voiceAsrTranscribed / voiceAsrFail',
     '控制台「本次更新说明」：左下角版本号可点击，弹层直接读 docs/CHANGELOG.md 最新一节；新增 GET /api/changelog',
   ],
+  'v1.1.5-preview.3': [
+    '时间感知：每轮提示词带「北京时间」（timeContextEnabled），问几点/星期几不再靠猜',
+    '唱歌：新增 lib/singing.js + 内嵌 numpy 渲染器，逐字合成 + ACF 基频搬移 + WSOLA 保时长，会唱《小星星》《虫儿飞》《两只老虎》《生日快乐》',
+    '动图表情重扫：新增 tools/rescan-gif-stickers.mjs（默认预览，--apply 改名，报告在 out/rescan-gif-report.json）',
+    '升级后请运行：node tools/rescan-gif-stickers.mjs（先预览）→ node tools/rescan-gif-stickers.mjs --apply',
+  ],
   'v1.1.5-preview.2': [
     '动图理解：GIF / 动画表情在发模型前用本机 Pillow 拆成多帧拼图（默认 6 帧 / 3 列 / 320px，左上角帧号），模型能按顺序看懂动作；单帧 GIF、缺 Pillow、超时都会回退原图',
     '新增 6 个 gifFrames* 配置（开关 / 帧数 / 列数 / 帧宽 / Python 路径 / 超时），/state.stats 新增 gifSheets / gifSheetFail',
@@ -120,7 +126,8 @@ const RELEASE_FEATURES = {
 const RELEASE_ASSET_FILES = {
   'v1.0.0': 150, 'v1.1.0': 155, 'v1.1.1': 156, 'v1.1.2': 158,
   'v1.1.3-preview.1': 158, 'v1.1.3-preview.2': 159, 'v1.1.3-preview.3': 160,
-  'v1.1.3': 161, 'v1.1.3-Hotfix.1': 161, 'v1.1.3-Hotfix.2': 162, 'v1.1.5-preview.1': 162, 'voice-pack-v1.0': 76,
+  'v1.1.3': 161, 'v1.1.3-Hotfix.1': 161, 'v1.1.3-Hotfix.2': 162, 'v1.1.5-preview.1': 162, 
+  'v1.1.5-preview.3': 166, 'v1.1.5-preview.2': 162, 'voice-pack-v1.0': 76,
 }
 
 /* 旧版本脱敏命中数（正文里如实披露，body-only 刷新时沿用） */

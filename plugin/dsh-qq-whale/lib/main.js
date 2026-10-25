@@ -336,6 +336,10 @@ export const DEFAULTS = {
   // 60 条 ≈ 一次能回看最近 50~60 句，足够把「刚才聊到哪儿、他在纠结什么」串起来；
   // 没上 80/100 是因为真机群里消息密，喂太多会让模型抓不住重点，token 也线性涨。
   contextLimit: 60,
+  // 时间感知（2026-10-26，主人 m05189-1）：每轮把「现在几点」写进 system prompt。
+  // 偏移默认 480（UTC+8 = 北京时间），不依赖宿主时区——算法在 lib/clock.js。
+  timeContextEnabled: true,
+  timeOffsetMinutes: 480,
   thinkingBaseDelaySeconds: 0.7,
   typingCharactersPerSecond: 7.5,
   typingMaxDelaySeconds: 8,
@@ -605,6 +609,14 @@ export const DEFAULTS = {
   // 带图轮次的思考强度（2026-10-26）：实测图类 reasoning 934~4094 token 波动，
   // minimal 能把它压到 ~900，正文不至于被思考吃光；空串 = 不传该参数。
   imageReasoningEffort: 'minimal',
+  // —— 唱歌（2026-10-25，主人 m05189-2「鱼想唱歌…让鱼能唱出歌来」）——
+  // 有人私聊/群里 @ 她说「唱歌 小星星」时，逐字合成 + 音高搬移 + WSOLA 拉伸，
+  // 直接发一条语音条（不走模型）。算法与曲库在 lib/singing.js。
+  singingEnabled: true,
+  // 渲染用 python（复用本地 ASR 那个 venv：numpy 已在，不需要新装依赖）
+  singingPython: 'G:\\Molly\\data\\video\\venv\\Scripts\\python.exe',
+  // 整首渲染超时（毫秒）：40 音节实测 4~20 秒
+  singingTimeoutMs: 180000,
   // —— 戳一戳回应（2026-10-23，主人 m01231；2026-10-24 主人 m01908 改成模型说一句）——
   // 被 QQ 戳一戳时的反射：反戳 / 说一句 / 被连戳多次生气。
   // 反戳与计数不花模型；「说一句」默认让模型现编（pokeUseModel），失败用 lib/poke.js 的固定文案兜底。
@@ -787,6 +799,8 @@ function _configShapeReference(Schema) {
     enabled: s.boolean().default(true).description('总开关：关掉后不再回任何消息（连接仍保持）'),
     debounceMs: s.natural().default(DEFAULTS.debounceMs),
     contextLimit: s.natural().default(DEFAULTS.contextLimit),
+    timeContextEnabled: s.boolean().default(DEFAULTS.timeContextEnabled).description('是否把「现在时间」写进提示词（北京时间）'),
+    timeOffsetMinutes: s.natural().default(DEFAULTS.timeOffsetMinutes).description('时间偏移（分钟），默认 480 = 北京时间 UTC+8'),
     thinkingBaseDelaySeconds: s.number().default(DEFAULTS.thinkingBaseDelaySeconds).description('看见消息到开始打字的思考时间'),
     typingCharactersPerSecond: s.number().default(DEFAULTS.typingCharactersPerSecond).description('打字速度（字/秒）。真人手机聊天 3~4，但实测那么慢会让人等走神，默认调到 7.5'),
     typingMaxDelaySeconds: s.number().default(DEFAULTS.typingMaxDelaySeconds),
@@ -886,6 +900,10 @@ function _configShapeReference(Schema) {
     gifFramesTimeoutMs: s.natural().default(DEFAULTS.gifFramesTimeoutMs).description('拆 GIF 帧超时（毫秒，默认 12000）'),
     imageMaxTokens: s.natural().default(DEFAULTS.imageMaxTokens).description('带图轮次的输出 token 上限（默认 3200；思考 token 波动大，给多了不亏）'),
     imageReasoningEffort: s.string().default(DEFAULTS.imageReasoningEffort).description('带图轮次的思考强度（minimal/空串=不传）'),
+    // —— 唱歌（2026-10-25，主人 m05189-2）——
+    singingEnabled: s.boolean().default(DEFAULTS.singingEnabled).description('唱歌：私聊/群里 @ 她说「唱歌 小星星」时发一条真人声唱的语音条'),
+    singingPython: s.string().default(DEFAULTS.singingPython).description('唱歌渲染用的 Python 解释器（需 numpy；默认复用本地 ASR 的 venv）'),
+    singingTimeoutMs: s.natural().default(DEFAULTS.singingTimeoutMs).description('整首渲染超时（毫秒，默认 180000）'),
     // —— 戳一戳回应（2026-10-23，主人 m01231）——
     pokeEnabled: s.boolean().default(DEFAULTS.pokeEnabled).description('戳一戳回应：被戳时按概率反戳/说一句，被连戳多次会生气'),
     pokeBackChance: s.number().min(0).max(1).default(DEFAULTS.pokeBackChance).description('被戳时反戳的概率（0~1，默认 0.7）'),

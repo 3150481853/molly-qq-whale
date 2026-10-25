@@ -105,7 +105,7 @@ const PORT = Number(pick('MOLLY_CONSOLE_PORT', 'port', 19392)) || 19392;
 // 控制台版本：以插件 package.json 为唯一真源，别在这里写死（2026-10-25 主人 m03522：
 // 左下角一直显示 v1.0.0 就是这一行写死的；发布版本与插件版本从此自动同步）。
 // exe 模式读不到 package.json 时退回 FALLBACK_VERSION，保证打包版也有版本号。
-const FALLBACK_VERSION = '1.1.3-Hotfix.1';
+const FALLBACK_VERSION = '1.1.3-Hotfix.2';
 const VERSION = (() => {
   try {
     const pkg = JSON.parse(
@@ -1253,6 +1253,35 @@ async function route(req, res) {
   // 数据接口
   if (p === '/api/health') {
     return sendJson(res, 200, { ok: true, version: VERSION, build: consoleBuild(), at: Date.now() });
+  }
+
+  /*
+   * 本次更新说明（2026-10-25，主人 m04452：「控制台上的版本更新一下，注释一下这次更新了什么」）。
+   * 数据源就是仓库里的 docs/CHANGELOG.md——取最新一节（第一个 `## ` 标题到下一节之间），
+   * 前端点左下角版本号时弹层展示，不额外维护一份文案。
+   * 文件不存在也返回 200（打包版没带 docs 时前端只显示「版本号」）。
+   */
+  if (p === '/api/changelog') {
+    const file = path.join(ROOT, 'docs', 'CHANGELOG.md');
+    let text = '';
+    let title = '';
+    try {
+      const md = fs.readFileSync(file, 'utf8');
+      const start = md.search(/^## /m);
+      if (start >= 0) {
+        const rest = md.slice(start);
+        const next = rest.slice(1).search(/^## /m);
+        let section = (next >= 0 ? rest.slice(0, next + 1) : rest).trim();
+        const sep = section.search(/^---$/m);
+        if (sep > 0) section = section.slice(0, sep).trim();
+        text = section.length > 8000 ? section.slice(0, 8000) + '\n…' : section;
+        title = String((section.match(/^##\s+(.+)$/m) || [])[1] || '').trim();
+      }
+    } catch (err) {
+      text = '';
+      title = '';
+    }
+    return sendJson(res, 200, { ok: true, version: VERSION, title, text, file: 'docs/CHANGELOG.md' });
   }
 
   // 总览聚合（契约 §3.2）——上游全挂也必须 200

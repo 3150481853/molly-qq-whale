@@ -71,6 +71,9 @@ const {
   pickActivity,
 } = await import(sub('./aliveness.js'))
 const { normalizeMessage, buildMessage, fetchQuoted, fetchForward, fetchPttText, PTT_FAIL_TEXT } = await import(sub('./onebot.js'))
+// 本地 ASR 兜底（2026-10-25，主人 m04404）：QQ 群聊 pttTrans 拿不到结果时，
+// 用本机 faster-whisper 把语音转出来（SnowLuma get_record 自带转码，无需 ffmpeg）。
+const { LocalAsr, fetchRecordWav, wavSeconds } = await import(sub('./local-asr.js'))
 const { mergeReportTexts, coreText, similarity, containment } = await import(sub('./dedupe.js'))
 // 出站 markdown 清洗（P6）。persona.js 的 splitReply 已经挂了这个，
 // 但下面三条直发路径绕过了 splitReply，得自己洗一遍。
@@ -270,6 +273,21 @@ export class ChatEngine {
     })
 
     /**
+     * 本地语音识别兜底（2026-10-25，主人 m04404 选「本地 ASR」）。
+     *
+     * 背景：QQ 服务端的 pttTrans 只在私聊稳定返回；群聊里别人的语音
+     * `fetch_ptt_text` 20 秒超时（retcode 100），她只能看到「[语音：没听清]」。
+     * 这里用本机 Python venv 里已有的 faster-whisper（模型也在本机缓存），
+     * 音频由 SnowLuma `get_record out_format=wav` 转好，不需要 ffmpeg。
+     * 进程懒启动、常驻复用、空闲 10 分钟自退；失败只返回空串，调用方照常降级。
+     */
+    this.localAsr = new LocalAsr({
+      config,
+      logger,
+      dataDir: config.dataDir || config.memoryDir,
+    })
+
+    /**
      * 待核实区（2026-10-19）：闸门拦下来的记忆放这里，等人在控制台过一眼。
      * dir 故意和 memory 同一个目录——pending.json 和 memory.json 是一对，
      * 分开放会出现「备份了记忆忘了待核实区」。
@@ -326,6 +344,9 @@ export class ChatEngine {
       // 入站语音转文字（2026-10-25，主人 m04041）：转写成功几条、失败几条
       voiceTranscribed: 0,
       voiceTranscribeFail: 0,
+      // 本地 ASR 兜底（2026-10-25，主人 m04404）：QQ 群聊 pttTrans 拿不到时本地识别
+      voiceAsrTranscribed: 0,
+      voiceAsrFail: 0,
     }
 
     /**
@@ -1818,25 +1839,63 @@ export class ChatEngine {
    * 「真回复」各读一遍，别为同一句调两次接口。
    *
    * @param {string|number} messageId
-   * @returns {Promise<string>} 转写正文；取不到返回空串（由调用方给降级文案）
+   * @param {{file?:string}} [opts] 语音段的 file（本地 ASR 兜底要用它去 get_record）
+   * @returns {Promise<{text:string, source:string}>} source: 'qq' | 'asr' | ''
    */
-  async transcribeVoice(messageId) {
+  async transcribeVoice(messageId, opts = {}) {
     const key = String(messageId ?? '').trim()
-    if (!key) return ''
+    const none = { text: '', source: '' }
+    if (!key) return none
     if (!this._pttCache) this._pttCache = new Map()
     const nowMs = Date.now()
     const hit = this._pttCache.get(key)
-    if (hit && nowMs - hit.at < 600000) return hit.text
+    if (hit && nowMs - hit.at < 600000) return { text: hit.text, source: hit.source || '' }
 
+    // ① QQ 服务端转写（快、免费；私聊稳定，群聊经常 20 秒超时）
     const timeoutMs = Number(this.config.voiceTranscribeTimeoutMs) || undefined
     const res = await fetchPttText(this.client, key, { timeoutMs })
-    const text = res && res.ok ? res.text : ''
-    this._pttCache.set(key, { text, at: nowMs })
+    let text = res && res.ok ? res.text : ''
+    let source = text ? 'qq' : ''
+
+    /*
+     * ② 本地 ASR 兜底（2026-10-25，主人 m04404）。
+     *
+     * 真机证据：群聊里别人发的语音，pttTrans 20 秒都不回（retcode 100）；
+     * 这里用 SnowLuma get_record 转 wav + 本机 faster-whisper 识别。
+     * 只对「QQ 拿不到 + 有 file」的语音生效；超过 voiceAsrMaxSeconds 的直接跳过，
+     * 免得一句 60 秒的语音把回复拖到分钟级。
+     */
+    if (!text && this.localAsr && this.localAsr.available && opts.file) {
+      const wav = await fetchRecordWav(this.client, opts.file, {
+        maxBytes: Number(this.config.voiceAsrMaxBytes) || undefined,
+      })
+      if (!wav.ok || !wav.buffer) {
+        this.stats.voiceAsrFail += 1
+        this.logger('debug', `本地 ASR 取音频失败 ${key}：${wav.error || 'unknown'}`)
+      } else {
+        const limit = Number(this.config.voiceAsrMaxSeconds) > 0 ? Number(this.config.voiceAsrMaxSeconds) : 15
+        const seconds = wavSeconds(wav.buffer)
+        if (seconds > limit) {
+          this.stats.voiceAsrFail += 1
+          this.logger('debug', `本地 ASR 跳过 ${key}：${seconds.toFixed(1)}s 超过 ${limit}s 上限`)
+        } else {
+          text = await this.localAsr.transcribe(wav.buffer)
+          if (text) {
+            source = 'asr'
+            this.stats.voiceAsrTranscribed += 1
+          } else {
+            this.stats.voiceAsrFail += 1
+          }
+        }
+      }
+    }
+
+    this._pttCache.set(key, { text, at: nowMs, source })
     if (this._pttCache.size > 400) {
       for (const [k, v] of this._pttCache) if (nowMs - v.at > 600000) this._pttCache.delete(k)
       while (this._pttCache.size > 400) this._pttCache.delete(this._pttCache.keys().next().value)
     }
-    return text
+    return { text, source }
   }
 
   async onMessage(ev) {
@@ -1897,13 +1956,16 @@ export class ChatEngine {
      * 默认开；`voiceTranscribeEnabled: false` 可整条关掉（不想多一次接口往返）。
      */
     if (this.config.voiceTranscribeEnabled !== false) {
-      const hasVoice = Array.isArray(norm.segments) && norm.segments.some((s) => s && s.type === 'record')
-      if (hasVoice) {
-        const shown = await this.transcribeVoice(ev.message_id)
+      const voiceSeg = Array.isArray(norm.segments) ? norm.segments.find((s) => s && s.type === 'record') : null
+      if (voiceSeg) {
+        const voiceFile = String(voiceSeg?.data?.file || '')
+        const voice = await this.transcribeVoice(ev.message_id, { file: voiceFile })
+        const shown = voice.text
         if (shown) {
           norm.text = String(norm.text || '').replace(/\[语音\]/g, `（语音转文字：${shown}）`)
-          this.stats.voiceTranscribed += 1
-          this.logger('debug', `入站语音转写 ${ev.message_id}：${shown.slice(0, 40)}`)
+          if (voice.source === 'asr') this.stats.voiceAsrTranscribed += 1
+          else this.stats.voiceTranscribed += 1
+          this.logger('debug', `入站语音转写(${voice.source}) ${ev.message_id}：${shown.slice(0, 40)}`)
         } else {
           norm.text = String(norm.text || '').replace(/\[语音\]/g, PTT_FAIL_TEXT)
           this.stats.voiceTranscribeFail += 1

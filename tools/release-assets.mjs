@@ -83,6 +83,12 @@ const RELEASE_FEATURES = {
     '转写失败降级成「[语音：没听清]」（不再当成空消息）；10 分钟缓存，同一条语音只转一次',
     '新配置 voiceTranscribeEnabled / voiceTranscribeTimeoutMs（默认开 / 6000ms）',
   ],
+  'v1.1.3-Hotfix.2': [
+    '群聊语音本地 ASR 兜底：QQ 服务端转写拿不到结果时，用本机 faster-whisper 识别（复用视频分析 venv 里已装模型，无新依赖、不联网）',
+    '语音识别分级：QQ fetch_ptt_text 优先（0.2–0.3 秒）→ 失败转 get_record wav + 本地识别（首次 1.6 秒、之后 1.4–1.6 秒）→ 再失败降级「[语音：没听清]」',
+    '新增 7 个 voiceAsr* 配置（开关 / Python 解释器 / 模型 / 线程 / 超时 / 空闲退出 / 最长识别时长），/state.stats 新增 voiceAsrTranscribed / voiceAsrFail',
+    '控制台「本次更新说明」：左下角版本号可点击，弹层直接读 docs/CHANGELOG.md 最新一节；新增 GET /api/changelog',
+  ],
   'v1.1.3-preview.1': [
     '戳一戳「说一句」改为模型回复：pokeUseModel，超时/失败回退原固定句池',
     '控制台改版：去掉 NapCat 品牌、QQ 连接四态判定、导航六组、新增 #/qq 页面',
@@ -104,7 +110,7 @@ const RELEASE_FEATURES = {
 const RELEASE_ASSET_FILES = {
   'v1.0.0': 150, 'v1.1.0': 155, 'v1.1.1': 156, 'v1.1.2': 158,
   'v1.1.3-preview.1': 158, 'v1.1.3-preview.2': 159, 'v1.1.3-preview.3': 160,
-  'v1.1.3': 161, 'voice-pack-v1.0': 76,
+  'v1.1.3': 161, 'v1.1.3-Hotfix.1': 161, 'voice-pack-v1.0': 76,
 }
 
 /* 旧版本脱敏命中数（正文里如实披露，body-only 刷新时沿用） */

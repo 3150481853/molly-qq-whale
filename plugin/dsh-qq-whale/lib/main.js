@@ -569,6 +569,22 @@ export const DEFAULTS = {
   voiceTranscribeEnabled: true,
   // 转写接口的超时（毫秒）：QQ 服务端转写实测 0.2–0.3 秒，6 秒足够兜住波动。
   voiceTranscribeTimeoutMs: 6000,
+  // —— 本地 ASR 兜底（2026-10-25，主人 m04404「本地兜底」）——
+  // 真机证据：群聊里别人发的语音，QQ 服务端 pttTrans 20 秒也不回（retcode 100），
+  // 私聊却正常。这里用 SnowLuma get_record 取 wav + 本机 faster-whisper 识别。
+  // 只对「QQ 拿不到 + 有音频文件」的群语音生效；私聊走上面那条，不跑本地模型。
+  voiceAsrEnabled: true,
+  // 常驻 Python worker 用的解释器（装了 faster-whisper 的那个 venv）
+  voiceAsrPython: 'G:\\Molly\\data\\video\\venv\\Scripts\\python.exe',
+  // faster-whisper 模型（离线缓存，不联网下载）
+  voiceAsrModel: 'small',
+  voiceAsrThreads: 8,
+  // 单次识别总超时（秒）：冷启动约 1.6 秒、2.5 秒音频约 1.6 秒识别
+  voiceAsrTimeoutMs: 25000,
+  // worker 空闲多久自动退出（秒），0 = 不退出
+  voiceAsrIdleSeconds: 600,
+  // 超过这个时长的语音不走本地 ASR（秒，0 = 不限），避免长语音把回复拖到分钟级
+  voiceAsrMaxSeconds: 15,
   // —— 戳一戳回应（2026-10-23，主人 m01231；2026-10-24 主人 m01908 改成模型说一句）——
   // 被 QQ 戳一戳时的反射：反戳 / 说一句 / 被连戳多次生气。
   // 反戳与计数不花模型；「说一句」默认让模型现编（pokeUseModel），失败用 lib/poke.js 的固定文案兜底。
@@ -834,6 +850,14 @@ function _configShapeReference(Schema) {
     voiceCooldownSeconds: s.natural().default(DEFAULTS.voiceCooldownSeconds).description('已废弃（用户 2026-10-22 取消冷却，保留字段兼容旧配置）'),
     voiceTranscribeEnabled: s.boolean().default(DEFAULTS.voiceTranscribeEnabled).description('入站语音转文字：别人发语音时调 QQ 服务端转写，把内容带进上下文（默认开）'),
     voiceTranscribeTimeoutMs: s.natural().default(DEFAULTS.voiceTranscribeTimeoutMs).description('语音转写超时（毫秒，默认 6000；实测转写 0.2–0.3 秒）'),
+    // —— 本地 ASR 兜底（2026-10-25，主人 m04404）——
+    voiceAsrEnabled: s.boolean().default(DEFAULTS.voiceAsrEnabled).description('本地 ASR 兜底：QQ 服务端转写拿不到时（群语音常见），用本机 faster-whisper 识别'),
+    voiceAsrPython: s.string().default(DEFAULTS.voiceAsrPython).description('运行 faster-whisper 的 Python 解释器路径（需装 faster-whisper）'),
+    voiceAsrModel: s.string().default(DEFAULTS.voiceAsrModel).description('faster-whisper 模型名/路径（默认 small，离线缓存读取）'),
+    voiceAsrThreads: s.natural().default(DEFAULTS.voiceAsrThreads).description('本地识别 CPU 线程数（默认 8）'),
+    voiceAsrTimeoutMs: s.natural().default(DEFAULTS.voiceAsrTimeoutMs).description('本地识别单次超时（毫秒，默认 25000，含首次模型加载）'),
+    voiceAsrIdleSeconds: s.natural().default(DEFAULTS.voiceAsrIdleSeconds).description('worker 空闲自动退出（秒，默认 600；0 = 常驻）'),
+    voiceAsrMaxSeconds: s.natural().default(DEFAULTS.voiceAsrMaxSeconds).description('超过这个时长的语音不走本地 ASR（秒，默认 15；0 = 不限）'),
     // —— 戳一戳回应（2026-10-23，主人 m01231）——
     pokeEnabled: s.boolean().default(DEFAULTS.pokeEnabled).description('戳一戳回应：被戳时按概率反戳/说一句，被连戳多次会生气'),
     pokeBackChance: s.number().min(0).max(1).default(DEFAULTS.pokeBackChance).description('被戳时反戳的概率（0~1，默认 0.7）'),

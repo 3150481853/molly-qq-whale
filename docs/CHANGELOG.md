@@ -7,7 +7,47 @@
 
 ---
 
-## 2026-10-25 · v1.1.3-Hotfix.1：入站语音转文字（别人发的语音她终于「听」得见了）
+## 2026-10-25 · v1.1.3-Hotfix.2：群聊语音本地 ASR 兜底 + 控制台「本次更新说明」
+
+> 主人 m04446「把语音识别加进这个版本呢，然后一起发」、m04404 选「本地兜底」、m04452「控制台上的版本更新一下，注释一下这次更新了什么」。
+> 与 `v1.1.3-Hotfix.1` 分开发布：Hotfix.1 只有 QQ 服务端转写（`fetch_ptt_text`）这一条；本地 ASR 兜底 + 控制台「本次更新说明」归到本版（Hotfix.2）。
+
+**为什么还要本地兜底**
+- 上一版上线后真机又出现：群聊里群友发的语音，`fetch_ptt_text` 20 秒不回（SnowLuma 回 `retcode=100`），她只能回「[语音：没听清]」；同一条消息换成私聊就正常。
+- 复测也说明 QQ 服务端转写是**时好时坏**：本轮同一条群语音 209 ms 就返回了「8秒够卖了。」，所以本地 ASR 只做兜底，不抢主路、不加延迟。
+
+**改动**
+- 新增 `lib/local-asr.js`（无新 npm 依赖、无 ffmpeg）：
+  - `fetchRecordWav(client, file)`：调 SnowLuma `get_record { file, out_format:'wav' }` 取 24k/16bit/mono wav（SnowLuma 自带解码）；超时 12 秒、体积上限 8 MB、失败永远返回 `{ok:false,error}`。
+  - `wavSeconds(buffer)`：解析 RIFF 头算时长，给「太长不识别」的判断用。
+  - `LocalAsr`：常驻 Python worker（借用 `${MOLLY_ROOT}\data\video\venv` 里已装的 faster-whisper + 本地缓存模型，`local_files_only` 不联网），首次加载约 1.6 秒、之后每段 1.4–1.6 秒；空闲 10 分钟自动退出；串行队列避免并发拖爆 CPU；旧 worker 迟到的 exit/error 不会影响新 worker（踩过：dispose 后立刻重启会被旧子进程的退出事件打成 `asr worker 未就绪`）。
+- `lib/engine.js`：`transcribeVoice(messageId, { file })` 改成分级返回 `{text, source}`——
+  1. 先走 QQ 服务端 `fetch_ptt_text`（快、免费）；
+  2. 失败且 `voiceAsrEnabled !== false` 时：`get_record` 转 wav → `voiceAsrMaxSeconds`（默认 15 秒）以内 → 本地识别；
+  3. 仍然失败则沿用 `[语音：没听清]` 降级。
+  `/state.stats` 新增 `voiceAsrTranscribed / voiceAsrFail`（`voice.source === 'asr'` 的条数单独记）。
+- `lib/main.js` + `cordis.patch.yml` 新增 7 个配置：`voiceAsrEnabled`（true）、`voiceAsrPython`（venv 解释器）、`voiceAsrModel`（small）、`voiceAsrThreads`（8）、`voiceAsrTimeoutMs`（25000）、`voiceAsrIdleSeconds`（600）、`voiceAsrMaxSeconds`（15）。
+- 控制台「本次更新说明」（主人 m04452）：
+  - `tools/console-server.mjs` 新增 `GET /api/changelog`：直接读仓库 `docs/CHANGELOG.md` 最新一节（不另维护文案），文件缺失也返回 200；版本真源仍是插件 `package.json`（`FALLBACK_VERSION` 兜底）。
+  - `console/index.html` + `console.js` + `console.css`：左下角版本号改成可点按钮，点开弹层按 markdown 轻渲染展示本节；Esc / 点遮罩关闭，底部「完整变更日志」跳 GitHub。
+
+**验证**
+- `out/_local_asr_test.mjs` **17/17 PASS**：wav 头解析、坏输入不崩、`fetchRecordWav` 各失败路径、worker 冷启动识别（2.34 s 样本 → 「喂喂 听得见我说话吗」）、空闲/重启后仍可用、disabled 直接空串。
+- `out/_asr_e2e_test.mjs` **8/8 PASS**：拉真实群语音（`-246478423`）→ `fetch_ptt_text` 得「8秒够卖了。」[信息项] → `get_record` 67278 B wav（1.40 s）→ 本地识别出文本（3.5 s，含首次加载）。
+- 已热重载 `gen-mvnix03p-oz7o14`；`/state.stats` 出现 `voiceAsrTranscribed/voiceAsrFail`，7 个配置键在 yml 里存活。
+
+**已知限制**
+- 本地用的是 `small` 模型：安静清晰的语音（2.3 s「喂喂，听得见我说话吗？」）转写正确；嘈杂短句会听错（同一条 1.4 s 群语音，QQ 服务端「8秒够卖了。」，本地识别成「白鸟 夠白了」）。想更准可换 `voiceAsrModel: medium`（首次需联网下载约 1.5 GB，CPU 约慢 3–5 倍）。
+- 群里 15 秒以上的长语音不走本地（`voiceAsrMaxSeconds`），仍回降级文案。
+
+**回滚**
+- `voiceAsrEnabled: false` 只关本地兜底，保留 QQ 服务端转写；
+- `voiceTranscribeEnabled: false` 连 QQ 转写一起关，退回只看见 `[语音]` 的老行为；
+- 整体回退：还原 `lib/local-asr.js`（删除）、`lib/engine.js`、`lib/main.js`、`cordis.patch.yml` 与三个控制台文件。
+
+---
+
+
 
 > 主人 m04041「Molly好像还是不能读语音啊，你看那个交流群她和群友聊的」、m04153「这个修复推github1.1.3-Hotfix.1」。
 

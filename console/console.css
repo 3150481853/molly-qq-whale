@@ -1611,6 +1611,41 @@ select.input{ cursor: pointer; }
 .pest-word-note{ margin: var(--s-2) 0 0; color: var(--stone); font-size: var(--fs-sub); }
 .pest-foot{ margin: var(--s-3) 0 0; color: var(--stone); font-size: var(--fs-sub); }
 
+/* ---------- 24. 本次更新说明（2026-10-25，主人 m04452） ---------- */
+/* 左下角版本号：从死文本改成可点按钮，点开看「这次更新了什么」。
+   视觉上仍要像脚注（不抢戏），所以去边框、按下沉色，hover 才给主色提示。 */
+.sidebar-foot .foot-ver{
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: var(--stone);
+  cursor: pointer;
+  border-bottom: 1px dashed transparent;
+}
+.sidebar-foot .foot-ver:hover{ color: var(--primary); border-bottom-color: var(--primary); }
+.sidebar-foot .foot-ver:focus-visible{ outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 2px; }
+.chg-card{ width: min(560px, calc(100vw - 48px)); max-height: min(72vh, 640px); display: flex; flex-direction: column; }
+.chg-body{
+  flex: 1 1 auto;
+  overflow: auto;
+  margin: var(--s-2) 0 var(--s-3);
+  padding-right: var(--s-2);
+  color: var(--charcoal);
+  font-size: var(--fs-body);
+  line-height: 1.7;
+}
+.chg-body h3{ margin: var(--s-3) 0 var(--s-2); font-size: var(--fs-title); }
+.chg-body h4{ margin: var(--s-3) 0 var(--s-1); font-size: var(--fs-body); color: var(--ink); }
+.chg-body ul{ margin: var(--s-1) 0 var(--s-2); padding-left: 1.2em; }
+.chg-body li{ margin: 2px 0; }
+.chg-body p{ margin: var(--s-1) 0; }
+.chg-body code{ background: var(--surface); border: 1px solid var(--hairline-soft); border-radius: 4px; padding: 0 4px; font-family: var(--font-mono); font-size: .92em; }
+.chg-body hr{ border: 0; border-top: 1px solid var(--hairline-soft); margin: var(--s-3) 0; }
+.chg-quote{ color: var(--slate); border-left: 2px solid var(--hairline-strong); padding-left: var(--s-2); }
+.chg-muted{ color: var(--stone); }
+
 /* ---------- 23. 窄窗口收敛（1024×700 不出现横向滚动条） ---------- */
 @media (max-width: 1180px){
   .topbar{ gap: var(--s-3); padding: 0 var(--s-4); }

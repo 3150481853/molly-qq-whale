@@ -2782,6 +2782,88 @@
       .catch(function (err) { console.warn('[molly-console] health 读取失败：', err); });
   }
 
+  /* ---------------- 本次更新说明（2026-10-25，主人 m04452） ----------------
+     点左下角版本号弹出「这次更新了什么」。数据源是服务端 /api/changelog，
+     它直接读仓库里的 docs/CHANGELOG.md 最新一节——不另维护一份文案，
+     免得版本说明和发布记录对不上。 */
+
+  var chgCache = null;
+
+  function chgInline(text) {
+    return esc(text)
+      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      .replace(/「([^」]+)」/g, '「$1」');
+  }
+
+  function renderChangelog(md) {
+    var lines = String(md || '').split(/\r?\n/);
+    var html = [];
+    var inList = false;
+    function closeList() {
+      if (inList) { html.push('</ul>'); inList = false; }
+    }
+    lines.forEach(function (raw) {
+      var line = raw.replace(/\s+$/, '');
+      if (!line.trim()) { closeList(); return; }
+      if (/^###\s+/.test(line)) { closeList(); html.push('<h4>' + chgInline(line.replace(/^###\s+/, '')) + '</h4>'); return; }
+      if (/^##\s+/.test(line)) { closeList(); html.push('<h3>' + chgInline(line.replace(/^##\s+/, '')) + '</h3>'); return; }
+      if (/^[-*]\s+/.test(line)) {
+        if (!inList) { html.push('<ul>'); inList = true; }
+        html.push('<li>' + chgInline(line.replace(/^[-*]\s+/, '')) + '</li>');
+        return;
+      }
+      if (/^>\s?/.test(line)) { closeList(); html.push('<p class="chg-quote">' + chgInline(line.replace(/^>\s?/, '')) + '</p>'); return; }
+      if (/^---+$/.test(line)) { closeList(); html.push('<hr>'); return; }
+      closeList();
+      html.push('<p>' + chgInline(line) + '</p>');
+    });
+    closeList();
+    return html.join('');
+  }
+
+  function openChangelog() {
+    var mask = $('#chgModal');
+    var body = $('#chgBody');
+    if (!mask || !body) return;
+    mask.hidden = false;
+    if (chgCache) { body.innerHTML = renderChangelog(chgCache); return; }
+    body.innerHTML = '<p class="chg-muted">读取中…</p>';
+    fetch('/api/changelog', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        var text = (j && j.text) || '';
+        if (!text) {
+          body.innerHTML = '<p class="chg-muted">这一版没有单独的变更说明，可点右下角看完整变更日志。</p>';
+          return;
+        }
+        chgCache = text;
+        body.innerHTML = renderChangelog(text);
+      })
+      .catch(function (err) {
+        body.innerHTML = '<p class="chg-muted">读取失败：' + esc(String(err && err.message || err)) + '</p>';
+      });
+  }
+
+  function bindChangelog() {
+    var fv = $('#footVersion');
+    if (fv) fv.addEventListener('click', function () { openChangelog(); });
+    var mask = $('#chgModal');
+    var close = $('#chgClose');
+    if (close) close.addEventListener('click', function () { if (mask) mask.hidden = true; });
+    if (mask) {
+      mask.addEventListener('click', function (ev) { if (ev.target === mask) mask.hidden = true; });
+    }
+    document.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Escape' && mask && !mask.hidden) mask.hidden = true;
+    });
+    var full = $('#chgFull');
+    if (full) full.addEventListener('click', function (ev) {
+      ev.preventDefault();
+      window.open('https://github.com/222222222/molly-qq-whale/blob/main/docs/CHANGELOG.md', '_blank', 'noopener');
+    });
+  }
+
   /* ---------------- 执行块 ---------------- */
 
   var ACTIONS = [
@@ -4287,6 +4369,7 @@
       bindQuickActions();
       bindOpsEvents();
       bindEvents();
+      bindChangelog();
       setPage(currentPage());
       loadHealth();
       poll();

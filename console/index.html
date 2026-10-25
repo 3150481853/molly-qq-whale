@@ -53,7 +53,7 @@
     </nav>
 
     <div class="sidebar-foot">
-      <span class="mono" id="footVersion">v1.1.3-Hotfix.1</span>
+      <button class="foot-ver mono" id="footVersion" type="button" title="点击查看本次更新了什么">v1.1.3-Hotfix.2</button>
       <span class="sidebar-foot-dot">·</span>
       <span class="mono">127.0.0.1</span>
     </div>
@@ -444,6 +444,18 @@
 </div>
 
 <div class="toast" id="toast" hidden></div>
+
+<!-- 本次更新说明（2026-10-25，主人 m04452「控制台上的版本更新一下，注释一下这次更新了什么」） -->
+<div class="modal" id="chgModal" hidden role="dialog" aria-modal="true" aria-labelledby="chgTitle">
+  <div class="modal-card chg-card">
+    <h2 class="card-title" id="chgTitle">本次更新</h2>
+    <div class="chg-body" id="chgBody"></div>
+    <div class="modal-foot">
+      <a class="btn btn-ghost btn-sm" id="chgFull" href="#" target="_blank" rel="noopener">完整变更日志</a>
+      <button class="btn btn-primary btn-sm" id="chgClose" type="button">知道了</button>
+    </div>
+  </div>
+</div>
 
 <noscript><p class="noscript">控制台需要 JavaScript 才能读取数据。</p></noscript>
 

@@ -43,6 +43,71 @@ const GENERIC_PATTERNS = [
 ]
 const SECRETS_FILE = process.env.MOLLY_RELEASE_SECRETS || path.join(process.cwd(), 'tools', 'release-assets.secrets.json')
 
+/* ── 每个版本的「本版特性」：写进 release 正文，让仓库读者一眼看到改了什么 ── */
+const RELEASE_FEATURES = {
+  'v1.0.0': [
+    '首个正式版：记忆、表情包、语音、QQ 空间、自愈、控制台全部跑通闭环',
+    '插件化跑在 DeepSeek Harness 宿主上（lib/boot.js 热更新，改插件不用重启宿主）',
+    'SnowLuma OneBot v11 后端：群聊/私聊、CQ 码、戳一戳、语音条',
+    '本地控制台：状态总览、记忆、表情包、开关与配置',
+  ],
+  'v1.1.0': [
+    '记忆池：上限可配 2000 条，记满自动扩到 10000；写入去重（新的覆盖旧的，相似度 0.7）',
+    '记忆加密：AES-256-GCM 信封落盘，密钥与数据分目录（keys/memory.key）',
+    '记忆备份：每 2 小时把记忆文件复制到 D:\\\\MollyBackup 与 G:\\\\MollyBackup（保留 48 份）',
+    '语音：字数上限 42 → 220 字（≈56 秒），新增 58 秒时长闸门，合成超时 20s → 90s',
+    '模型链路：新增 gatewayRealm 可钉国内积分池（X-Realm），/state.model 回读 realm',
+  ],
+  'v1.1.1': [
+    '语音显式触发：新标记 <voice>…</voice>，模型可主动让她「说出来」（不看 voiceChance，仍受 220 字/58 秒闸门）',
+    '戳一戳回应：反戳 / 说一句 / 被戳多下生气（状态机，不走模型）',
+    '重复发消息根治：出站 60 秒幂等窗口，同目标同文本只发一次',
+    '假宣告修复：历史里的「（我发了一条语音：…）」与 [语音:…] 反向翻译回 <voice>',
+  ],
+  'v1.1.2': [
+    '撤回后不追旧消息：剔除历史、作废在途回复，可轻回一句（新 lib/engine-recall.js）',
+    '群里明确要求就当场发：显式要求 / 坚持第二遍 / 180 秒兜底，按句分条（新 lib/group-echo.js）',
+    '查资料不再自己往群里发：research 期间出站被拦，只给结论由引擎发回',
+    '好友申请不漏报：user_id 为空时合成 key，支持按序号审批',
+    '默认音色切到 molly_own（自录 54 句微调）',
+  ],
+  'v1.1.3': [
+    '合并三个预览版：戳一戳改模型回话、控制台改版、记忆「梗」类、上下文体积优化 A、@ 错人修复',
+    '引用回复不带语音：引用某条消息时语音段自动降级成文字（保留内容）',
+    '控制台版本号以插件版本为真源：左下角不再写死 v1.0.0',
+    '控制台表情包搜索：按名字 / 关键词即时过滤（空格多词 AND，Esc 清空）',
+    '每个版本都提供脱敏后的源码 zip 附件（本仓库 Release）',
+  ],
+  'v1.1.3-preview.1': [
+    '戳一戳「说一句」改为模型回复：pokeUseModel，超时/失败回退原固定句池',
+    '控制台改版：去掉 NapCat 品牌、QQ 连接四态判定、导航六组、新增 #/qq 页面',
+  ],
+  'v1.1.3-preview.2': [
+    '记忆新增「梗」类（meme）：抽取认「梗：/热梗：/名场面：」前缀，召回加权 +3',
+    '上下文体积优化 A：记忆窗口 large → balanced，一轮 prompt 6,869 → 5,935 token（-13.6%）',
+  ],
+  'v1.1.3-preview.3': [
+    '@ 错人修复（新 lib/quote-at.js）：@ 号必须是最近说话人、纯叫醒不算回复对象、人群拥挤时才引用、提示词补两句',
+  ],
+  'voice-pack-v1.0': [
+    'Molly 自录 54 句微调音色包：GPT / SoVITS 权重 + 参考音频 + 切好的训练片段 + 训练配置与脚本',
+    '授权 CC BY-NC-SA 4.0（禁止冒充真人 / 商用）；不含原始连续录音，只发切好的片段',
+  ],
+}
+
+/* 旧版本附件里的文件数（GitHub API 不回报文件数，这里记住） */
+const RELEASE_ASSET_FILES = {
+  'v1.0.0': 150, 'v1.1.0': 155, 'v1.1.1': 156, 'v1.1.2': 158,
+  'v1.1.3-preview.1': 158, 'v1.1.3-preview.2': 159, 'v1.1.3-preview.3': 160,
+  'v1.1.3': 161, 'voice-pack-v1.0': 76,
+}
+
+/* 旧版本脱敏命中数（正文里如实披露，body-only 刷新时沿用） */
+const RELEASE_REDACT = {
+  'v1.1.1': 5, 'v1.1.2': 8, 'v1.1.3-preview.1': 8, 'v1.1.3-preview.2': 8,
+}
+
+
 function loadPrivacy() {
   let patterns = [...GENERIC_PATTERNS]
   let redact = {}
@@ -79,14 +144,15 @@ function walk(dir, out = []) {
 }
 
 function parseArgs(argv) {
-  const out = { repoDir: DEFAULT_REPO_DIR, tags: [], dryRun: false }
+  const out = { repoDir: DEFAULT_REPO_DIR, tags: [], dryRun: false, bodyOnly: false }
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i]
     if (a === '--dry-run') out.dryRun = true
+    else if (a === '--body-only') out.bodyOnly = true
     else if (a === '--repo-dir') out.repoDir = argv[(i += 1)]
     else if (a === '--tags') out.tags = String(argv[(i += 1)] || '').split(',').map((s) => s.trim()).filter(Boolean)
     else if (a === '--help' || a === '-h') {
-      console.log('用法: node tools/release-assets.mjs [--dry-run] [--tags a,b] [--repo-dir DIR]')
+      console.log('用法: node tools/release-assets.mjs [--dry-run] [--body-only] [--tags a,b] [--repo-dir DIR]')
       process.exit(0)
     } else throw new Error(`未知参数：${a}`)
   }
@@ -210,21 +276,27 @@ function zipTree(dir, tag) {
 
 function releaseBody(tag, asset, commit, redact) {
   const kind = tag.includes('-preview') ? '预览版' : '正式版'
-  const lines = [
-    `**molly-qq-whale ${tag}**（${kind}，提交 \`${commit}\`）`,
-    '',
-    `- 附件：\`${asset.name}\`（${fmtSize(asset.bytes)}，${asset.files} 个文件）`,
-    `- sha256：\`${asset.sha}\``,
-  ]
-  if (redact && redact.replacements > 0) {
-    lines.push(
-      `- 隐私：该版本历史提交树里还残留 ${redact.replacements} 处真实 QQ 号/群号/token，**附件已就地脱敏**（换成占位符）后才打包；`,
-      '  如需彻底清理，请按 §9.5 重写历史后重新打 tag（旧 SHA 在 GitHub 上仍可下载，历史重写无法追回）。',
-    )
-  } else {
-    lines.push('- 隐私：打包前对该 tag 的提交树做了敏感串扫描（真实 QQ 号/群号、token、本机用户目录），0 命中；')
+  const lines = []
+  lines.push('**molly-qq-whale ' + tag + '**（' + kind + (commit ? '，提交 \`' + commit + '\`' : '') + '）')
+
+  const feats = RELEASE_FEATURES[tag]
+  if (feats && feats.length) {
+    lines.push('', '## 本版特性', ...feats.map((f) => '- ' + f))
   }
-  lines.push('- 内容来自发布仓库的该 tag 提交树，不含 `.git`、不含未提交文件。')
+
+  var replacements = redact && Number(redact.replacements) > 0 ? Number(redact.replacements) : 0
+  if (asset) {
+    lines.push('')
+    lines.push('- 附件：\`' + asset.name + '\`（' + fmtSize(asset.bytes) + (asset.files ? '，' + asset.files + ' 个文件' : '') + '）')
+    if (asset.sha) lines.push('- sha256：\`' + asset.sha + '\`')
+  }
+  lines.push('')
+  if (replacements > 0) {
+    lines.push('- 隐私：该版本历史提交树里还残留 ' + replacements + ' 处真实 QQ 号/群号/token，**附件已就地脱敏**（换成占位符）后才打包。')
+  } else {
+    lines.push('- 隐私：打包前对该 tag 的提交树做了敏感串扫描（真实 QQ 号/群号、token、本机用户目录），0 命中。')
+  }
+  lines.push('- 内容来自发布仓库的该 tag 提交树，不含 \`.git\`、不含未提交文件。')
   return lines.join('\n')
 }
 
@@ -277,7 +349,7 @@ async function main() {
 
   const allTags = git(repoDir, ['tag', '--list', '--sort=v:refname']).split(/\r?\n/).filter(Boolean)
   const tags = args.tags.length ? args.tags : allTags
-  for (const t of tags) if (!allTags.includes(t)) throw new Error(`tag 不存在：${t}`)
+  if (!args.bodyOnly) for (const t of tags) if (!allTags.includes(t)) throw new Error(`tag 不存在：${t}`)
 
   const repoInfo = parseRepo(repoDir)
   const token = args.dryRun ? '' : resolveToken(repoDir)
@@ -287,6 +359,27 @@ async function main() {
 
   const summary = []
   for (const tag of tags) {
+    if (args.bodyOnly) {
+      const rel = await gh(token, 'GET', '/repos/' + repoInfo.owner + '/' + repoInfo.repo + '/releases/tags/' + encodeURIComponent(tag))
+      if (!rel) throw new Error('release 不存在，无法只改正文：' + tag)
+      const assets = rel.assets || []
+      const zip = assets.find((a) => /\.zip$/i.test(a.name)) || assets[0] || null
+      const asset = zip
+        ? {
+            name: zip.name,
+            bytes: zip.size,
+            files: RELEASE_ASSET_FILES[tag] || 0,
+            sha: String(zip.digest || '').replace(/^sha256:/, ''),
+          }
+        : null
+      let commit = ''
+      try { commit = git(repoDir, ['rev-list', '-n', '1', tag]) } catch { commit = '' }
+      const redact = { replacements: RELEASE_REDACT[tag] || 0 }
+      const updated = await ensureRelease(token, repoInfo, tag, asset, commit, redact)
+      console.log('- ' + tag + ' 正文已更新（release #' + updated.id + '，附件 ' + (asset ? asset.name : '无') + '）')
+      summary.push({ tag, status: 'body-only', asset, redact })
+      continue
+    }
     const commit = git(repoDir, ['rev-list', '-n', '1', tag])
     process.stdout.write(`- ${tag}（${commit.slice(0, 7)}）导出… `)
     const dir = exportTag(repoDir, tag)

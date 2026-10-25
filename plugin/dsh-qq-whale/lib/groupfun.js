@@ -154,6 +154,10 @@ export class LotteryBox {
     this.send = send
     /** @type {Map<string, any>} gid → 场次 */
     this.rooms = new Map()
+    // 2026-10-26：诊断与自愈（历史事故：定时器没落地/丢失时，房间永远停在待开奖）
+    this.lastAuto = null
+    this.lastTick = null
+    this.sweeps = 0
   }
 
   /** 当前场次（只读） */
@@ -196,16 +200,7 @@ export class LotteryBox {
       timer: null,
     }
     const timer = setTimeout(() => {
-      this.draw({ gid: key, by: 'auto', config })
-        .then((res) => {
-          if (!res?.ok) return
-          // 到点自动开奖也得把结果喊出来，否则大家只看到一句「到点自动开奖」然后没了
-          return this.send(key, {
-            text: res.message,
-            at: (res.winners || []).map((w) => String(w.qq)),
-          })
-        })
-        .catch((err) => this.logger('warn', `抽奖自动开奖失败: ${err?.message || err}`))
+      this.sweep({ config, only: key }).catch((err) => this.logger('warn', `抽奖自动开奖失败: ${err?.message || err}`))
     }, dur * 1000)
     timer?.unref?.()
     room.timer = timer
@@ -279,6 +274,50 @@ export class LotteryBox {
       list.map((w, i) => `${i + 1}. @${w.nick}`).join('\n') +
       '\n恭喜以上朋友～'
     return { ok: true, message: msg, winners: list, entries: entries.length }
+  }
+
+  /**
+   * 开奖兜底：把已到期的场次开掉并通知。
+   * 主路径是 start() 的定时器；这里再做一层，任何群消息/心跳都会兜住
+   * （历史事故：23:22 到点后什么都没发生，房间却被删了——说明定时器路径不可靠）。
+   */
+  async sweep({ config = {}, only = '' } = {}) {
+    const onlyKey = only ? String(only) : ''
+    const due = [...this.rooms.values()].filter(
+      (room) => (!onlyKey || room.gid === onlyKey) && Number(room.endsAt) <= this.now(),
+    )
+    const out = []
+    for (const room of due) {
+      const gid = room.gid
+      try {
+        const res = await this.draw({ gid, by: 'auto', config })
+        let sent = false
+        if (res?.ok) {
+          await this.send(gid, { text: res.message, at: (res.winners || []).map((w) => String(w.qq)) })
+          sent = true
+        }
+        this.lastAuto = {
+          at: new Date().toISOString(),
+          gid,
+          ok: !!res?.ok,
+          sent,
+          winners: (res?.winners || []).length,
+        }
+        out.push(this.lastAuto)
+      } catch (err) {
+        this.lastAuto = { at: new Date().toISOString(), gid, ok: false, error: String(err?.message || err) }
+        this.logger('warn', `抽奖兜底开奖失败：${err?.message || err}`)
+        out.push(this.lastAuto)
+      }
+    }
+    if (due.length) this.sweeps += 1
+    return out
+  }
+
+  /** 心跳：记录插件进程内的定时器是否还活着，并顺带扫尾。 */
+  async tick({ config = {} } = {}) {
+    this.lastTick = new Date().toISOString()
+    return this.sweep({ config })
   }
 
   /** 取消（只有发起人）。 */

@@ -45,6 +45,12 @@ const SECRETS_FILE = process.env.MOLLY_RELEASE_SECRETS || path.join(process.cwd(
 
 /* ── 每个版本的「本版特性」：写进 release 正文，让仓库读者一眼看到改了什么 ── */
 const RELEASE_FEATURES = {
+  'v1.1.3-plus.3': [
+    '修复抽奖自动开奖时 @ 消息段字段错位（导致到点开奖消息被拒发、群里看起来没开奖）',
+    '群趣味新增 15 秒心跳扫尾（sweep / lastTick / lastAuto），到点漏开会自动补开',
+    '新增本地调试路由 POST /dsh-qq-whale/lottery/simulate（以指定群员身份驱动抽奖/欢迎命令）',
+    '升级：无需改配置；原先卡住的抽奖可在下一轮验证',
+  ],
   'v1.0.0': [
     '首个正式版：记忆、表情包、语音、QQ 空间、自愈、控制台全部跑通闭环',
     '插件化跑在 DeepSeek Harness 宿主上（lib/boot.js 热更新，改插件不用重启宿主）',
@@ -139,11 +145,13 @@ const RELEASE_FEATURES = {
 
 /* 旧版本附件里的文件数（GitHub API 不回报文件数，这里记住） */
 const RELEASE_ASSET_FILES = {
+  'v1.1.3-plus.3': 0,
   'v1.0.0': 150, 'v1.1.0': 155, 'v1.1.1': 156, 'v1.1.2': 158,
   'v1.1.3-preview.1': 158, 'v1.1.3-preview.2': 159, 'v1.1.3-preview.3': 160,
-  'v1.1.3': 161, 'v1.1.3-Hotfix.1': 161, 'v1.1.3-Hotfix.2': 162, 'v1.1.5-preview.1': 162, 
+  'v1.1.3': 161, 'v1.1.3-Hotfix.1': 161, 'v1.1.3-Hotfix.2': 162, 'v1.1.5-preview.1': 166, 
   'v1.1.3-plus.1': 166,
-  'v1.1.5-preview.3': 166, 'v1.1.5-preview.2': 162, 'voice-pack-v1.0': 76,
+  'v1.1.3-plus.2': 166,
+  'v1.1.5-preview.3': 166, 'v1.1.5-preview.2': 166, 'voice-pack-v1.0': 76,
 }
 
 /* 旧版本脱敏命中数（正文里如实披露，body-only 刷新时沿用） */

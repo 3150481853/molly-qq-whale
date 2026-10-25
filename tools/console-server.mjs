@@ -105,7 +105,7 @@ const PORT = Number(pick('MOLLY_CONSOLE_PORT', 'port', 19392)) || 19392;
 // 控制台版本：以插件 package.json 为唯一真源，别在这里写死（2026-10-25 主人 m03522：
 // 左下角一直显示 v1.0.0 就是这一行写死的；发布版本与插件版本从此自动同步）。
 // exe 模式读不到 package.json 时退回 FALLBACK_VERSION，保证打包版也有版本号。
-const FALLBACK_VERSION = '1.1.3-plus.2';
+const FALLBACK_VERSION = '1.1.3-plus.3';
 const VERSION = (() => {
   try {
     const pkg = JSON.parse(

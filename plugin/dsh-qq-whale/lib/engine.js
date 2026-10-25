@@ -434,13 +434,21 @@ export class ChatEngine {
             send: async (gid, payload) => {
               const text = String(payload?.text || '')
               const ats = Array.isArray(payload?.at) ? payload.at.filter(Boolean) : []
-              const parts = ats.map((qq) => ({ type: 'at', data: { qq: String(qq) } }))
+              const parts = ats.map((qq) => ({ type: 'at', qq: String(qq) }))
               if (text) parts.push({ type: 'text', text })
               if (!parts.length) return
               await this.client.sendGroupMsg(gid, buildMessage(parts))
             },
           })
     this.welcomeAt = new Map()
+    // 2026-10-26（主人 m06713 事故）：插件进程里的定时器不可靠，
+    // 加一个 15 秒心跳做兜底扫尾；/state.groupfun.lastTick 用来判断定时器活没活。
+    if (this.groupfun) {
+      this.lotteryTicker = setInterval(() => {
+        this.groupfun?.tick?.({ config: this.config }).catch(() => {})
+      }, 15000)
+      this.lotteryTicker?.unref?.()
+    }
 
     /**
      * 逐条决策记录（2026-10-21，真机验收用）。
@@ -1500,6 +1508,8 @@ export class ChatEngine {
    */
   async maybeGroupFun({ ev, text }) {
     if (!this.groupfun) return null
+    // 每条群消息顺带扫一次到期场次（兜底，不等定时器）
+    void this.groupfun.sweep({ config: this.config }).catch(() => {})
     if (String(ev?.message_type || '') !== 'group') return null
     const gid = String(ev?.group_id || '')
     if (!gid) return null
@@ -1508,7 +1518,7 @@ export class ChatEngine {
     const reply = async (res) => {
       if (!res?.message) return
       const ats = Array.isArray(res.at) ? res.at.filter(Boolean) : []
-      const parts = ats.map((qq) => ({ type: 'at', data: { qq: String(qq) } }))
+      const parts = ats.map((qq) => ({ type: 'at', qq: String(qq) }))
       parts.push({ type: 'text', text: res.message })
       try {
         await this.client.sendGroupMsg(gid, buildMessage(parts))

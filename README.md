@@ -13,7 +13,7 @@
 基于 **DeepSeek Harness** 的 QQ 通道插件：稳定的人设、长期记忆、表情包习惯、会发语音，
 以及一个能看懂她此刻在干什么的控制台。
 
-**v1.1.3-plus.2** —— 小玩具统一入口：**`@我 #`** 打开小玩具菜单（`@我 #抽奖` 直达抽奖菜单；菜单同时也是使用说明）。这次新增 / 加强的都是群趣味：①**抽奖**（`@我 抽奖` 发菜单；`抽奖 开 3 人 60秒` 开局，`参加` 报名，`抽奖 开奖` / `取消` / `名单`，到点自动开奖，每群同时一场）；②**口令抽奖**（`抽奖 口令 干饭 3 人 60秒`：窗口内发「干饭」的人才算参加，到点只从这些人里抽，整句匹配）；③**新人欢迎**（有人入群自动欢迎，`welcomeTexts` 可自定义模板与 `{name}/{group}/{molly}` 占位符，60 秒冷却）。总开关 `groupfunEnabled`，分开关 `lotteryEnabled` / `welcomeEnabled`，都在 `cordis.patch.yml`；口令长度上限 `lotteryKeywordMaxChars`（默认 16）。
+**v1.1.3-plus.3** —— 修「抽奖到点不开奖」：自动开奖时 @ 中奖者的消息段字段放错了位置（`{ type:'at', data:{ qq } }`），SnowLuma 直接拒发整条消息、且只在本机 `/state.groupfun.lastAuto` 留痕，群里看起来就是「到点了没开」。已改成 `{ type:'at', qq }`，并给它加了 15 秒心跳扫尾兜底（`sweep`/`lastTick`/`lastAuto` 可在 `/state` 查）。另新增本地调试路由 `POST /dsh-qq-whale/lottery/simulate`（以任意群员身份驱动抽奖/欢迎命令，只绑 127.0.0.1，需知道宿主端口）。上一版 **v1.1.3-plus.2** —— 小玩具统一入口：**`@我 #`** 打开小玩具菜单（`@我 #抽奖` 直达抽奖菜单；菜单同时也是使用说明）。这次新增 / 加强的都是群趣味：①**抽奖**（`@我 抽奖` 发菜单；`抽奖 开 3 人 60秒` 开局，`参加` 报名，`抽奖 开奖` / `取消` / `名单`，到点自动开奖，每群同时一场）；②**口令抽奖**（`抽奖 口令 干饭 3 人 60秒`：窗口内发「干饭」的人才算参加，到点只从这些人里抽，整句匹配）；③**新人欢迎**（有人入群自动欢迎，`welcomeTexts` 可自定义模板与 `{name}/{group}/{molly}` 占位符，60 秒冷却）。总开关 `groupfunEnabled`，分开关 `lotteryEnabled` / `welcomeEnabled`，都在 `cordis.patch.yml`；口令长度上限 `lotteryKeywordMaxChars`（默认 16）。
 
 上一版 **v1.1.3-plus.1** —— 群趣味：**抽奖**（群里 @我 + 「抽奖」发菜单；「抽奖 开 3 人 60秒」开局，「参加」报名，「开奖」「取消」「名单」，到点自动开奖，每群同时只能一场）+ **新人欢迎**（有人入群自动欢迎，`welcomeTexts` 可自定义模板与 `{name}/{group}/{molly}` 占位符，60 秒冷却）；总开关 `groupfunEnabled`，分开关 `lotteryEnabled` / `welcomeEnabled`，都在 `cordis.patch.yml`。
 

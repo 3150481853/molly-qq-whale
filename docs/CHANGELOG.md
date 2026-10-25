@@ -7,6 +7,20 @@
 
 ---
 
+## 2026-10-26 · v1.1.3-plus.3：抽奖 @ 段修复（自动开奖能发了）+ 本地调试路由
+
+> 主人 m06713：「Molly刚刚没开奖是因为发言被我关了吗」→ 实为消息段字段错误；m06903：「先自己测一下能不能开奖，而且要模拟真人用@molly # 使用抽奖机，不要用你自己的 LLM 链路」。
+
+**1）根因** 自动开奖的 @ 段写成 `{ type:'at', data:{ qq } }`，而 SnowLuma 的协议是 `{ type:'at', qq }`；发送时整条消息被拒（`message segment "at" is missing required or usable fields`），异常被发送层吞掉，只落在 `/state.groupfun.lastAuto.error`。
+
+**2）修复** `lib/engine.js` 两处构造 @ 段改为 `{ type:'at', qq: String(qq) }`。
+
+**3）兜底** `lib/groupfun.js` 新增 `sweep()`（到点未开的房间补开）与 `tick()` 心跳；`engine` 每 15 秒调一次；`/state.groupfun` 暴露 `lastTick` / `lastAuto` / `sweeps`。
+
+**4）自测** `out/_lottery_sweep_test.mjs` 15 项、`_lottery_keyword_test.mjs` 33 项、`_groupfun_test.mjs` 51 项全过；并在群 666666666 用调试路由实跑一局（3 人报名 → 到点开奖 @ 三位，`lastAuto.ok=true, sent=true`）。
+
+---
+
 ## 2026-10-25 · v1.1.3-plus.2：小玩具统一入口 @我 #（含抽奖 / 口令抽奖 / 新人欢迎）
 
 > 主人 m06563：「触发菜单的命令就用@Molly+空格+#吧，以后的小玩具都这样」。

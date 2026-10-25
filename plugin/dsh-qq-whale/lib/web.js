@@ -371,6 +371,11 @@ export class WebWidget {
             welcomed: e.stats?.welcomeSent || 0,
             failed: e.stats?.lotterySendFail || 0,
           },
+          // 2026-10-26（主人 m06713）：到点没开奖的排查口——
+          // lastTick 持续前进 = 插件内定时器活着；stalled 不动 = 定时器已停。
+          lastTick: e.groupfun?.lastTick || null,
+          lastAuto: e.groupfun?.lastAuto || null,
+          sweeps: e.groupfun?.sweeps || 0,
         }
         out.poke = {
           enabled: e.config?.pokeEnabled !== false,
@@ -1939,6 +1944,69 @@ export class WebWidget {
           })
         } catch (err) {
           sendJson(res, 500, { ok: false, error: String(err?.message || err) })
+        }
+      }),
+    })
+
+    /*
+     * POST /dsh-qq-whale/lottery/simulate ?? ???????????????
+     * ????????? / ???? / ?????????????????????
+     * body: { groupId, userId, card?, text }
+     */
+    add({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/lottery/simulate`,
+      ...wrap(async (req, res) => {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          return
+        }
+        const raw = await readBody(req)
+        let body
+        try {
+          body = JSON.parse(raw || '{}')
+        } catch {
+          sendJson(res, 400, { ok: false, error: 'bad json' })
+          return
+        }
+        const rawText = String(body?.text || '').trim()
+        const groupId = String(body?.groupId || '')
+        const userId = String(body?.userId || '')
+        // ??????????? @Molly ???????????????????
+        let text = rawText.replace(/^\[CQ:at,[^\]]*\]\s*/gu, '').trim()
+        text = text.replace(/^@\S+\s+/u, '').trim()
+        if (!text || !groupId || !userId) {
+          sendJson(res, 400, { ok: false, error: 'groupId/userId/text ????' })
+          return
+        }
+        const e = this.engineRef()
+        if (!e?.maybeGroupFun) {
+          sendJson(res, 503, { ok: false, error: 'engine ????' })
+          return
+        }
+        const ev = {
+          post_type: 'message',
+          message_type: 'group',
+          group_id: Number(groupId),
+          user_id: Number(userId),
+          message_id: Date.now() % 1000000,
+          time: Math.floor(Date.now() / 1000),
+          raw_message: text,
+          sender: { card: String(body?.card || ''), nickname: String(body?.card || '') },
+          message: [{ type: 'text', data: { text } }],
+        }
+        try {
+          const out = await e.maybeGroupFun({ ev, text })
+          const gf = e.groupfun
+          sendJson(res, 200, {
+            ok: true,
+            text,
+            result: out || null,
+            rooms: gf?.rooms ? gf.rooms.size : null,
+            lastAuto: gf?.lastAuto || null,
+          })
+        } catch (err) {
+          sendJson(res, 500, { ok: false, error: String(err?.stack || err).slice(0, 1500) })
         }
       }),
     })

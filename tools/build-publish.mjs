@@ -66,6 +66,11 @@ const FILES = [
   // 没进白名单会被下一次「白名单复制」当孤儿文件删掉 —— 真发生过一次）
   ['publish-assets/CONTRIBUTING.md', 'CONTRIBUTING.md'],
   ['tools/console-server.mjs', 'tools/console-server.mjs'],
+  // 2026-10-26（部署者反馈 m03205）：大看板的「概览 / 记忆 / 表情」数据来自 127.0.0.1:19391
+  // 的 sidecar，就是 panel-data.mjs。它没进发布包 → 部署方一进控制台就是
+  // 「数据服务 19391 不可达」，三块数据全空。白名单是显式列举的，漏了就永远发不出去。
+  ['tools/panel-data.mjs', 'tools/panel-data.mjs'],
+  ['tools/resolve-paths.mjs', 'tools/resolve-paths.mjs'],
   ['tools/watchdog.mjs', 'tools/watchdog.mjs'],
   ['tools/watchdog-hidden.vbs', 'tools/watchdog-hidden.vbs'],
   ['tools/install-watchdog.cmd', 'tools/install-watchdog.cmd'],

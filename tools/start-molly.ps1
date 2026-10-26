@@ -1,4 +1,4 @@
-﻿# ============================================================
+# ============================================================
 # 一键拉起 Molly（QQ 111111111 + NapCat + OneBot11）
 #
 # 为什么要写成脚本：启动 NapCat 要设 5 个环境变量、路径还都是绝对路径，
@@ -200,10 +200,22 @@ if (-not $Status) {
 try {
   $panelUp = [bool](Get-NetTCPConnection -State Listen -LocalPort 19391 -ErrorAction SilentlyContinue)
   if (-not $panelUp) {
-    $nodeExe = '${HOME}\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe'
+    # 2026-10-26（部署者反馈 m03205）：这里原来写死作者机的 node 绝对路径，
+    # 换台机器就 Exec format/no such file。改成 MOLLY_NODE > PATH 里的 node > 历史路径兜底。
+    $nodeExe = $env:MOLLY_NODE
+    if (-not $nodeExe) {
+      $cmd = Get-Command node -ErrorAction SilentlyContinue
+      if ($cmd) { $nodeExe = $cmd.Source }
+    }
+    if (-not $nodeExe) {
+      $legacy = '${HOME}\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe'
+      if (Test-Path $legacy) { $nodeExe = $legacy }
+    }
+    if (-not $nodeExe) { throw '找不到 node：请把 node 加进 PATH，或设置环境变量 MOLLY_NODE' }
     $panelJs = Join-Path $PSScriptRoot 'panel-data.mjs'
     $outDir = Join-Path (Split-Path $PSScriptRoot -Parent) 'out'
     if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
+    # dataDir 由 panel-data.mjs 自己解析：MOLLY_DATA_DIR > 插件配置里的 dataDir > 默认值。
     Start-Process -FilePath $nodeExe -ArgumentList @($panelJs) -WindowStyle Hidden `
       -RedirectStandardOutput (Join-Path $outDir 'panel-data.log') `
       -RedirectStandardError  (Join-Path $outDir 'panel-data.log.err')

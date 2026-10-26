@@ -647,7 +647,7 @@ export const DEFAULTS = {
   lotteryMaxCount: 10,
   lotteryDefaultSeconds: 120,
   lotteryMinSeconds: 30,
-  lotteryMaxSeconds: 600,
+  lotteryMaxSeconds: 3600,
   lotteryJoinKeyword: '参加',
   welcomeEnabled: true,
   welcomeCooldownSeconds: 60,
@@ -945,7 +945,7 @@ function _configShapeReference(Schema) {
     lotteryMaxCount: s.natural().default(DEFAULTS.lotteryMaxCount).description('一次最多抽几个人（默认 10）'),
     lotteryDefaultSeconds: s.natural().default(DEFAULTS.lotteryDefaultSeconds).description('默认报名时长（秒，默认 120）'),
     lotteryMinSeconds: s.natural().default(DEFAULTS.lotteryMinSeconds).description('报名时长下限（秒，默认 30）'),
-    lotteryMaxSeconds: s.natural().default(DEFAULTS.lotteryMaxSeconds).description('报名时长上限（秒，默认 600）'),
+    lotteryMaxSeconds: s.natural().default(DEFAULTS.lotteryMaxSeconds).description('报名时长上限（秒，默认 3600，也就是 1 小时）'),
     lotteryJoinKeyword: s.string().default(DEFAULTS.lotteryJoinKeyword).description('报名关键词（默认「参加」）'),
     welcomeEnabled: s.boolean().default(DEFAULTS.welcomeEnabled).description('新人入群自动欢迎'),
     welcomeCooldownSeconds: s.natural().default(DEFAULTS.welcomeCooldownSeconds).description('同一群两次欢迎的最小间隔（秒，默认 60）'),
@@ -1659,11 +1659,18 @@ export function apply(root, rawConfig = {}) {
           return
         }
         if (config.blindMode) return
-        if (ev.notice_type === 'notify' && ev.sub_type === 'poke') {
-          engine
-            ?.onNotice?.(ev)
-            .catch((err) => logger('warn', `处理戳一戳失败: ${err?.message || err}`))
-        }
+        /*
+         * 2026-10-26（主人 m07147：「你新人欢迎又是我手动的」）。
+         *
+         * 这里原来只把 poke 递给 engine，group_increase 一路落到 return 被静默
+         * 丢弃 —— 表现就是「新人入群从不自动欢迎，只能主人手动发一句」。
+         *
+         * 现在所有 notice 都交给 engine.onNotice 判：它在内部先看 group_increase
+         * （新人欢迎），再处理 poke（反戳/回话），其它类型一律返回 ignored。
+         */
+        engine
+          ?.onNotice?.(ev)
+          .catch((err) => logger('warn', `处理通知事件失败: ${err?.message || err}`))
         return
       }
     } catch (err) {

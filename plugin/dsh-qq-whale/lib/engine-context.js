@@ -37,6 +37,7 @@ export function buildSystemPrompt(input, deps) {
     degraded = false,
     research = '',
     groupEcho = false,
+    groupCrowd = null,
   } = input
     let sp = deps.persona.systemPrompt({
       scene,
@@ -79,6 +80,24 @@ export function buildSystemPrompt(input, deps) {
         '- 内容长就拆成几条发，每条一两句，用 <sep/> 分隔——别一次塞一大段。\n' +
         '- 翻译、解释、原文照贴的活，把内容照实给出来，别省略、别只给结论。\n' +
         '- 隐私和凭据（手机号、身份证、密码、token、别人的私聊截图）仍然不能贴。'
+    }
+
+    /*
+     * 群里人多的时候（2026-10-26，主人 m0xxxx「引用不能精确」）。
+     *
+     * 真机现象：好几个人同时在群里说话，她一条回复把两三个人的话都接住了，
+     * 引用框却只能挂一条——用户看到的就是「说的和引用框对不上」。
+     * 这里给两条出路：能接清楚就只接最近那一条（引用框锁的就是它）；
+     * 实在太多，就明说人多、只答最要紧的一两句，别硬答所有人。
+     */
+    const crowd = groupCrowd
+    if (crowd && Number(crowd.count) >= 3 && Number(crowd.speakers) >= 2) {
+      sp +=
+        '\n\n# 这会儿群里人多\n' +
+        `最近半分钟有 ${crowd.speakers} 个人在说话（${crowd.count} 条）。\n` +
+        '- 这条回复**只接最近的那一条**（带引用框，引用框锁的是它）——别把别人刚说的话挤进同一个回答里。\n' +
+        '- 几条话都在等你，就先回最要紧、最新的那个，剩下的等下一轮。\n' +
+        '- 实在接不过来就直说「你们一下说这么多我跟不上」，点一两个名字接话，别硬答所有人。'
     }
 
     /*

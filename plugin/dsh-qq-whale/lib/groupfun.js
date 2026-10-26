@@ -26,7 +26,7 @@ export const GROUPFUN_DEFAULTS = {
   lotteryMaxCount: 10,
   lotteryDefaultSeconds: 120,
   lotteryMinSeconds: 30,
-  lotteryMaxSeconds: 600,
+  lotteryMaxSeconds: 3600,
   lotteryJoinKeyword: '参加',
   lotteryKeywordMaxChars: 16,
   // 新人欢迎
@@ -37,7 +37,7 @@ export const GROUPFUN_DEFAULTS = {
 }
 
 export const LOTTERY_MENU_TIPS = `🎁 抽奖菜单（@我 + 抽奖 触发；以后小玩具统一用 @我 #）
-· 开一场：  抽奖 开 3 人 60秒   （名额 1-10，时长 30-600 秒，可省略）
+· 开一场：  抽奖 开 3 人 10分   （名额 1-10，时长 30 秒 - 1 小时，可省略）
 · 报名：    抽奖 参加   （开奖前都能报，也可以直接发「参加」）
 · 口令场：  抽奖 口令 干饭 3 人 60秒   （只有发「干饭」的人才算参加）
 · 提前开奖：抽奖 开奖   （只有发起人能开）
@@ -105,9 +105,11 @@ export function parseLotteryCommand(raw, opts = {}) {
     const countMatch = tail.match(/(\d{1,2})\s*(?:人|位|个)/u)
     const secMatch = tail.match(/(\d{1,4})\s*(?:秒|s|S)/u)
     const minMatch = tail.match(/(\d{1,3})\s*(?:分钟|分|min)/iu)
+    const hourMatch = tail.match(/(\d{1,2})\s*(?:个?小时|钟头|h|H)/u)
     const count = countMatch ? Number(countMatch[1]) : undefined
     let seconds
-    if (secMatch) seconds = Number(secMatch[1])
+    if (hourMatch) seconds = Number(hourMatch[1]) * 3600
+    else if (secMatch) seconds = Number(secMatch[1])
     else if (minMatch) seconds = Number(minMatch[1]) * 60
     return { kind: 'start', keyword, count, seconds }
   }
@@ -116,9 +118,11 @@ export function parseLotteryCommand(raw, opts = {}) {
     const countMatch = rest.match(/(\d{1,2})\s*(?:人|位|个)/u)
     const secMatch = rest.match(/(\d{1,4})\s*(?:秒|s|S)/u)
     const minMatch = rest.match(/(\d{1,3})\s*(?:分钟|分|min)/iu)
+    const hourMatch = rest.match(/(\d{1,2})\s*(?:个?小时|钟头|h|H)/u)
     const count = countMatch ? Number(countMatch[1]) : undefined
     let seconds
-    if (secMatch) seconds = Number(secMatch[1])
+    if (hourMatch) seconds = Number(hourMatch[1]) * 3600
+    else if (secMatch) seconds = Number(secMatch[1])
     else if (minMatch) seconds = Number(minMatch[1]) * 60
     const kwMatch = rest.match(/(?:口令|暗号)\s*([^\s\d]{1,16})/u)
     return { kind: 'start', count, seconds, keyword: kwMatch ? kwMatch[1] : undefined }
@@ -147,13 +151,25 @@ export class LotteryBox {
    *   send?: (gid: string, payload: {text: string, at?: string[]}) => Promise<any>,
    * }} opts
    */
-  constructor({ logger = () => {}, now = Date.now, random = Math.random, send = async () => {} } = {}) {
+  constructor({
+    logger = () => {},
+    now = Date.now,
+    random = Math.random,
+    send = async () => {},
+    onDraw = () => {},
+  } = {}) {
     this.logger = logger
     this.now = now
     this.random = random
     this.send = send
+    // 2026-10-26（主人 m07064）：自动/兜底开奖也要能被 engine 计数
+    this.onDraw = typeof onDraw === 'function' ? onDraw : () => {}
     /** @type {Map<string, any>} gid → 场次 */
     this.rooms = new Map()
+    // 2026-10-26：诊断与自愈（历史事故：定时器没落地/丢失时，房间永远停在待开奖）
+    this.lastAuto = null
+    this.lastTick = null
+    this.sweeps = 0
   }
 
   /** 当前场次（只读） */
@@ -196,16 +212,7 @@ export class LotteryBox {
       timer: null,
     }
     const timer = setTimeout(() => {
-      this.draw({ gid: key, by: 'auto', config })
-        .then((res) => {
-          if (!res?.ok) return
-          // 到点自动开奖也得把结果喊出来，否则大家只看到一句「到点自动开奖」然后没了
-          return this.send(key, {
-            text: res.message,
-            at: (res.winners || []).map((w) => String(w.qq)),
-          })
-        })
-        .catch((err) => this.logger('warn', `抽奖自动开奖失败: ${err?.message || err}`))
+      this.sweep({ config, only: key }).catch((err) => this.logger('warn', `抽奖自动开奖失败: ${err?.message || err}`))
     }, dur * 1000)
     timer?.unref?.()
     room.timer = timer
@@ -279,6 +286,55 @@ export class LotteryBox {
       list.map((w, i) => `${i + 1}. @${w.nick}`).join('\n') +
       '\n恭喜以上朋友～'
     return { ok: true, message: msg, winners: list, entries: entries.length }
+  }
+
+  /**
+   * 开奖兜底：把已到期的场次开掉并通知。
+   * 主路径是 start() 的定时器；这里再做一层，任何群消息/心跳都会兜住
+   * （历史事故：23:22 到点后什么都没发生，房间却被删了——说明定时器路径不可靠）。
+   */
+  async sweep({ config = {}, only = '' } = {}) {
+    const onlyKey = only ? String(only) : ''
+    const due = [...this.rooms.values()].filter(
+      (room) => (!onlyKey || room.gid === onlyKey) && Number(room.endsAt) <= this.now(),
+    )
+    const out = []
+    for (const room of due) {
+      const gid = room.gid
+      try {
+        const res = await this.draw({ gid, by: 'auto', config })
+        let sent = false
+        if (res?.ok) {
+          await this.send(gid, { text: res.message, at: (res.winners || []).map((w) => String(w.qq)) })
+          sent = true
+          try {
+            this.onDraw({ gid, winners: res.winners || [], mode: room.mode || 'open' })
+          } catch (err) {
+            this.logger('warn', `抽奖开奖回调失败: ${err?.message || err}`)
+          }
+        }
+        this.lastAuto = {
+          at: new Date().toISOString(),
+          gid,
+          ok: !!res?.ok,
+          sent,
+          winners: (res?.winners || []).length,
+        }
+        out.push(this.lastAuto)
+      } catch (err) {
+        this.lastAuto = { at: new Date().toISOString(), gid, ok: false, error: String(err?.message || err) }
+        this.logger('warn', `抽奖兜底开奖失败：${err?.message || err}`)
+        out.push(this.lastAuto)
+      }
+    }
+    if (due.length) this.sweeps += 1
+    return out
+  }
+
+  /** 心跳：记录插件进程内的定时器是否还活着，并顺带扫尾。 */
+  async tick({ config = {} } = {}) {
+    this.lastTick = new Date().toISOString()
+    return this.sweep({ config })
   }
 
   /** 取消（只有发起人）。 */

@@ -96,7 +96,7 @@ const { PokeReactor, isPokeNotice } = await import(sub('./poke.js'))
 const { LotteryBox, LOTTERY_MENU_TIPS, TOY_MENU_TIPS, buildToyMenu, parseLotteryCommand, buildWelcome, parseGroupIncrease } =
   await import(sub('./groupfun.js'))
 // 「@ 谁 / 引用哪条」（2026-10-25，主人 m02736 + m02835）：纯函数模块，单测直接跑。
-const { isPureNudge, resolveExplicitAt, pickQuoteTarget, shouldDemoteVoice, voicePartToText } = await import(sub('./quote-at.js'))
+const { isPureNudge, resolveExplicitAt, pickQuoteTarget, crowdStats, shouldDemoteVoice, voicePartToText } = await import(sub('./quote-at.js'))
 // 动图理解（2026-10-26，主人 m04893）：GIF 只解码首帧 → 采样成多帧拼图再给模型。
 // 依赖 python+PIL（lib/gif-frames.js 内联脚本），缺环境时自动回退原图。
 const { gifContactSheet } = await import(sub('./gif-frames.js'))
@@ -435,13 +435,18 @@ export class ChatEngine {
             send: async (gid, payload) => {
               const text = String(payload?.text || '')
               const ats = Array.isArray(payload?.at) ? payload.at.filter(Boolean) : []
-              const parts = ats.map((qq) => ({ type: 'at', data: { qq: String(qq) } }))
+              const parts = ats.map((qq) => ({ type: 'at', qq: String(qq) }))
               if (text) parts.push({ type: 'text', text })
               if (!parts.length) return
               await this.client.sendGroupMsg(gid, buildMessage(parts))
             },
+            // 2026-10-26（主人 m07064）：自动/兜底开奖也计入 lotteryDrawn
+            onDraw: () => {
+              this.stats.lotteryDrawn += 1
+            },
           })
     this.welcomeAt = new Map()
+    this.groupfunTimer = null
 
     /**
      * 逐条决策记录（2026-10-21，真机验收用）。
@@ -865,6 +870,8 @@ export class ChatEngine {
     this.logger('info', `模型：${this.config.provider} / ${this.config.model}`)
     // 备用脑健康检查（用户 m15166：只要健康检查）
     this.startTraeHealthLoop()
+    // 抽奖兜底心跳（2026-10-26 事故：到点没发公告）
+    this.startGroupfunHeartbeat()
   }
 
   /**
@@ -924,6 +931,29 @@ export class ChatEngine {
     if (this.traeHealthInterval) clearInterval(this.traeHealthInterval)
     this.traeHealthTimer = null
     this.traeHealthInterval = null
+  }
+
+  /**
+   * 抽奖兜底心跳（2026-10-26）。
+   * 历史事故：到点后什么都没发，房间却被删了 —— 说明「定时器到点就开」这条路不可靠。
+   * 每 15 秒扫一次已到期的房间补开；`/state.groupfun.lastTick` 用来看心跳还活不活。
+   */
+  startGroupfunHeartbeat() {
+    if (!this.groupfun || this.groupfunTimer) return
+    const beat = () => {
+      this.groupfun
+        .tick({ config: this.config })
+        .catch((err) => this.logger('debug', `抽奖心跳异常：${err?.message || err}`))
+    }
+    const interval = Number(this.config.groupfunTickMs) || 15000
+    this.groupfunTimer = setInterval(beat, interval)
+    if (typeof this.groupfunTimer?.unref === 'function') this.groupfunTimer.unref()
+  }
+
+  /** 停掉抽奖心跳（热重载时不留悬挂定时器） */
+  stopGroupfunHeartbeat() {
+    if (this.groupfunTimer) clearInterval(this.groupfunTimer)
+    this.groupfunTimer = null
   }
 
   // ———————————————— 会话状态 ————————————————
@@ -1504,12 +1534,14 @@ export class ChatEngine {
     if (String(ev?.message_type || '') !== 'group') return null
     const gid = String(ev?.group_id || '')
     if (!gid) return null
+    // 2026-10-26：任何群消息都顺带兜一次「到点没开的房间」（定时器不可靠时靠这里救）
+    void this.groupfun.sweep({ config: this.config }).catch(() => {})
     const uid = String(ev.user_id || '')
     const nick = String(ev.sender?.card || ev.sender?.nickname || uid)
     const reply = async (res) => {
       if (!res?.message) return
       const ats = Array.isArray(res.at) ? res.at.filter(Boolean) : []
-      const parts = ats.map((qq) => ({ type: 'at', data: { qq: String(qq) } }))
+      const parts = ats.map((qq) => ({ type: 'at', qq: String(qq) }))
       parts.push({ type: 'text', text: res.message })
       try {
         await this.client.sendGroupMsg(gid, buildMessage(parts))
@@ -3895,6 +3927,17 @@ export class ChatEngine {
      */
     const echo = this.detectGroupEcho({ ev, norm, scene, conv })
 
+    /*
+     * 群里吵不吵（2026-10-26，主人：「引用不精确 / 人太多就只回一部分」）。
+     * 只用来看提示词：人多的时候明确告诉她「这条只接最近那一条」，
+     * 别一口气把好几个人刚说的话都塞进同一个回答里。
+     */
+    const groupCrowd = isGroup
+      ? crowdStats(conv?.history, this.now(), {
+          windowSeconds: Number(this.config.groupQuoteWindowSeconds ?? 30),
+        })
+      : null
+
     try {
       this.traceReply(key, 'start', { scene })
       const delay = this.config.debounceMs ?? 1500
@@ -3915,6 +3958,7 @@ export class ChatEngine {
         mood,
         signal: controller.signal,
         groupEcho: echo,
+        groupCrowd,
       })
       if (controller.signal.aborted) {
         this.traceReply(key, 'aborted', { where: 'generate' })
@@ -4081,7 +4125,7 @@ export class ChatEngine {
   /**
    * 组织上下文并调用模型，拿到切分后的回复计划。
    */
-  async generate({ ev, norm, scene, conv, userName, groupName, mood, signal, groupEcho = null }) {
+  async generate({ ev, norm, scene, conv, userName, groupName, mood, signal, groupEcho = null, groupCrowd = null }) {
     /*
      * 免费额度用完了没有？这是每轮的第一道判断。
      *
@@ -4183,6 +4227,8 @@ export class ChatEngine {
       research: research?.ok ? research.summary : '',
       // 2026-10-24 需求①：对方明确要求/坚持发群里 → 提示词里就别再教她推私聊
       groupEcho: Boolean(groupEcho?.active),
+      // 2026-10-26：群里人多时，让她只接最近那一条（引用框会锁定它）
+      groupCrowd,
     })
     if (stall.hardStop) system += `\n\n${this.stallStopSection(stall.misses)}`
     const messages = await this.buildMessages(conv, norm, userName, { degraded: budgetOut })

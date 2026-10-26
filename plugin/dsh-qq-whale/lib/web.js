@@ -363,7 +363,15 @@ export class WebWidget {
           enabled: e.config?.groupfunEnabled !== false,
           lotteryEnabled: e.config?.lotteryEnabled !== false,
           welcomeEnabled: e.config?.welcomeEnabled !== false,
+          // 生效中的时长上下限（2026-10-26 主人 m02771：抽奖最大 1 小时）——
+          // 配置改了要看得出到底读没读到新值
+          maxSeconds: Number(e.config?.lotteryMaxSeconds ?? 0),
+          minSeconds: Number(e.config?.lotteryMinSeconds ?? 0),
           rooms: e.groupfun?.rooms?.size || 0,
+          // 兜底心跳诊断（2026-10-26 事故：到点没发公告，看不出定时器活没活）
+          lastTick: e.groupfun?.lastTick || null,
+          lastAuto: e.groupfun?.lastAuto || null,
+          sweeps: Number(e.groupfun?.sweeps || 0),
           stats: {
             started: e.stats?.lotteryStarted || 0,
             joined: e.stats?.lotteryJoined || 0,

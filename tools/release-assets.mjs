@@ -50,6 +50,14 @@ const SECRETS_FILE = process.env.MOLLY_RELEASE_SECRETS || path.join(process.cwd(
 
 /* ── 每个版本的「本版特性」：写进 release 正文，让仓库读者一眼看到改了什么 ── */
 const RELEASE_FEATURES = {
+  'v1.1.5-Hotfix.3': [
+    '**部署修复（部署者反馈）**：发布包补上大看板的数据服务 `tools/panel-data.mjs`（与它用的 `tools/resolve-paths.mjs`）。之前白名单漏了它，任何新部署的控制台一打开就是「数据服务 19391 不可达」，概览/记忆/表情三块全空 —— 不是部署姿势问题',
+    '控制台路径不再写死作者机：`tools/console-server.mjs` 的 `ROOT` 改为按脚本位置推导、`DATA` 按「`MOLLY_DATA_DIR` > 插件配置里的 `dataDir` > `~/.dsh/qq-whale`」解析；`panel-data.mjs` 同规则，端口可用 `MOLLY_SIDECAR_PORT` 覆盖',
+    '`tools/start-molly.ps1` 启动 19391 时不再写死 node 绝对路径（`MOLLY_NODE` > PATH 里的 node > 历史路径兜底）',
+    '同批合入另一条工作线的改动：群抽奖支持「小时」单位（最长 1 小时）、引用回复策略（人多时才引用）、开奖回调 `onDraw`',
+    '本版**不含语音包**：音色包与上一版相同，单独下 Releases 里的 `voice-pack-v1.2`（301 MB）',
+    '升级：直接覆盖旧的插件包；控制台首次使用前先 `node tools/panel-data.mjs`（或由 `start-molly.ps1` 拉起），19391 没起来时页面会提示「数据服务不可达」，QQ 本体不受影响',
+  ],
   'v1.1.5-Hotfix.2': [
     '**撤回 v1.1.5 与 v1.1.5-Hotfix.1**：这两个版本把「称谓」做坏了（会把群里的人认错、把主人叫成「群友哥们儿」），Release 与 tag 都已删除，请不要再用',
     '认人修复：称谓按**权重**优先（同一人多条时 5 级权重高的说了算，权重相同再按时间），「他自称…」「外号…」不再被当成你该怎么叫他',

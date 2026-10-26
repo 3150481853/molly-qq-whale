@@ -123,6 +123,35 @@ export function lastOtherMessage(history, limit = 40) {
 }
 
 /**
+ * 某个 QQ 最近发的一条（引用目标用）。
+ *
+ * 2026-10-26，主人 m0xxxx：「引用不能精确」——她回的是甲，引用框却挂在
+ * 「触发这一轮的最后一条消息」上（往往是乙）。模型既然写了 <at>甲</at>，
+ * 就说明这话是接甲的，引用框也该落在甲那条上。
+ *
+ * @param {Array} history
+ * @param {string} userId
+ * @param {number} [limit]
+ * @returns {{messageId:string, userId:string, who:string}|null}
+ */
+export function lastMessageFrom(history, userId, limit = 40) {
+  const qq = String(userId || '')
+  if (!qq) return null
+  const list = Array.isArray(history) ? history : []
+  let seen = 0
+  for (let i = list.length - 1; i >= 0 && seen < limit; i--) {
+    const h = list[i]
+    if (!h || h.role !== 'user') continue
+    seen++
+    if (String(h.userId || '') !== qq) continue
+    const id = h.messageId == null ? '' : String(h.messageId)
+    if (!id || id.startsWith('self-')) return null
+    return { messageId: id, userId: qq, who: String(h.who || '') }
+  }
+  return null
+}
+
+/**
  * 校验模型写的 @ 号。
  *
  * 规则（宁可少 @ 一个，也别 @ 错人）：
@@ -186,7 +215,12 @@ export function pickQuoteTarget(input = {}) {
 
   const triggerId = ev.message_id == null ? '' : String(ev.message_id)
   let target = null
-  if (nudge) target = lastOtherMessage(history)
+  /*
+   * 优先按模型点名的号锁定引用目标（2026-10-26，主人：「引用不能精确」）。
+   * 她写了 <at>甲</at>，引用框就落在甲最近那条上，而不是「触发这一轮的最后一条」。
+   */
+  if (input.explicitAt) target = lastMessageFrom(history, input.explicitAt)
+  if (!target && nudge) target = lastOtherMessage(history)
   if (!target && triggerId && !triggerId.startsWith('self-')) target = { messageId: triggerId }
   if (!target || !target.messageId) return null
   if (String(target.messageId).startsWith('self-')) return null

@@ -15,17 +15,21 @@
  *  - 日志只在启动和 5xx 打，前端 4 秒轮询不会把日志撑爆；日志里不打印 token/secret。
  *
  * 路径约定（两套根目录，别混）：
- *  - ROOT = qq-whale 工作目录（代码/静态页/out 日志都在这里）
- *  - DATA = ${HOME}\.dsh\qq-whale（运行时数据：memory/stickers/metrics/budget）
+ *  - ROOT = qq-whale 工作目录（代码/静态页/out 日志都在这里）：MOLLY_ROOT > console.json > 按本文件位置推导
+ *  - DATA = 运行时数据（memory/stickers/metrics/budget）：MOLLY_DATA_DIR > console.json > 插件配置里的
+ *           dataDir > <用户目录>/.dsh/qq-whale。2026-10-26（部署者反馈 m03205）之前这里写死
+ *           作者机的 `${MOLLY_ROOT}\data\qq-whale`，别的机器上部署只能改代码。
  */
 
 import http from 'node:http';
 import net from 'node:net';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { isSea } from 'node:sea';
+import { detectDataDirFromProfiles, defaultDataDir } from './resolve-paths.mjs';
 
 /*
  * ── 配置（三条来源，优先级从低到高）────────────────────────────────────────
@@ -87,9 +91,12 @@ const pick = (envKey, cfgKey, fallback) => {
   return fallback;
 };
 
-// 工作区根：源码模式仍是原来的 qq-whale 目录；exe 模式默认取 exe 所在目录（下面 CONSOLE_DIR 会再兜底）
-const ROOT = pick('MOLLY_ROOT', 'root', 'G:\\Molly\\qq-whale');
-const DATA = pick('MOLLY_DATA_DIR', 'dataDir', 'G:\\Molly\\data\\qq-whale');
+// 工作区根：MOLLY_ROOT > console.json > 源码模式按本文件位置推（<root>/tools/console-server.mjs），
+// exe 模式取 exe 所在目录（下面 CONSOLE_DIR 会再兜底）。
+const ROOT = pick('MOLLY_ROOT', 'root',
+  IS_SEA ? EXE_DIR : path.resolve(HERE, '..'));
+const DATA = pick('MOLLY_DATA_DIR', 'dataDir',
+  detectDataDirFromProfiles() || defaultDataDir());
 // 前端产物：MOLLY_CONSOLE_DIR > console.json(consoleDir) > exe 同级 console/ > 工作区 console/
 // SEA 模式下**不把静态资源打进 exe**，而是按目录查找，这样改前端不用重新打包。
 const CONSOLE_DIR = pick(
@@ -105,7 +112,7 @@ const PORT = Number(pick('MOLLY_CONSOLE_PORT', 'port', 19392)) || 19392;
 // 控制台版本：以插件 package.json 为唯一真源，别在这里写死（2026-10-25 主人 m03522：
 // 左下角一直显示 v1.0.0 就是这一行写死的；发布版本与插件版本从此自动同步）。
 // exe 模式读不到 package.json 时退回 FALLBACK_VERSION，保证打包版也有版本号。
-const FALLBACK_VERSION = '1.1.5-Hotfix.2';
+const FALLBACK_VERSION = '1.1.5-Hotfix.3';
 const VERSION = (() => {
   try {
     const pkg = JSON.parse(

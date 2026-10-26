@@ -7,6 +7,35 @@
 
 ---
 
+## 2026-10-26 · v1.1.5-Hotfix.3：部署修复——看板数据服务随包走 + 工具默认路径不再写死作者机
+
+> 部署者反馈（主人转述 m03207）：装完控制台第一屏就是「数据服务 19391 不可达」，记忆/表情/概览三块全空。
+
+**根因**
+- 大看板的数据来自 `127.0.0.1:19391` 的 sidecar，实现是 `tools/panel-data.mjs`（`tools/console-server.mjs:130` 默认 `SIDECAR=http://127.0.0.1:19391`，`:1363`/`:1370` 代理 `/api/memory`、`/api/stickers`）。
+- 这个文件**从来没进过发布白名单**（`tools/build-publish.mjs` 的白名单是显式列举），所以发布包里根本没有它，任何新部署都起不来 19391。不是部署姿势问题。
+- 即使有人手动补上，它内部还写死了作者机的 `${MOLLY_ROOT}\data\qq-whale`，别的机器读不到数据。
+
+**改动**
+- `tools/panel-data.mjs`：数据目录按 `MOLLY_DATA_DIR` → DSH 插件配置里的 `dataDir`（`~/.dsh/profiles/*/cordis.patch.yml` 的 `dsh-qq-whale` 项）→ `<用户目录>/.dsh/qq-whale` 的顺序解析；端口支持 `MOLLY_SIDECAR_PORT`；密钥按插件同一套规则找（`MOLLY_MEMORY_KEY_FILE` 可覆盖）。版本 1.0.1。
+- `tools/resolve-paths.mjs`（新增）：只读解析 yml 找 `dataDir`，同时给 console-server 复用，避免两处写法漂移。
+- `tools/console-server.mjs`：`ROOT` 默认改为按脚本位置推导（源码模式 `<root>/tools/..`），`DATA` 默认走同一套推导；两者仍可被 `MOLLY_ROOT` / `MOLLY_DATA_DIR` / `console.json` 覆盖。
+- `tools/start-molly.ps1`：启动 19391 时不再写死作者机 node 绝对路径（`MOLLY_NODE` → PATH → 历史路径兜底）；dataDir 交给 panel-data 自己解析。
+- `tools/build-publish.mjs`：白名单新增 `tools/panel-data.mjs` 与 `tools/resolve-paths.mjs`，否则下次构建又漏。
+
+**验证**
+- `node --check` 全过；本机不带任何 `MOLLY_*` 环境变量起实例，`/api/health` 返回 `dataDir=${MOLLY_ROOT}\data\qq-whale`，`/api/all` → memory 1307 条 / stickers 409 / metrics 10125，与线上一致。
+- console-server 在备用端口 19498 起实例：`/api/overview` 里 `sidecar.reachable=true`、`sidecar.memory.count=1307`。
+
+**退回**
+- 删掉 `tools/resolve-paths.mjs`、把 `panel-data.mjs`/`console-server.mjs` 的两处默认值改回绝对路径即可；不影响插件本体与线上 Molly。
+
+**同批合入（另一条工作线，主人拍板「一起发」）**：群抽奖时长支持「小时」单位（最长 1 小时）、引用回复策略（人多时才引用，不是每条都带）、开奖回调 `onDraw`。
+
+**版本**：`1.1.5-Hotfix.3`（不含语音包；语音包仍用 `voice-pack-v1.2`）。
+
+---
+
 ---
 
 ## 2026-10-26 · v1.1.5-Hotfix.2：撤回坏版本 + 认人修复 + 私聊 `#` 菜单 + 密钥按目录找

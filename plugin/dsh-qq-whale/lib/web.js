@@ -317,6 +317,9 @@ export class WebWidget {
           backend: String(c.voiceBackend || ''),
           quietStart: String(c.voiceQuietStart || ''),
           quietEnd: String(c.voiceQuietEnd || ''),
+          // 2026-10-26（主人 m01180）：语速/句间静音也回读，改完 reload 直接核「到底吃上没」。
+          speed: Number(c.voiceSpeed ?? 1),
+          pauseMs: Number(c.voicePauseMs ?? 0),
           // VoiceMaker 没建出来（voiceEnabled=false）时 ready=false
           ready: Boolean(e?.voice),
           stats: e?.voice?.stats ? { ...e.voice.stats } : null,

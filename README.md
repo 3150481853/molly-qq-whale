@@ -15,19 +15,11 @@
 
 **最近版本：** `v1.1.5-A-Hotfix.1`（推荐）· 完整记录见 [docs/CHANGELOG.md](docs/CHANGELOG.md) 与 [Releases](../../releases)。
 
-> ⚠️ `v1.1.5` 与 `v1.1.5-Hotfix.1` 已被**撤回删除**（这两个版本会把群里的人认错、把主人叫成「群友哥们儿」）。请用 `v1.1.5-A-Hotfix.1`。
+> ⚠️ `v1.1.5` 与 `v1.1.5-Hotfix.1` 已被**撤回删除**（会把群里的人认错），请用 `v1.1.5-A-Hotfix.1`。
 
-- **v1.1.5-A-Hotfix.1** —— A 版第一个热修复：**抽奖房间落盘**（`start` / `join` / `draw` 都写 `<dataDir>/out/lottery-rooms.json`，插件重载或进程重启后自动恢复、按 `endsAt` 把到点没开的场次补开一次，名单不丢）+ 修掉补开路径上「先删场次再发公告」导致的丢单（改成**发成功才删**，失败 15 秒重试、最多 8 次，期间名单一直留在盘上；心跳与补发定时器加互斥标志，不会重复发两条）+ 卸载时停掉抽奖心跳并 `dispose()`，不留僵尸定时器 + 群里 `#molly` 不再误报「离线」（链路状态的字符串/对象两种形状统一归一，显示「在线 / 连接中 / 断线重连中 / 已停止」）。本版**不含语音包**，音色包单独发在 Releases 的 `voice-pack-v1.2`。
-- **v1.1.5-A** —— **正式版**（方案 A：`1.1.5-preview.3` 基线 + 全套补丁）。相对 1.1.3 合入：控制台数据补齐、GIF 动图理解、北京时间与作息、群趣味（抽奖支持「1 小时」/ 新人欢迎 / `@我 #`）、**称谓通道与认人**（权重优先 + 防泛称硬禁 + 群里人多时的接话策略）、**引用精确化**、私聊 `#` 菜单与群里 `#molly` 摘要、念稿中文规范化（英文腔修复），以及**部署可移植性**（无 G 盘也能启动、密钥按目录找、看板数据服务随包走）。不包含唱歌（排期 1.1.6-preview.1）。本版**不含语音包**，音色包单独发在 Releases 的 `voice-pack-v1.2`。
-- **v1.1.5-Hotfix.3** —— 部署修复：发布包补上**看板数据服务** `tools/panel-data.mjs`（之前漏发，控制台一打开就提示「数据服务 19391 不可达」，记忆/表情/概览全空）+ 工具默认路径不再写死作者机的盘符（`MOLLY_DATA_DIR` > 插件配置里的 `dataDir` > `~/.dsh/qq-whale`）。同批合入：抽奖支持「小时」单位、引用回复策略。本版**不含语音包**，音色包单独发在 Releases 的 `voice-pack-v1.2`。
-- **v1.1.5-Hotfix.2** —— 认人修复（称谓按权重优先、自称不再当硬要求、群里不许用「哥们儿/群友/老铁」这类泛称）+ 私聊 `#` 菜单与群里 `#molly` 一行摘要 + 记忆密钥按数据目录找、缺钥匙拒绝新建。本版**不含语音包**，音色包单独发在 Releases 的 `voice-pack-v1.2`。
-- **v1.1.5**（已撤回）—— 曾作为「全量合并版」发布，因称谓读取 bug 会认错人，Release 与 tag 均已删除。
-- **v1.1.5-Hotfix.2** —— 认人修复（称谓按权重优先、自称不再当硬要求、群里不许用「哥们儿/群友/老铁」这类泛称）+ 私聊 `#` 菜单与群里 `#molly` 一行摘要 + 记忆密钥按数据目录找、缺钥匙拒绝新建。本版**不含语音包**，音色包单独发在 Releases 的 `voice-pack-v1.2`。
-- **v1.1.5** —— 正式版：合并 preview.1/2/3 与全部 Hotfix/Plus。新增 `#molly` 底层状态指令、语音语速与停顿生效、语音「英文腔」修复、记忆「称谓」类；**重点修复部署可移植性**（没有 G: 盘也能启动，密钥/沙箱/语音路径全部按数据目录推导）。
-- **v1.1.3-Hotfix.3** —— 新人欢迎修复：入群通知不再被静默丢弃，自动欢迎真正发出；自动开奖也计入 `stats.drawn`；新增本机调试路由 `/groupfun/notice`。
-- **v1.1.3-plus.2** —— `@我 #` 小玩具统一入口；群趣味：抽奖 / 口令抽奖 / 新人欢迎。
-- **v1.1.3** —— 三个预览合并：戳一戳模型回话、控制台改版、记忆「梗」类、上下文优化、@ 错人修复、表情包搜索。
-- 更早版本（`v1.1.0` 起至 `v1.1.3-Hotfix.2`，以及 `v1.1.5-preview.*`）见 CHANGELOG。
+**版本线（新 → 旧）：** `v1.1.5-A-Hotfix.1` · `v1.1.5-A` · `v1.1.5-Hotfix.3` · `v1.1.5-Hotfix.2` · `v1.1.3-Hotfix.3` · `v1.1.3-plus.2` · `v1.1.3` · `v1.1.0`
+
+更早版本、`v1.1.5-preview.*` 与已撤回的版本，见 [CHANGELOG](docs/CHANGELOG.md)。
 
 [![license](https://img.shields.io/badge/license-MIT-1aae39?style=flat-square)](LICENSE) [![node](https://img.shields.io/badge/node-22%2B-1aae39?style=flat-square)](https://nodejs.org) [![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0075de?style=flat-square)](#环境要求) [![host](https://img.shields.io/badge/host-DeepSeek%20Harness-5645d4?style=flat-square)](#环境要求) [![QQ](https://img.shields.io/badge/QQ-OneBot%2011-0075de?style=flat-square)](#环境要求)
 

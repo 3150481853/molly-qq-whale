@@ -40,6 +40,12 @@
 - **配置项**：新增 `voiceAsrModelDir`（空 = `<dataDir>/asr/models`）；`memoryKeyFile`、`workSandboxDir`、`voiceRefAudio` 默认值改由 dataDir 推导。
 - 自测：`tools\path-portability-selftest.mjs`（8 项，模拟无盘机器）。
 
+**音色包 v1.2（随本版 Release 附件发布）**
+
+- 附件 `molly-voice-pack-v1.2.zip`（78 文件 / 315.93 MB，sha256 `<REDACTED>`）：54 句训练素材、参考音频、5 条样例、切分/训练/合成脚本与权重（GPT e10 + SoVITS e16_s864）。
+- 与 v1.1 差别：5 条样例按线上参数（`speed_factor 0.93` + 句间 30 ms）重渲染；文档修正 `voicePauseMs` 笔误、补「QQ 语音转文字」实测与限制说明；数据与权重未变。直接覆盖旧的 `molly-voice-pack-v1.1.zip` 即可。
+- 主人 m02313「语音目前改完qq转文字识别不了……测完后命名为v1.2的语音包并内置进v1.1.5正式版」；实测四组参数（1.0 整段 / 0.93 整段 / 1.05 整段 / 0.93 逐句 30 ms）都能被 QQ 转文字识别，结论是此前的「识别不了」为偶发，线上参数保持 `0.93 + 30 ms` 不变。
+
 **已知问题 / 排期**
 
 - **唱歌功能未完成**（音色训练集只能念，不能真唱；算法已能跑，卡在数据集），`singingEnabled` 保持关闭，**排期到 `1.1.6-preview.1`**。代码保留，不删除。

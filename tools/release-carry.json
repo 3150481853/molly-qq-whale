@@ -117,5 +117,12 @@
     "sha256": "<REDACTED>",
     "bytes": 1287611,
     "files": 174
+  },
+  "v1.1.5-Hotfix.1": {
+    "at": "2026-10-26T05:44:31.379Z",
+    "version": "1.1.5-Hotfix.1",
+    "sha256": "<REDACTED>",
+    "bytes": 1296990,
+    "files": 175
   }
 }

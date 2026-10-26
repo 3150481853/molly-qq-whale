@@ -7,7 +7,51 @@
 
 ---
 
+---
+
+## 2026-10-26 · v1.1.5 正式版：合并 preview.1/2/3 + Hotfix.1/2/3 + 今日四项 + 部署可移植性
+
+> 主人 m01820「整理目前更新内容，准备发布1.1.5正式版，唱歌功能未完成的状态挪给1.1.6的第一个预览版」。
+> 正式版规矩（STATE.md §10）：preview 序列必须先合并进正式版；Hotfix/Plus 可并列继承；发版必须带 `#molly`。
+
+**版本号**：`1.1.3-Hotfix.3` → **`1.1.5`**（package.json / 控制台 FALLBACK_VERSION / 控制台页脚 / README / cordis.patch.yml 升级提示 / publish-assets 一并改）。
+
+**新增**
+
+- **底层状态激发指令 `#molly`**（私聊/群里整条消息触发）：主人看详情、别人看一行；不受闭眼模式影响，总开关关闭时不吭声；30 秒冷却（主人豁免）；`/state.statusCommand` 可查。
+- **语音语速与句间停顿生效**：`voiceSpeed`（默认 0.93）与 `voicePauseMs`（默认 30）现在真的传给 GPT-SoVITS（`speed_factor` + 逐句合成插静音），以前是「配置写了、代码没读」的死配置。
+- **语音「英文腔」修复**：念稿前做中文规范化，`2K 60Hz / 1080P / 16GB / 40% / 12,000` 这类不再整句切英文音素（只改念出来的词，不改她发出的文字）。
+- **记忆新增「称谓」类 `address`**：单独成类、按 QQ 匹配、每轮必带（不吃权重窗口）；历史记忆已迁移 13 条。
+- **控制台数据补齐 + QQ 页合并**（preview.1）：模型/额度/并发/记忆等页面数据更全，QQ 相关页面合并为一处。
+- **GIF / 动图理解**（preview.2）：多帧采样拼图送多模态模型，带图轮次输出预算单独放宽（`imageMaxTokens` / `imageReasoningEffort`）。
+- **北京时间与作息**（preview.3）：不依赖系统时区；新增作息窗口、群趣味（抽奖 / 口令场 / @我 #）、GIF 表情库重扫脚本。
+
+**修复**
+
+- 群语音转写 20 秒超时（retcode 100）→ 本地 faster-whisper 兜底（Hotfix.1）。
+- 自动开奖计数 + 新人入群自动欢迎失效（Hotfix.2）。
+- 抽奖 `@` 段被吞（Hotfix.3）。
+- 小玩具入口统一（plus.2）。
+
+**部署可移植性（重点）**
+
+- **没有 G: 盘也能启动**：`memoryKeyFile`、`workSandboxDir`、`voiceRefAudio`、`voiceAsrModelDir`、boot-health 路径、三个 Python 路径、work-guard 护栏、`sleepOverridePath()` 全部改为「从 dataDir 推导 + 配置可覆盖」，不再出现盘符字面量。以前无 G 盘的机器会 `mkdir ${MOLLY_ROOT}\keys` 抛 ENOENT → `ChatEngine` 构造失败 → 插件「加载成功但 OneBot 从未连过」。
+- **加密失败降级而不是炸**：钥匙目录建不出来时降级明文 + warn（`/state.memory.keyError` 写明原因）；盘上是密文但没有钥匙时置 `broken` 并拒绝写回，避免明文覆盖唯一一份密文。
+- **配置项**：新增 `voiceAsrModelDir`（空 = `<dataDir>/asr/models`）；`memoryKeyFile`、`workSandboxDir`、`voiceRefAudio` 默认值改由 dataDir 推导。
+- 自测：`tools\path-portability-selftest.mjs`（8 项，模拟无盘机器）。
+
+**已知问题 / 排期**
+
+- **唱歌功能未完成**（音色训练集只能念，不能真唱；算法已能跑，卡在数据集），`singingEnabled` 保持关闭，**排期到 `1.1.6-preview.1`**。代码保留，不删除。
+
+**升级注意**
+
+- 老配置里显式写了 `memoryKeyFile` / `workSandboxDir` 等路径的机器，行为完全不变（作者机就是这一档）。
+- 想开加密：配 `memoryKeyFile` 到自己机器可写目录；不想加密：`memoryEncrypt: false` 即可，记忆以明文 `memory.json` 落盘（可直接翻看）。
+- 装插件的 profile 仍按 publish 仓库 README 的 `file:` 依赖方式接，`dsh-qq-whale` 包内 `plugin/dsh-qq-whale` 目录结构未变。
+
 ## 2026-10-26 · v1.1.3-Hotfix.3：自动开奖计数 + 新人入群自动欢迎修复
+
 
 > 主人 m07147「先推github，还有，你新人欢迎又是我手动的」。
 

@@ -419,7 +419,13 @@ export const DEFAULTS = {
   // 只有排查问题才该关掉——加密是主人明确要求的行为，默认开。
   memoryEncrypt: true,
   // 密钥位置：故意**不在记忆目录里**——密文和钥匙分开放，备份外泄也解不开。
-  memoryKeyFile: 'G:\\Molly\\keys\\memory.key',
+  //
+  // 2026-10-26 部署者可移植性修复：这里**不再写死 ${MOLLY_ROOT}\keys**。
+  // 空 = 运行时按 dataDir 推导出「qq-whale-keys」兄弟目录（见 resolveDirs），
+  // 这样没有 G 盘的机器也能正常建钥；作者机在 cordis.patch.yml 里显式配了原路径，
+  // 行为与以前完全一致。硬编码盘符曾经让部署者在 mkdir 处 ENOENT，
+  // 进而把 ChatEngine 构造函数带崩（插件「加载成功」但 OneBot 从未连过）。
+  memoryKeyFile: '',
   // 这是"聊着聊着就忘了我"的真正解法：人能记住的从来不只是自我介绍。
   // 节流两道：攒够 MinLines 条、且距上次抽取超过 MinGapMinutes 才调一次，
   // 否则每轮多烧一次调用，额度扛不住。
@@ -481,8 +487,10 @@ export const DEFAULTS = {
   // 所以必须是真实存在的绝对路径（不存在会当场 mkdir）。
   workCwd: '',
   // 干活会话的默认沙箱目录（task-41：和主会话/项目源码物理分开）。
-  // 部署到别的机器时改这里，或直接配 workCwd。
-  workSandboxDir: 'G:\\Molly\\sandbox\\qq-work',
+  // 空 = 运行时落在 dataDir 的兄弟目录 `sandbox/qq-work`（见 resolveDirs）。
+  // 2026-10-26：以前写死 ${MOLLY_ROOT}\sandbox\qq-work，没有 G 盘的机器执行「命令」时 mkdir 会炸；
+  // 作者机在 cordis.patch.yml 里显式配了原路径，行为不变。
+  workSandboxDir: '',
   // 单轮干活硬上限（毫秒）。task-44：原来只受 commandTimeoutMinutes（默认 15 分钟）
   // 约束，撞上「模型在等一个没人能点的弹窗」时整条命令队列陪葬。
   // 180s 足够覆盖查资料 + 写文件 + 发 QQ 的常见组合。
@@ -574,7 +582,10 @@ export const DEFAULTS = {
   // backend='edge' 可退回 edge-tts（晓晓）；本地服务挂了会按 voiceFallbackEdge 自动退。
   voiceBackend: 'sovits',
   voiceSovitsUrl: 'http://127.0.0.1:9880',
-  voiceRefAudio: 'G:\\Molly\\data\\qq-whale\\voice-ref\\molly-ref.wav',
+  // 空 = 运行时用 `<dataDir>/voice-ref/molly-ref.wav`（见 resolveDirs）。
+  // 2026-10-26：以前写死 ${MOLLY_ROOT}\data\qq-whale\voice-ref\...，部署机没这份文件时
+  // 合成会 400（9880 拿不到参考音频）；留空 + 运行时推导，作者的 yml 里配的是原路径。
+  voiceRefAudio: '',
   voicePromptText: '想的美，今天本鱼才是老大，你喝白开水去！',
   voicePromptLang: 'zh',
   voiceFallbackEdge: true,
@@ -609,10 +620,16 @@ export const DEFAULTS = {
   // 私聊却正常。这里用 SnowLuma get_record 取 wav + 本机 faster-whisper 识别。
   // 只对「QQ 拿不到 + 有音频文件」的群语音生效；私聊走上面那条，不跑本地模型。
   voiceAsrEnabled: true,
-  // 常驻 Python worker 用的解释器（装了 faster-whisper 的那个 venv）
-  voiceAsrPython: 'G:\\Molly\\data\\video\\venv\\Scripts\\python.exe',
+  // 常驻 Python worker 用的解释器（装了 faster-whisper 的那个 venv）。
+  // 2026-10-26 部署可移植性：默认留空 = 「本机没配就没有本地 ASR」，不再写死作者机的 G 盘 venv；
+  // 空值时 local-asr 会直接回退到「只用 QQ 服务端转写」，不会去 spawn 一个不存在的 exe。
+  voiceAsrPython: '',
   // faster-whisper 模型（离线缓存，不联网下载）
   voiceAsrModel: 'small',
+  // 模型缓存目录（faster-whisper 的 download_root）。空 = 运行时用 `<dataDir>/asr/models`。
+  // 2026-10-26 部署可移植性：以前写死在 local-asr.js 的 ASR_DEFAULTS 里（作者机 G 盘），
+  // 现在挪到这里统一按 dataDir 推导，作者机由 cordis.patch.yml 显式指回原目录。
+  voiceAsrModelDir: '',
   voiceAsrThreads: 8,
   // 单次识别总超时（秒）：冷启动约 1.6 秒、2.5 秒音频约 1.6 秒识别
   voiceAsrTimeoutMs: 25000,
@@ -631,7 +648,8 @@ export const DEFAULTS = {
   gifFramesColumns: 3,
   // 每帧缩放后的宽度（像素）：320 → 拼图约 976 宽，视觉得清又不太吃 token
   gifFrameWidth: 320,
-  gifFramesPython: 'G:\\Molly\\data\\video\\venv\\Scripts\\python.exe',
+  // 2026-10-26 部署可移植性：空 = 没配就用纯 JS 兜底（GIF 只取首帧），不再写死作者机的 venv 路径。
+  gifFramesPython: '',
   // 拆帧总超时（毫秒）：单张实测 0.2–1.2 秒
   gifFramesTimeoutMs: 12000,
   // 带图轮次的输出预算上限（2026-10-26）：同图思考 token 波动 250~1450，
@@ -644,8 +662,9 @@ export const DEFAULTS = {
   // 有人私聊/群里 @ 她说「唱歌 小星星」时，逐字合成 + 音高搬移 + WSOLA 拉伸，
   // 直接发一条语音条（不走模型）。算法与曲库在 lib/singing.js。
   singingEnabled: false, // 2026-10-25 下架：音色未达标（训练数据只有 3.5 分钟），代码保留待社区歌唱模型接入
-  // 渲染用 python（复用本地 ASR 那个 venv：numpy 已在，不需要新装依赖）
-  singingPython: 'G:\\Molly\\data\\video\\venv\\Scripts\\python.exe',
+  // 渲染用 python（复用本地 ASR 那个 venv：numpy 已在，不需要新装依赖）。
+  // 2026-10-26 部署可移植性：默认留空，没配就不渲染（唱歌本来就是关着的）。
+  singingPython: '',
   // 整首渲染超时（毫秒）：40 音节实测 4~20 秒
   singingTimeoutMs: 180000,
   // —— 戳一戳回应（2026-10-23，主人 m01231；2026-10-24 主人 m01908 改成模型说一句）——
@@ -734,6 +753,39 @@ function resolveDirs(config) {
     stickerDir,
     memoryDir: config.memoryDir || path.join(dataDir, 'memory'),
     dataDir,
+    /*
+     * 记忆密钥位置（2026-10-26 部署可移植性）。
+     *
+     * 以前 DEFAULTS 里写死 `${MOLLY_ROOT}\keys\memory.key`：没有 G 盘的机器在
+     * `mkdir ${MOLLY_ROOT}\keys` 处抛 ENOENT，而这步在 MemoryStore 构造函数里，
+     * 构造函数一抛 → ChatEngine 建不起来 → 插件「加载成功」但 OneBot 从不连接。
+     *
+     * 现在：显式配置（作者机的 yml）> dataDir 的兄弟目录 `qq-whale-keys/memory.key`。
+     * 仍然满足「密钥不和密文同目录」（密文在 dataDir/memory、密钥在 dataDir 外一层）。
+     */
+    memoryKeyFile: String(config.memoryKeyFile || '').trim()
+      || path.join(path.dirname(dataDir), 'qq-whale-keys', 'memory.key'),
+    /*
+     * 干活沙箱（2026-10-26 同上）：以前写死 ${MOLLY_ROOT}\sandbox\qq-work。
+     * 部署机没有 G 盘时，「命令 xxx」一执行就在 mkdir 处炸。
+     * 现在默认落在 dataDir 的兄弟目录 sandbox/qq-work，作者机由 yml 显式配回原路径。
+     */
+    workSandboxDir: String(config.workSandboxDir || '').trim()
+      || path.join(path.dirname(dataDir), 'sandbox', 'qq-work'),
+    /*
+     * 语音参考音频（2026-10-26）：留空时指向 dataDir 下的 voice-ref/，
+     * 部署者把参考 wav 放那儿就行；作者机 yml 里配的是原路径。
+     * 不存在时 voice.js 会跳过本地 SoVITS、按 voiceFallbackEdge 退回 edge-tts（不再 400 硬失败）。
+     */
+    voiceRefAudio: String(config.voiceRefAudio || '').trim()
+      || path.join(dataDir, 'voice-ref', 'molly-ref.wav'),
+    /*
+     * faster-whisper 模型缓存目录（2026-10-26 部署可移植性）：空 = <dataDir>/asr/models。
+     * 作者机由 cordis.patch.yml 显式指回 ${MOLLY_ROOT}\data\video\models（离线模型就在那儿，
+     * 留空会让 worker 去 HuggingFace 下载，等于把本地兜底静默关掉）。
+     */
+    voiceAsrModelDir: String(config.voiceAsrModelDir || '').trim()
+      || path.join(dataDir, 'asr', 'models'),
     // 工坊默认落在「数据盘根」下（当前 dataDir=${MOLLY_ROOT}\data\qq-whale →
     // ${MOLLY_ROOT}\plugin-workshop），和线上插件、用户数据都分开；用户可用
     // config.workshopDir 指到别处。dataDir 没配「\data\」这一层时退回工作区同级。
@@ -935,6 +987,7 @@ function _configShapeReference(Schema) {
     voiceAsrEnabled: s.boolean().default(DEFAULTS.voiceAsrEnabled).description('本地 ASR 兜底：QQ 服务端转写拿不到时（群语音常见），用本机 faster-whisper 识别'),
     voiceAsrPython: s.string().default(DEFAULTS.voiceAsrPython).description('运行 faster-whisper 的 Python 解释器路径（需装 faster-whisper）'),
     voiceAsrModel: s.string().default(DEFAULTS.voiceAsrModel).description('faster-whisper 模型名/路径（默认 small，离线缓存读取）'),
+    voiceAsrModelDir: s.string().default('').description('faster-whisper 模型缓存目录（空 = <dataDir>/asr/models）'),
     voiceAsrThreads: s.natural().default(DEFAULTS.voiceAsrThreads).description('本地识别 CPU 线程数（默认 8）'),
     voiceAsrTimeoutMs: s.natural().default(DEFAULTS.voiceAsrTimeoutMs).description('本地识别单次超时（毫秒，默认 25000，含首次模型加载）'),
     voiceAsrIdleSeconds: s.natural().default(DEFAULTS.voiceAsrIdleSeconds).description('worker 空闲自动退出（秒，默认 600；0 = 常驻）'),
@@ -993,14 +1046,6 @@ function _configShapeReference(Schema) {
 }
 
 export function apply(root, rawConfig = {}) {
-  // 临时诊断（task-53 拆包排查）：证明「这次 apply 跑的是哪份模块、写盘是否可行」。
-  try {
-    fs.writeFileSync(
-      'G:\\Molly\\qq-whale\\out\\main-apply-beat.txt',
-      `${new Date().toISOString()} pid=${process.pid} url=${import.meta.url}\n`,
-      'utf8',
-    )
-  } catch {}
   const config = resolveDirs({ ...DEFAULTS, ...rawConfig })
 
   // logger：优先用 DSH 的 logger 服务，退回 console

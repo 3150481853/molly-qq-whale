@@ -35,7 +35,9 @@ export const GIF_DEFAULTS = {
   columns: 3,
   frameWidth: 320,
   timeoutMs: 9000,
-  python: 'G:\\Molly\\data\\video\\venv\\Scripts\\python.exe',
+  // 2026-10-26 部署可移植性：留空 = 没配 Python 就安静回退「只看首帧」，
+  // 不再写死作者机的 G 盘 venv（别的机器上 spawn 会直接 ENOENT）。
+  python: '',
 }
 
 /** 帧缓存：sha1(参数) -> 结果；够用又不至于无限长 */
@@ -184,6 +186,8 @@ export async function gifContactSheet(buf, opts = {}) {
   if (!isGif(buf)) return null
   const o = { ...GIF_DEFAULTS, ...opts }
   if (o.enabled === false) return null
+  // 没配 Python 解释器就直接回退（调用方只看首帧），不要 spawn('') 白等一个超时
+  if (!String(o.python || '').trim()) return null
   const key =
     createHash('sha1').update(buf).digest('hex') + `|${o.frames}|${o.columns}|${o.frameWidth}`
   if (cache.has(key)) return cache.get(key)

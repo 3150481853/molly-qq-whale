@@ -27,8 +27,10 @@ import crypto from 'node:crypto'
 /** 默认配置（会被 main.js 的 DEFAULTS 与 yml 覆盖）。 */
 export const ASR_DEFAULTS = {
   enabled: true,
-  python: 'G:\\Molly\\data\\video\\venv\\Scripts\\python.exe',
-  modelDir: 'G:\\Molly\\data\\video\\models',
+  // 2026-10-26 部署可移植性：留空 = 本机没配 Python/模型就自动跳过本地 ASR，
+  // 退回「只用 QQ 服务端转写」。以前写死作者机的 G 盘 venv，别的机器一调就 spawn 不存在的 exe。
+  python: '',
+  modelDir: '',
   model: 'small',
   threads: 8,
   timeoutMs: 20000,
@@ -189,7 +191,12 @@ export class LocalAsr {
   }
 
   get available() {
-    return this.enabled && Boolean(this.dir)
+    if (!this.enabled || !this.dir || !this.python) return false
+    try {
+      return fs.existsSync(this.python)
+    } catch {
+      return false
+    }
   }
 
   /** 把 worker 脚本写盘（内容哈希变了才重写）。 */

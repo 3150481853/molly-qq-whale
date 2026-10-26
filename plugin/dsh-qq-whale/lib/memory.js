@@ -19,8 +19,8 @@ import path from 'node:path'
 
 import { localDateKey, localDateTime } from './budget.js'
 import {
-  DEFAULT_KEY_FILE,
   decryptText,
+  defaultKeyFile,
   isEnvelope,
   loadKey,
   writeEncryptedFile,
@@ -152,10 +152,32 @@ export class MemoryStore {
     this.entries = []
     this.limit = this.readGrownLimit() || this.baseLimit
     if (this.crypt) {
-      const info = loadKey({ keyFile: this.crypt.keyFile || DEFAULT_KEY_FILE, create: true })
-      this.key = info.key
-      this.keyFile = info.file
-      this.keySource = info.source
+      /*
+       * 部署可移植性（2026-10-26）：密钥起不来**不能**让构造函数炸。
+       * 之前 loadKey 抛错会顺着 MemoryStore → ChatEngine 构造函数一路上去，
+       * boot() 直接失败，表现是「插件加载成功但 OneBot 从未连过」。
+       * 现在的口径：
+       *   - 钥匙文件在、能解析     → 正常加密
+       *   - 这台机器建不出/读不了  → 降级明文 + 一条 warn，插件照常跑（可读性还更好）
+       *   - 钥匙在但解析不了/长度错 → 仍然抛（那是数据问题，静默降级等于把密文冲掉）
+       */
+      try {
+        const info = loadKey({
+          keyFile: this.crypt.keyFile || defaultKeyFile({ baseDir: path.dirname(dir) }),
+          create: true,
+        })
+        this.key = info.key
+        this.keyFile = info.file
+        this.keySource = info.source
+      } catch (err) {
+        if (err?.name !== 'KeyUnavailableError') throw err
+        this.crypt = null
+        this.keyError = String(err.message || err)
+        this.logger(
+          'warn',
+          `记忆加密不可用，已降级为明文存储（记忆仍可读可写）：${this.keyError}`,
+        )
+      }
     }
     this.load()
   }
@@ -206,13 +228,13 @@ export class MemoryStore {
       return
     }
     let text = raw
+    let outer = null
+    try {
+      outer = JSON.parse(raw)
+    } catch {
+      outer = null
+    }
     if (this.crypt) {
-      let outer = null
-      try {
-        outer = JSON.parse(raw)
-      } catch {
-        outer = null
-      }
       if (outer && isEnvelope(outer)) {
         try {
           text = decryptText(outer, this.key)
@@ -227,6 +249,19 @@ export class MemoryStore {
         // 历史明文文件：标记迁移，下面会先去重再整体加密
         this.needsMigration = true
       }
+    } else if (outer && isEnvelope(outer)) {
+      /*
+       * 降级路径的反向保护（2026-10-26）：密钥不可用已经降级成明文模式，
+       * 但盘上躺着的仍是密文 —— 此时绝不能当普通 JSON 处理（那会把 entries 读成空、
+       * 下一次 save() 用明文把唯一一份密文冲掉）。停下来，等钥匙修好。
+       */
+      this.broken = true
+      this.entries = []
+      this.logger(
+        'error',
+        '记忆是加密的，但本机密钥不可用：已停止记忆读写以免覆盖密文（把 memoryKeyFile 指回原钥匙，或设 memoryEncrypt:false 后手工迁移）',
+      )
+      return
     }
     try {
       const parsed = JSON.parse(text)
@@ -409,6 +444,8 @@ export class MemoryStore {
       encrypted: Boolean(this.crypt),
       keyFile: this.crypt ? this.keyFile : '',
       keySource: this.crypt ? this.keySource : '',
+      // 2026-10-26 部署可移植性：加密起不来时这里说明原因（/state.memory.keyError）
+      keyError: this.keyError || '',
       broken: this.broken,
       deduped: this.deduped,
       merged: this.mergedCount,

@@ -42,7 +42,16 @@ import {
  * 现在默认落到 ${MOLLY_ROOT}\sandbox\qq-work：里面没源码，最坏也只是把沙箱弄脏。
  * 仍允许 config.workSandboxDir / config.workCwd 覆盖（部署到服务器时换路径）。
  */
-export const WORK_SANDBOX_DIR = 'G:\\Molly\\sandbox\\qq-work'
+export const WORK_SANDBOX_DIR =
+  String(process.env.MOLLY_WORK_SANDBOX || '').trim() ||
+  path.join(
+    process.env.DSH_HOME || path.join(os.homedir(), '.dsh'),
+    'qq-whale',
+    'sandbox',
+    'qq-work',
+  )
+// 2026-10-26 部署可移植性：不再写死 ${MOLLY_ROOT}\sandbox\qq-work。
+// 运行时真正生效的顺序仍是 this.config.workCwd → config.workSandboxDir（main.js 会按 dataDir 推导）→ 这个兜底。
 
 /**
  * 单轮干活的硬上限（task-44）。
@@ -639,9 +648,8 @@ export class CommandExecutor {
              */
             '',
             '## 你的工作目录只有沙箱',
-            '你唯一的工作目录是 `G:\\Molly\\sandbox\\qq-work`。要建文件、写脚本、放产物，都放这里。',
-            '**不许读写**这三个地方：`G:\\Molly\\qq-whale`（Molly 自己的插件源码）、',
-            '`D:\\Documents\\deepseek-harness`（宿主/项目工作区）、`C:\\Users\\example\\.dsh`（宿主配置和会话数据）。',
+            `你唯一的工作目录是 \`${this.config?.workSandboxDir || WORK_SANDBOX_DIR}\`。要建文件、写脚本、放产物，都放这里。`,
+            '**不许读写**这三个地方：Molly 自己的插件源码目录、宿主/项目工作区、宿主配置和会话数据目录。',
             '你的产物可以随便读写，但那是沙箱里的路径。',
             '',
             '## 改 Molly 自己的代码 → 一律不执行',
@@ -678,7 +686,7 @@ export class CommandExecutor {
               : '## 这条会话没有写工具——要写文件请让用户走改代码那条',
             ...(isCode
               ? [
-                  '沙箱里的文件你可以直接写；`G:\\Molly\\qq-whale` 等项目源码受审核保护，',
+                  '沙箱里的文件你可以直接写；插件源码目录等项目源码受审核保护，',
                   '被拦下时把工具给的审核话术原样回给用户，不要换个工具再试。',
                 ]
               : [
@@ -686,7 +694,7 @@ export class CommandExecutor {
                   '遇到「建文件夹 / 建文件 / 改文件 / 写脚本 / 装依赖」这类请求，**不要试探工具**',
                   '（working_directory、read、glob、pwsh 都不是写工具，试多少次都不会成功），',
                   '直接用一句话告诉用户：',
-                  '「这个得走改代码那条——把消息写成 `#code 在 G:\\Molly\\sandbox 下建一个 test1 文件夹`，',
+                  `「这个得走改代码那条——把消息写成 \`#code 在 ${this.config?.workSandboxDir || WORK_SANDBOX_DIR} 下建一个 test1 文件夹\`，`,
                   '那条会话才有写权限。」',
                   '说过就停，不要反复解释，也不要假装已经建好了。',
                 ]),

@@ -24,13 +24,43 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import os from 'node:os'
+import { fileURLToPath } from 'node:url'
 
-/** 这些前缀属于 Molly 自己的代码/配置/宿主数据，干活会话一律不许写。 */
-export const PROTECTED_PREFIXES = [
-  'G:\\Molly\\qq-whale',
-  'D:\\Documents\\deepseek-harness',
-  'C:\\Users\\example\\.dsh\\profiles',
-]
+/**
+ * 这些前缀属于 Molly 自己的代码/配置/宿主数据，干活会话一律不许写。
+ *
+ * 2026-10-26 部署可移植性：原来是三个写死的绝对路径（作者机的 G:/D:/C: 布局），
+ * 部署到别的机器后一条都命中不了 —— 护栏等于不存在。现在按「本机真实布局」推导：
+ *   - 插件源码根：环境变量 MOLLY_SOURCE_ROOT，否则包根（lib/.. 再上一层）
+ *   - 宿主配置：<DSH_HOME|~/.dsh>/profiles
+ *   - 宿主工作区：<~/Documents/deepseek-harness>
+ * 同时保留作者机的历史三条，保证本机行为和以前一模一样（多拦不算退化）。
+ */
+export const PROTECTED_PREFIXES = (() => {
+  const home = os.homedir()
+  const dshHome = String(process.env.DSH_HOME || '').trim() || path.join(home, '.dsh')
+  const pkgRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+  const sourceRoot = String(process.env.MOLLY_SOURCE_ROOT || '').trim() || path.resolve(pkgRoot, '..', '..')
+  const list = [
+    sourceRoot,
+    path.join(dshHome, 'profiles'),
+    path.join(home, 'Documents', 'deepseek-harness'),
+    // —— 作者机历史路径（保持真机原有拦截范围）——
+    'G:\\Molly\\qq-whale',
+    'D:\\Documents\\deepseek-harness',
+    'C:\\Users\\example\\.dsh\\profiles',
+  ]
+  const seen = new Set()
+  return list
+    .map((x) => String(x || '').trim())
+    .filter(Boolean)
+    .filter((x) => {
+      const k = x.toLowerCase()
+      if (seen.has(k)) return false
+      seen.add(k)
+      return true
+    })
+})()
 
 /** 拦下之后对主人说的固定话术（不许改词，测试盯着）。 */
 export const REVIEW_REPLY = '这类改动要先过审核：我已经把要做的事报给主人了，他点头我再动手。'

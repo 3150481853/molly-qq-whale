@@ -18,7 +18,9 @@ import { spawn } from 'node:child_process'
 
 export const SING_DEFAULTS = {
   enabled: true,
-  python: 'G:\\Molly\\data\\video\\venv\\Scripts\\python.exe',
+  // 2026-10-26 部署可移植性：留空 = 没配就报「唱歌环境未配置」（本来也是关闭状态），
+  // 不再写死作者机的 G 盘 venv。
+  python: '',
   timeoutMs: 180000,
   maxSyllables: 48,
   vibratoCents: 14,

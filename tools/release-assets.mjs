@@ -50,6 +50,14 @@ const SECRETS_FILE = process.env.MOLLY_RELEASE_SECRETS || path.join(process.cwd(
 
 /* ── 每个版本的「本版特性」：写进 release 正文，让仓库读者一眼看到改了什么 ── */
 const RELEASE_FEATURES = {
+  'v1.1.5': [
+    '正式版：合并 v1.1.3-preview.1/2/3 与 v1.1.3-Hotfix.1/2/3、v1.1.3-plus.1/2/3（控制台数据补齐、GIF 多帧理解、北京时间/作息/群趣味）',
+    '新增底层状态激发指令 `#molly`：私聊或群里整条消息触发，主人看详情、别人看一行，30 秒冷却',
+    '语音：voiceSpeed（0.93）与 voicePauseMs（30）真正生效；念稿前做中文规范化，2K/60Hz/1080P/16GB 这类不再整句切英文音素',
+    '记忆：新增「称谓」类 address，单独成类、按 QQ 匹配、每轮必带；历史记忆已迁移 13 条',
+    '部署可移植性：没有 G: 盘也能启动；密钥/沙箱/参考音频/ASR 模型/boot-health/护栏全部按 dataDir 推导并可用配置覆盖；加密不可用时降级明文而不是启动崩溃（/state.memory.keyError 说明原因）',
+    '唱歌功能未完成（音色训练集只能念不能真唱），singingEnabled 保持关闭，排期到 v1.1.6-preview.1',
+  ],
   'v1.1.3-Hotfix.3': [
     '本版已合并 v1.1.3-plus.3（群趣味：抽奖 / 口令抽奖 / @我 # 小玩具入口），plus.3 的 tag 与 Release 已删除',
     '新人入群自动欢迎修好：notice 分发不再只转 poke，group_increase 能进引擎（之前欢迎开关开着也从不自动发）',

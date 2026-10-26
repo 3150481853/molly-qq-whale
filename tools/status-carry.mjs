@@ -226,12 +226,19 @@ export function applyStatusCarry(treeDir, { log = () => {}, sourceStatus = STATU
   if (syntax) problems.push(`语法检查不通过：\n${syntax}`)
   problems.push(...verifyMainSource(after))
 
-  // 该树自己的版本号（= 这个 tag 的 package.json），report / release 正文都用它
+  // 该树自己的版本号（= 这个 tag 的 package.json），report / release 正文都用它。
+  // 注意发布仓库的 package.json 在 `plugin/dsh-qq-whale/` 下，根目录没有。
   let version = ''
-  try {
-    version = String(JSON.parse(fs.readFileSync(path.join(treeDir, 'package.json'), 'utf8'))?.version || '')
-  } catch {
-    version = ''
+  for (const rel of ['plugin/dsh-qq-whale/package.json', 'package.json']) {
+    try {
+      const v = JSON.parse(fs.readFileSync(path.join(treeDir, rel), 'utf8'))?.version
+      if (v) {
+        version = String(v)
+        break
+      }
+    } catch {
+      /* 换下一个位置 */
+    }
   }
 
   const manifest = {

@@ -110,6 +110,9 @@ const FILES = [
   // 2026-10-26 m00525：release-assets 靠它给历史 release 打补丁（#molly），
   // 少了它发布版里的 release-assets.mjs import 会直接失败。
   ['tools/status-carry.mjs', 'tools/status-carry.mjs'],
+  // 回填台账：release-assets 的 --body-only 靠它判断旧 tag 的附件带不带 `#molly`。
+  // 只有 tag / 版本号 / sha256 / 时间，没有任何真实号码或凭据。
+  ['tools/release-carry.json', 'tools/release-carry.json'],
   ['tools/backup-memory.ps1', 'tools/backup-memory.ps1'],
   ['tools/install-memory-backup-task.cmd', 'tools/install-memory-backup-task.cmd'],
   ['tools/uninstall-memory-backup-task.cmd', 'tools/uninstall-memory-backup-task.cmd'],

@@ -2,9 +2,9 @@
 
 > 本副本由 `tools/build-publish.mjs` 生成，**勿手改**；要改就改源仓库再重新生成。
 
-- 生成时间：2026-10-26T02:08:40.133Z
-- 文件数：**168**
-- 总体积：**2.85 MB**
+- 生成时间：2026-10-26T02:10:38.734Z
+- 文件数：**169**
+- 总体积：**2.86 MB**
 - 脱敏复检：**命中 0**
 
 ## 顶层结构
@@ -44,6 +44,7 @@
 - tools/voice-sovits-start.ps1
 - tools/scan-secrets.mjs
 - tools/build-publish.mjs
+- tools/release-carry.json
 - docs/INSTALL-AND-ROLLBACK.md
 - docs/deploy.md
 - docs/g-migration-contract.md

@@ -326,6 +326,7 @@ function recordCarried(tag, carried, asset) {
       version: carried.version || '',
       sha256: asset?.sha || '',
       bytes: asset?.bytes || 0,
+      files: asset?.files || 0,
     }
     fs.writeFileSync(CARRY_LEDGER, JSON.stringify(ledger, null, 2) + '\n', 'utf8')
   } catch {
@@ -496,11 +497,13 @@ async function main() {
       if (!rel) throw new Error('release 不存在，无法只改正文：' + tag)
       const assets = rel.assets || []
       const zip = assets.find((a) => /\.zip$/i.test(a.name)) || assets[0] || null
+      const led = readCarryLedger()[tag] || null
       const asset = zip
         ? {
             name: zip.name,
             bytes: zip.size,
-            files: RELEASE_ASSET_FILES[tag] || 0,
+            // 台账里记的是上次真正上传时的文件数（回填后比老地图准一个文件）
+            files: led?.files || RELEASE_ASSET_FILES[tag] || 0,
             sha: String(zip.digest || '').replace(/^sha256:/, ''),
           }
         : null

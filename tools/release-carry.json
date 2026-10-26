@@ -1,0 +1,114 @@
+{
+  "v1.0.0": {
+    "at": "2026-10-26T02:05:26.632Z",
+    "version": "1.0.0",
+    "sha256": "<REDACTED>",
+    "bytes": 1076573,
+    "files": 151
+  },
+  "v1.1.0": {
+    "at": "2026-10-26T02:05:31.738Z",
+    "version": "1.1.0",
+    "sha256": "<REDACTED>",
+    "bytes": 1102245,
+    "files": 156
+  },
+  "v1.1.1": {
+    "at": "2026-10-26T02:05:36.761Z",
+    "version": "1.1.1",
+    "sha256": "<REDACTED>",
+    "bytes": 1116298,
+    "files": 157
+  },
+  "v1.1.2": {
+    "at": "2026-10-26T02:05:41.404Z",
+    "version": "1.1.2",
+    "sha256": "<REDACTED>",
+    "bytes": 1135767,
+    "files": 159
+  },
+  "v1.1.3": {
+    "at": "2026-10-26T02:05:45.744Z",
+    "version": "1.1.3",
+    "sha256": "<REDACTED>",
+    "bytes": 1169712,
+    "files": 162
+  },
+  "v1.1.3-Hotfix.1": {
+    "at": "2026-10-26T02:05:50.018Z",
+    "version": "1.1.3-Hotfix.1",
+    "sha256": "<REDACTED>",
+    "bytes": 1178785,
+    "files": 162
+  },
+  "v1.1.3-Hotfix.2": {
+    "at": "2026-10-26T02:05:54.711Z",
+    "version": "1.1.3-Hotfix.2",
+    "sha256": "<REDACTED>",
+    "bytes": 1190922,
+    "files": 163
+  },
+  "v1.1.3-Hotfix.3": {
+    "at": "2026-10-26T02:05:59.663Z",
+    "version": "1.1.3-Hotfix.3",
+    "sha256": "<REDACTED>",
+    "bytes": 1251706,
+    "files": 168
+  },
+  "v1.1.3-plus.1": {
+    "at": "2026-10-26T02:06:04.677Z",
+    "version": "1.1.3-plus.1",
+    "sha256": "<REDACTED>",
+    "bytes": 1243530,
+    "files": 168
+  },
+  "v1.1.3-plus.2": {
+    "at": "2026-10-26T02:06:11.268Z",
+    "version": "1.1.3-plus.2",
+    "sha256": "<REDACTED>",
+    "bytes": 1245868,
+    "files": 168
+  },
+  "v1.1.3-preview.1": {
+    "at": "2026-10-26T02:06:17.162Z",
+    "version": "1.1.3-preview.1",
+    "sha256": "<REDACTED>",
+    "bytes": 1148565,
+    "files": 159
+  },
+  "v1.1.3-preview.2": {
+    "at": "2026-10-26T02:06:22.597Z",
+    "version": "1.1.3-preview.2",
+    "sha256": "<REDACTED>",
+    "bytes": 1155896,
+    "files": 160
+  },
+  "v1.1.3-preview.3": {
+    "at": "2026-10-26T02:06:28.297Z",
+    "version": "1.1.3-preview.3",
+    "sha256": "<REDACTED>",
+    "bytes": 1162996,
+    "files": 161
+  },
+  "v1.1.5-preview.1": {
+    "at": "2026-10-26T02:06:33.425Z",
+    "version": "1.1.5-preview.1",
+    "sha256": "<REDACTED>",
+    "bytes": 1246963,
+    "files": 168
+  },
+  "v1.1.5-preview.2": {
+    "at": "2026-10-26T02:06:38.061Z",
+    "version": "1.1.5-preview.2",
+    "sha256": "<REDACTED>",
+    "bytes": 1246960,
+    "files": 168
+  },
+  "v1.1.5-preview.3": {
+    "at": "2026-10-26T02:06:43.775Z",
+    "version": "1.1.5-preview.3",
+    "sha256": "<REDACTED>",
+    "bytes": 1246962,
+    "files": 168
+  }
+}

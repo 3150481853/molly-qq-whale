@@ -50,6 +50,18 @@ const SECRETS_FILE = process.env.MOLLY_RELEASE_SECRETS || path.join(process.cwd(
 
 /* ── 每个版本的「本版特性」：写进 release 正文，让仓库读者一眼看到改了什么 ── */
 const RELEASE_FEATURES = {
+  'v1.1.5-Hotfix.1': [
+    '热修复：**称谓读取加固**——她按 QQ 记住的「叫他 X」不再被「你叫什么」这类反问带偏；同一人多条按最近一条算；解析不出的自称/昵称说明不再进提示词',
+    '根因：学习链路把反问存成了称谓、`addressOf()` 把自称也当硬要求并列，三段互相矛盾 → flash 档退回群名片叫法。现在「# 怎么称呼」只拼 `- 叫他「X」`',
+    '模型层 address 入库前必须含「叫他」；`guessKind()` 的 address 触发词去掉 `昵称/自称叫`（归 person 类）',
+    '本版**不含语音包**：音色包 v1.2 单独发布在 Releases 的 `voice-pack-v1.2`（301 MB，包内 `README.md` 有用法与许可）',
+    '升级：直接覆盖旧的插件包即可，不用改配置（历史里几条错误称谓已在上线时清掉）',
+  ],
+  'voice-pack-v1.2': [
+    '与 voice-pack-v1.1 的差别：5 条样例按线上参数（`speed_factor 0.93` + 句间 30 ms）重渲染；文档修正 `voicePauseMs` 笔误、补「QQ 语音转文字」实测与限制说明；**数据与权重未变**',
+    '内容不变：54 句训练素材、参考音频、5 条样例、切分/训练/合成脚本与权重（GPT e10 + SoVITS e16_s864）',
+    '用法与 v1.1 相同：起 GPT-SoVITS `api_v2.py` → 切权重与参考音频 → `POST /tts` 带 `speed_factor: 0.93`；接进 Molly 时配 `voiceSpeed: 0.93` + `voicePauseMs: 30`',
+  ],
   'v1.1.5': [
     '正式版：合并 v1.1.3-preview.1/2/3 与 v1.1.3-Hotfix.1/2/3、v1.1.3-plus.1/2/3（控制台数据补齐、GIF 多帧理解、北京时间/作息/群趣味）',
     '新增底层状态激发指令 `#molly`：私聊或群里整条消息触发，主人看详情、别人看一行，30 秒冷却',

@@ -56,6 +56,116 @@ export function cleanVoiceText(text) {
   return s
 }
 
+/* ────────────────────────────────────────────────────────────────
+ * 语音文本规范化（2026-10-26，主人 m01497 拍板「上 1」）
+ *
+ * 背景：GPT-SoVITS 的 G2P 遇到「数字 + 字母单位」（2K / 60Hz / 1080P / 16GB）
+ * 会整块切到英文音素，中文句子里突然蹦出一段英文腔。实测「2K 60Hz」被念成
+ * "two-K sixty-hertz"，QQ 的语音转文字又听成「两 k sexy heart」。
+ *
+ * 这里只在**送进 TTS 的那份文本**上做替换，不改她发出去的文字。
+ * 规则顺序有意义：先处理「区间」，再处理单个「数字+单位」。
+ * ──────────────────────────────────────────────────────────────── */
+
+const CN_DIGITS = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九']
+const CN_UNITS = ['', '十', '百', '千']
+
+/** 整数转中文读法（支持到千万级，够分辨率/刷新率/容量用）。 */
+function intToCn(n) {
+  if (n < 10) return CN_DIGITS[n]
+  if (n < 20) return n === 10 ? '十' : `十${CN_DIGITS[n - 10]}`
+  if (n >= 10000) {
+    const head = Math.floor(n / 10000)
+    const tail = n % 10000
+    if (!tail) return `${intToCn(head)}万`
+    return `${intToCn(head)}万${tail < 1000 ? '零' : ''}${intToCn(tail)}`
+  }
+  const str = String(n)
+  let out = ''
+  let pendingZero = false
+  for (let i = 0; i < str.length; i++) {
+    const d = Number(str[i])
+    if (!d) {
+      if (out) pendingZero = true
+      continue
+    }
+    if (pendingZero) {
+      out += '零'
+      pendingZero = false
+    }
+    // 口语：2000 → 两千、200 → 两百（20 仍是二十，不读「两十」）
+    const unit = CN_UNITS[str.length - 1 - i]
+    const digit = d === 2 && (unit === '千' || unit === '百') ? '两' : CN_DIGITS[d]
+    out += digit + unit
+  }
+  return out
+}
+
+/** `1080` → `一千零八十`，`2.5` → `二点五`，非数字原样返回。 */
+export function chineseNumber(value) {
+  const s = String(value ?? '').trim()
+  if (s.includes('.')) {
+    const [head, tail] = s.split('.')
+    const frac = [...tail].map((d) => CN_DIGITS[Number(d)] ?? d).join('')
+    return `${chineseNumber(head)}点${frac}`
+  }
+  if (!/^\d+$/.test(s)) return s
+  return intToCn(Number(s))
+}
+
+/** 逐位读数字（分辨率用：1080 → 一零八零，1440 → 一四四零）。 */
+function readDigits(str) {
+  return [...String(str)].map((d) => CN_DIGITS[Number(d)] ?? d).join('')
+}
+
+/** 单位 → 中文说法（`60Hz` → `六十赫兹`）。 */
+const SPEAK_RULES = [
+  // 网址不念（念一串英文/斜杠最毁听感）
+  [/https?:\/\/\S+/gi, ''],
+  // 百分比
+  [/(\d+(?:\.\d+)?)\s*[%％]/g, (_m, n) => `百分之${chineseNumber(n)}`],
+  // 区间：60~90Hz / 30-144fps（必须先于单值规则，否则单位被吃掉一半）
+  [
+    /(\d+(?:\.\d+)?)\s*[~～\-－]\s*(\d+(?:\.\d+)?)\s*(hz|fps)/gi,
+    (_m, a, b, unit) => `${chineseNumber(a)}到${chineseNumber(b)}${/fps/i.test(unit) ? '帧' : '赫兹'}`,
+  ],
+  // 刷新率 / 频率
+  [/(\d+(?:\.\d+)?)\s*hz/gi, (_m, n) => `${chineseNumber(n)}赫兹`],
+  // 帧率
+  [/(\d+(?:\.\d+)?)\s*fps/gi, (_m, n) => `${chineseNumber(n)}帧`],
+  // 分辨率 P（1080P / 720P）：按位读，「一零八零P」才是口语
+  [/(\d{3,4})\s*p(?![a-z])/gi, (_m, n) => `${readDigits(n)}P`],
+  // 分辨率 K（2K / 2.5K / 4K）：中文口语本来就说「两K」，保留 K 更自然
+  [/(\d+(?:\.\d+)?)\s*k(?![a-z])/gi, (_m, n) => `${n === '2' ? '两' : chineseNumber(n)}K`],
+  // 容量
+  [/(\d+(?:\.\d+)?)\s*gb/gi, (_m, n) => `${chineseNumber(n)}个G`],
+  [/(\d+(?:\.\d+)?)\s*tb/gi, (_m, n) => `${chineseNumber(n)}个T`],
+  [/(\d+(?:\.\d+)?)\s*mb/gi, (_m, n) => `${chineseNumber(n)}兆`],
+  // 时间
+  [/(\d+(?:\.\d+)?)\s*ms(?![a-z])/gi, (_m, n) => `${chineseNumber(n)}毫秒`],
+  [/(\d+(?:\.\d+)?)\s*min(?![a-z])/gi, (_m, n) => `${chineseNumber(n)}分钟`],
+  // 温度 / 长度 / 重量
+  [/(\d+(?:\.\d+)?)\s*(?:℃|°c)/gi, (_m, n) => `${chineseNumber(n)}摄氏度`],
+  [/(\d+(?:\.\d+)?)\s*km\s*\/\s*h/gi, (_m, n) => `${chineseNumber(n)}公里每小时`],
+  [/(\d+(?:\.\d+)?)\s*km(?![a-z])/gi, (_m, n) => `${chineseNumber(n)}公里`],
+  [/(\d+(?:\.\d+)?)\s*cm(?![a-z])/gi, (_m, n) => `${chineseNumber(n)}厘米`],
+  [/(\d+(?:\.\d+)?)\s*mm(?![a-z])/gi, (_m, n) => `${chineseNumber(n)}毫米`],
+  [/(\d+(?:\.\d+)?)\s*kg(?![a-z])/gi, (_m, n) => `${chineseNumber(n)}公斤`],
+  // 剩下裸的英文缩写
+  [/\bHDR\b/g, '高动态范围'],
+  [/\bUSB\b/g, 'U S B'],
+]
+
+/**
+ * 把「要念出来的文本」翻译成 TTS 友好的中文读法。
+ * 只动数字 + 单位，不动正文措辞；返回串会比原文长一些（中文数字）。
+ */
+export function normalizeSpeakText(text) {
+  let s = String(text || '')
+  for (const [re, to] of SPEAK_RULES) s = s.replace(re, to)
+  return s.replace(/[ \t]{2,}/g, ' ').replace(/\s*\n\s*/g, ' ').trim()
+}
+
 export class VoiceMaker {
   constructor({
     dir,
@@ -127,7 +237,7 @@ export class VoiceMaker {
 
   /** 合成一句语音；返回 `{file, bytes, ms, cached, backend}` 或 null（失败/文本不可用）。 */
   async synthesize(text, { signal } = {}) {
-    const clean = cleanVoiceText(text).slice(0, this.maxChars)
+    const clean = normalizeSpeakText(cleanVoiceText(text)).slice(0, this.maxChars)
     if (clean.length < 2) return null
     if (signal?.aborted) return null
     await this.ensureDir()

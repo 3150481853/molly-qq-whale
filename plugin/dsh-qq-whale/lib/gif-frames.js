@@ -35,7 +35,8 @@ export const GIF_DEFAULTS = {
   columns: 3,
   frameWidth: 320,
   timeoutMs: 9000,
-  python: 'G:\\Molly\\data\\video\\venv\\Scripts\\python.exe',
+  // 2026-10-26 部署可移植性：留空 = 没装 Python/Pillow 就安静回退「只发首帧」。
+  python: '',
 }
 
 /** 帧缓存：sha1(参数) -> 结果；够用又不至于无限长 */

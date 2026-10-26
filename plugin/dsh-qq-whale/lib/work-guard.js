@@ -24,12 +24,19 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import os from 'node:os'
+import { fileURLToPath } from 'node:url'
+
+/** 插件包根（<包根>/lib/work-guard.js 往上两层）。换机器自动跟着走，不再写死盘符。 */
+const PLUGIN_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 
 /** 这些前缀属于 Molly 自己的代码/配置/宿主数据，干活会话一律不许写。 */
 export const PROTECTED_PREFIXES = [
-  'G:\\Molly\\qq-whale',
-  'D:\\Documents\\deepseek-harness',
-  'C:\\Users\\example\\.dsh\\profiles',
+  // 插件源码：自己所在的那份包（线上跑的是 profile 里的拷贝，这里跟着它走）
+  PLUGIN_ROOT,
+  // 宿主配置 / 会话数据
+  path.join(os.homedir(), '.dsh', 'profiles'),
+  // 老机器上的宿主工作区（存在才算，别的机器没这个盘就不列）
+  ...(fs.existsSync('D:\\Documents\\deepseek-harness') ? ['D:\\Documents\\deepseek-harness'] : []),
 ]
 
 /** 拦下之后对主人说的固定话术（不许改词，测试盯着）。 */

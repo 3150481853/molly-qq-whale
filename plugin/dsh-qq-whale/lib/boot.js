@@ -73,7 +73,18 @@ function materialize(rev) {
 }
 
 /** 落盘失败时退回的数据目录（部署到别的机器用 MOLLY_DATA_DIR / config.dataDir 覆盖）。 */
-const BOOT_HEALTH_FALLBACK_DIR = 'G:\\Molly\\data\\qq-whale'
+const BOOT_HEALTH_FALLBACK_DIR = (() => {
+  // 2026-10-26 部署可移植性：以前写死 ${MOLLY_ROOT}\data\qq-whale，换一台没这盘的机器
+  // 连自检文件都写不出来。优先环境变量，其次插件包根的同级目录，最后退回 cwd。
+  const fromEnv = String(process.env.MOLLY_DATA_DIR || '').trim()
+  if (fromEnv) return fromEnv
+  try {
+    const pkgRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
+    return path.join(path.dirname(pkgRoot), 'qq-whale-data')
+  } catch {
+    return path.join(process.cwd(), 'qq-whale-data')
+  }
+})()
 
 /**
  * boot-health.json 的路径（task-51 追加）。

@@ -410,7 +410,10 @@ export const DEFAULTS = {
   // 只有排查问题才该关掉——加密是主人明确要求的行为，默认开。
   memoryEncrypt: true,
   // 密钥位置：故意**不在记忆目录里**——密文和钥匙分开放，备份外泄也解不开。
-  memoryKeyFile: 'G:\\Molly\\keys\\memory.key',
+  // 2026-10-26 部署可移植性：默认留空，运行期按 dataDir 推导
+  // （<dataDir 兄弟目录>/qq-whale-keys/memory.key）。写死盘符会让没这盘的机器
+  // 在 mkdir 处 ENOENT → ChatEngine 建不起来 → 插件「加载成功但 OneBot 从不连接」。
+  memoryKeyFile: '',
   // 这是"聊着聊着就忘了我"的真正解法：人能记住的从来不只是自我介绍。
   // 节流两道：攒够 MinLines 条、且距上次抽取超过 MinGapMinutes 才调一次，
   // 否则每轮多烧一次调用，额度扛不住。
@@ -473,7 +476,8 @@ export const DEFAULTS = {
   workCwd: '',
   // 干活会话的默认沙箱目录（task-41：和主会话/项目源码物理分开）。
   // 部署到别的机器时改这里，或直接配 workCwd。
-  workSandboxDir: 'G:\\Molly\\sandbox\\qq-work',
+  // 2026-10-26 同上：留空 = 运行期推导到 <dataDir 兄弟目录>/sandbox/qq-work。
+  workSandboxDir: '',
   // 单轮干活硬上限（毫秒）。task-44：原来只受 commandTimeoutMinutes（默认 15 分钟）
   // 约束，撞上「模型在等一个没人能点的弹窗」时整条命令队列陪葬。
   // 180s 足够覆盖查资料 + 写文件 + 发 QQ 的常见组合。
@@ -553,7 +557,8 @@ export const DEFAULTS = {
   // backend='edge' 可退回 edge-tts（晓晓）；本地服务挂了会按 voiceFallbackEdge 自动退。
   voiceBackend: 'sovits',
   voiceSovitsUrl: 'http://127.0.0.1:9880',
-  voiceRefAudio: 'G:\\Molly\\data\\qq-whale\\voice-ref\\molly-ref.wav',
+  // 2026-10-26 同上：留空 = <dataDir>/voice-ref/molly-ref.wav（不存在就走 edge-tts）。
+  voiceRefAudio: '',
   voicePromptText: '想的美，今天本鱼才是老大，你喝白开水去！',
   voicePromptLang: 'zh',
   voiceFallbackEdge: true,
@@ -589,7 +594,8 @@ export const DEFAULTS = {
   // 只对「QQ 拿不到 + 有音频文件」的群语音生效；私聊走上面那条，不跑本地模型。
   voiceAsrEnabled: true,
   // 常驻 Python worker 用的解释器（装了 faster-whisper 的那个 venv）
-  voiceAsrPython: 'G:\\Molly\\data\\video\\venv\\Scripts\\python.exe',
+  // 2026-10-26 部署可移植性：留空 = 本机没配 Python 就自动跳过本地 ASR（不报错、不硬失败）。
+  voiceAsrPython: '',
   // faster-whisper 模型（离线缓存，不联网下载）
   voiceAsrModel: 'small',
   voiceAsrThreads: 8,
@@ -610,7 +616,8 @@ export const DEFAULTS = {
   gifFramesColumns: 3,
   // 每帧缩放后的宽度（像素）：320 → 拼图约 976 宽，视觉得清又不太吃 token
   gifFrameWidth: 320,
-  gifFramesPython: 'G:\\Molly\\data\\video\\venv\\Scripts\\python.exe',
+  // 留空 = 没装 Pillow 就安静回退「只发首帧」。
+  gifFramesPython: '',
   // 拆帧总超时（毫秒）：单张实测 0.2–1.2 秒
   gifFramesTimeoutMs: 12000,
   // 带图轮次的输出预算上限（2026-10-26）：同图思考 token 波动 250~1450，
@@ -624,7 +631,8 @@ export const DEFAULTS = {
   // 直接发一条语音条（不走模型）。算法与曲库在 lib/singing.js。
   singingEnabled: false, // 2026-10-25 下架：音色未达标（训练数据只有 3.5 分钟），代码保留待社区歌唱模型接入
   // 渲染用 python（复用本地 ASR 那个 venv：numpy 已在，不需要新装依赖）
-  singingPython: 'G:\\Molly\\data\\video\\venv\\Scripts\\python.exe',
+  // 留空 = 没配 Python 就不唱歌（不影响聊天）。
+  singingPython: '',
   // 整首渲染超时（毫秒）：40 音节实测 4~20 秒
   singingTimeoutMs: 180000,
   // —— 戳一戳回应（2026-10-23，主人 m01231；2026-10-24 主人 m01908 改成模型说一句）——
@@ -713,6 +721,24 @@ function resolveDirs(config) {
     stickerDir,
     memoryDir: config.memoryDir || path.join(dataDir, 'memory'),
     dataDir,
+    /*
+     * 2026-10-26 部署可移植性（照 v1.1.5 的做法）。
+     *
+     * 以前 DEFAULTS 里写死 `${MOLLY_ROOT}\keys\memory.key` / `${MOLLY_ROOT}\sandbox\qq-work` /
+     * `${MOLLY_ROOT}\data\qq-whale\voice-ref\molly-ref.wav`：换一台没有 G 盘的机器，
+     * 一 mkdir 就 ENOENT，而这步在 MemoryStore 构造函数里 → ChatEngine 建不起来 →
+     * 插件「加载成功」但 OneBot 从不连接（像加载了、其实是死的）。
+     *
+     * 现在：显式配置（作者机 yml）> 按 dataDir 推导的兄弟目录。
+     */
+    memoryKeyFile: String(config.memoryKeyFile || '').trim()
+      || path.join(path.dirname(dataDir), 'qq-whale-keys', 'memory.key'),
+    workSandboxDir: String(config.workSandboxDir || '').trim()
+      || path.join(path.dirname(dataDir), 'sandbox', 'qq-work'),
+    voiceRefAudio: String(config.voiceRefAudio || '').trim()
+      || path.join(dataDir, 'voice-ref', 'molly-ref.wav'),
+    voiceAsrModelDir: String(config.voiceAsrModelDir || '').trim()
+      || path.join(dataDir, 'asr', 'models'),
     // 工坊默认落在「数据盘根」下（当前 dataDir=${MOLLY_ROOT}\data\qq-whale →
     // ${MOLLY_ROOT}\plugin-workshop），和线上插件、用户数据都分开；用户可用
     // config.workshopDir 指到别处。dataDir 没配「\data\」这一层时退回工作区同级。
@@ -962,12 +988,18 @@ function _configShapeReference(Schema) {
 
 export function apply(root, rawConfig = {}) {
   // 临时诊断（task-53 拆包排查）：证明「这次 apply 跑的是哪份模块、写盘是否可行」。
+  // 2026-10-26 部署可移植性：路径不再写死盘符，落到 <dataDir>/out/ 下；没配 dataDir 就跳过。
   try {
-    fs.writeFileSync(
-      'G:\\Molly\\qq-whale\\out\\main-apply-beat.txt',
-      `${new Date().toISOString()} pid=${process.pid} url=${import.meta.url}\n`,
-      'utf8',
-    )
+    const beatDir = String(rawConfig?.dataDir || DEFAULTS.dataDir || '').trim()
+    if (beatDir) {
+      const outDir = path.join(beatDir, 'out')
+      fs.mkdirSync(outDir, { recursive: true })
+      fs.writeFileSync(
+        path.join(outDir, 'main-apply-beat.txt'),
+        `${new Date().toISOString()} pid=${process.pid} url=${import.meta.url}\n`,
+        'utf8',
+      )
+    }
   } catch {}
   const config = resolveDirs({ ...DEFAULTS, ...rawConfig })
 

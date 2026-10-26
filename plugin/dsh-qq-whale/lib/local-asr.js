@@ -27,8 +27,10 @@ import crypto from 'node:crypto'
 /** 默认配置（会被 main.js 的 DEFAULTS 与 yml 覆盖）。 */
 export const ASR_DEFAULTS = {
   enabled: true,
-  python: 'G:\\Molly\\data\\video\\venv\\Scripts\\python.exe',
-  modelDir: 'G:\\Molly\\data\\video\\models',
+  // 2026-10-26 部署可移植性：留空 = 没配就自动跳过本地 ASR（不报错）。
+  python: '',
+  // 留空 = 用 voiceAsrModelDir 的推导值（<dataDir>/asr/models）。
+  modelDir: '',
   model: 'small',
   threads: 8,
   timeoutMs: 20000,

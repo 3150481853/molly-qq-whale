@@ -18,7 +18,8 @@ import { spawn } from 'node:child_process'
 
 export const SING_DEFAULTS = {
   enabled: true,
-  python: 'G:\\Molly\\data\\video\\venv\\Scripts\\python.exe',
+  // 2026-10-26 部署可移植性：留空 = 没配 Python 就不唱歌（不影响聊天）。
+  python: '',
   timeoutMs: 180000,
   maxSyllables: 48,
   vibratoCents: 14,

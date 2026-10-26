@@ -2835,7 +2835,7 @@ export class ChatEngine {
 
   /** 控制台写入的作息覆盖文件（运行期可改，重启后仍在） */
   sleepOverridePath() {
-    const dir = this.config?.dataDir || this.config?.memoryDir || 'G:\\Molly\\data\\qq-whale'
+    const dir = this.config?.dataDir || this.config?.memoryDir || path.join(process.cwd(), 'qq-whale-data')
     return path.join(dir, 'sleep-window.json')
   }
 

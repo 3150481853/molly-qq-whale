@@ -677,20 +677,34 @@ console.log('③.5 发版必带检查：底层状态指令 `#molly`…')
 {
   // 主人 m00525：以后每次发版都必须带这个功能。源码里被删掉/改坏时就让构建失败，
   // 而不是等到 release 上传后才发现「这个包没有 #molly」。
-  const statusFile = path.join(OUT, 'plugin', 'dsh-qq-whale', 'lib', 'status-command.js')
-  const mainFile = path.join(OUT, 'plugin', 'dsh-qq-whale', 'lib', 'main.js')
+  // 2026-10-26 变更（v1.1.5-Hotfix.2）：`status-command.js` 已被 `hash-commands.js`
+  // 取代 —— 同一条 `#molly` 由 `createHashHandler().handleGroup()` 回一行摘要，
+  // 私聊 `#` 走菜单。两种实现都算「带上了」，哪个在就用哪套检查。
+  const libOut = path.join(OUT, 'plugin', 'dsh-qq-whale', 'lib')
+  const mainFile = path.join(libOut, 'main.js')
   const missing = []
-  if (!fs.existsSync(statusFile)) missing.push('lib/status-command.js')
   let mainText = ''
   try {
     mainText = fs.readFileSync(mainFile, 'utf8')
   } catch {
     missing.push('lib/main.js 读不到')
   }
-  if (mainText && !mainText.includes("loadModule('statusCommand'")) missing.push('main.js 未装载 statusCommand')
-  if (mainText && !mainText.includes('statusHandler.handle(ev)')) missing.push('main.js 未接消息拦截')
+  const hasStatus = fs.existsSync(path.join(libOut, 'status-command.js'))
+  const hasHash = fs.existsSync(path.join(libOut, 'hash-commands.js'))
+  if (!hasStatus && !hasHash) missing.push('lib/status-command.js 或 lib/hash-commands.js')
+  if (mainText && hasStatus && !mainText.includes("loadModule('statusCommand'")) {
+    missing.push('main.js 未装载 statusCommand')
+  }
+  if (mainText && hasStatus && !mainText.includes('statusHandler.handle(ev)')) {
+    missing.push('main.js 未接消息拦截')
+  }
+  if (mainText && hasHash) {
+    if (!mainText.includes("loadModule('hashCommands'")) missing.push('main.js 未装载 hashCommands')
+    // hash-commands 的 handle() 内部按 scene 分流：私聊走 `#` 菜单，群里走 `#molly` 摘要
+    if (!mainText.includes('hashHandler.handle(ev)')) missing.push('main.js 未接 # 指令拦截')
+  }
   if (missing.length) fail(`发版必带检查未通过：缺 ${missing.join('、')}`)
-  console.log('   · `#molly` 已就位')
+  console.log(`   · \`#molly\` 已就位（${hasHash ? 'hash-commands' : 'status-command'} 实现）`)
 }
 
 const files = []

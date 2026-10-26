@@ -21,12 +21,6 @@
  * 这里再加一道**产物时长闸门** `maxSeconds`：从 wav 头算出真实时长，超限就返回
  * null 让调用方退回文字——不能把一条 60 秒以上的音频丢给 SnowLuma，上传失败
  * 会连整条回复一起吞掉。
- *
- * 2026-10-26（主人 m00855「和 Molly 现有的一样」）：补回**语速 / 句间静音**。
- * 配置里 voiceSpeed / voicePauseMs 从 v1.1.3-preview.1 起就传进来了，但本文件没接收，
- * speed_factor 一直写死 1.0、句间也没有额外停顿。现在：speed → speed_factor；
- * pauseMs > 0 且句子数 2..6 时逐句合成再拼 PCM（句间插静音），超过 6 句退回整段
- * 一次合成（只保语速），避免长回复多等十几秒。
  */
 import path from 'node:path'
 import fs from 'node:fs'
@@ -50,60 +44,6 @@ export const MOLLY_PROMPT_TEXT = '想的美，今天本鱼才是老大，你喝�
 /** 兼容旧名字：历史代码/测试里仍可能引用 DANIA_PROMPT_TEXT。 */
 export const DANIA_PROMPT_TEXT = MOLLY_PROMPT_TEXT
 
-/**
- * 逐句拼接时的句子上限。超过这个句数就退回「整段一次合成」（只保留语速，不插句间静音）：
- * 句间静音要逐句请求服务端，句数越多延迟越高，长回复不值得为了 50ms 停顿多等十几秒。
- */
-const MAX_JOIN_SENTENCES = 6
-
-/** 按句末标点切句（保留标点），过短的碎片并回前一句，避免「嗯。」单独成段反而更碎。 */
-export function splitVoiceSentences(text) {
-  const raw = String(text || '')
-  const pieces = raw
-    .split(/(?<=[。！？；…!?;])\s*/u)
-    .map((s) => s.trim())
-    .filter(Boolean)
-  const out = []
-  for (const p of pieces) {
-    if (p.length < 2 && out.length) out[out.length - 1] += p
-    else out.push(p)
-  }
-  return out
-}
-
-/** 读 wav 的 fmt 负载 + data 负载（单声道 16bit 足够，GPT-SoVITS 固定输出这种）。 */
-function readWavChunks(buf) {
-  if (!buf || buf.length < 44) return null
-  if (buf.toString('ascii', 0, 4) !== 'RIFF' || buf.toString('ascii', 8, 12) !== 'WAVE') return null
-  let fmt = null
-  let data = null
-  for (let pos = 12; pos + 8 <= buf.length; ) {
-    const id = buf.toString('ascii', pos, pos + 4)
-    const size = buf.readUInt32LE(pos + 4)
-    if (id === 'fmt ') fmt = buf.subarray(pos + 8, pos + 8 + size)
-    else if (id === 'data') {
-      data = buf.subarray(pos + 8, pos + 8 + Math.min(size, buf.length - pos - 8))
-      break
-    }
-    pos += 8 + size + (size & 1)
-  }
-  if (!fmt || !data) return null
-  return { fmt, data, byteRate: fmt.readUInt32LE(8), blockAlign: fmt.readUInt16LE(12) }
-}
-
-/** 用同一份 fmt 拼出 wav（head 长度随 fmt 负载长度走，别写死 44）。 */
-function buildWav(fmt, data) {
-  const head = Buffer.alloc(20 + fmt.length + 8)
-  head.write('RIFF', 0, 'ascii')
-  head.writeUInt32LE(head.length - 8 + data.length, 4)
-  head.write('WAVEfmt ', 8, 'ascii')
-  head.writeUInt32LE(fmt.length, 16)
-  fmt.copy(head, 20)
-  head.write('data', 20 + fmt.length, 'ascii')
-  head.writeUInt32LE(data.length, 20 + fmt.length + 4)
-  return Buffer.concat([head, data])
-}
-
 /** 语音文本清洗：去掉 CQ 码、尖括号标签、表情符号、多余空白。 */
 export function cleanVoiceText(text) {
   let s = String(text || '')
@@ -114,116 +54,6 @@ export function cleanVoiceText(text) {
   s = s.replace(/[*_`~]+/g, ' ')
   s = s.replace(/\s+/g, ' ').trim()
   return s
-}
-
-/* ────────────────────────────────────────────────────────────────
- * 语音文本规范化（2026-10-26，主人 m01497 拍板「上 1」）
- *
- * 背景：GPT-SoVITS 的 G2P 遇到「数字 + 字母单位」（2K / 60Hz / 1080P / 16GB）
- * 会整块切到英文音素，中文句子里突然蹦出一段英文腔。实测「2K 60Hz」被念成
- * "two-K sixty-hertz"，QQ 的语音转文字又听成「两 k sexy heart」。
- *
- * 这里只在**送进 TTS 的那份文本**上做替换，不改她发出去的文字。
- * 规则顺序有意义：先处理「区间」，再处理单个「数字+单位」。
- * ──────────────────────────────────────────────────────────────── */
-
-const CN_DIGITS = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九']
-const CN_UNITS = ['', '十', '百', '千']
-
-/** 整数转中文读法（支持到千万级，够分辨率/刷新率/容量用）。 */
-function intToCn(n) {
-  if (n < 10) return CN_DIGITS[n]
-  if (n < 20) return n === 10 ? '十' : `十${CN_DIGITS[n - 10]}`
-  if (n >= 10000) {
-    const head = Math.floor(n / 10000)
-    const tail = n % 10000
-    if (!tail) return `${intToCn(head)}万`
-    return `${intToCn(head)}万${tail < 1000 ? '零' : ''}${intToCn(tail)}`
-  }
-  const str = String(n)
-  let out = ''
-  let pendingZero = false
-  for (let i = 0; i < str.length; i++) {
-    const d = Number(str[i])
-    if (!d) {
-      if (out) pendingZero = true
-      continue
-    }
-    if (pendingZero) {
-      out += '零'
-      pendingZero = false
-    }
-    // 口语：2000 → 两千、200 → 两百（20 仍是二十，不读「两十」）
-    const unit = CN_UNITS[str.length - 1 - i]
-    const digit = d === 2 && (unit === '千' || unit === '百') ? '两' : CN_DIGITS[d]
-    out += digit + unit
-  }
-  return out
-}
-
-/** `1080` → `一千零八十`，`2.5` → `二点五`，非数字原样返回。 */
-export function chineseNumber(value) {
-  const s = String(value ?? '').trim()
-  if (s.includes('.')) {
-    const [head, tail] = s.split('.')
-    const frac = [...tail].map((d) => CN_DIGITS[Number(d)] ?? d).join('')
-    return `${chineseNumber(head)}点${frac}`
-  }
-  if (!/^\d+$/.test(s)) return s
-  return intToCn(Number(s))
-}
-
-/** 逐位读数字（分辨率用：1080 → 一零八零，1440 → 一四四零）。 */
-function readDigits(str) {
-  return [...String(str)].map((d) => CN_DIGITS[Number(d)] ?? d).join('')
-}
-
-/** 单位 → 中文说法（`60Hz` → `六十赫兹`）。 */
-const SPEAK_RULES = [
-  // 网址不念（念一串英文/斜杠最毁听感）
-  [/https?:\/\/\S+/gi, ''],
-  // 百分比
-  [/(\d+(?:\.\d+)?)\s*[%％]/g, (_m, n) => `百分之${chineseNumber(n)}`],
-  // 区间：60~90Hz / 30-144fps（必须先于单值规则，否则单位被吃掉一半）
-  [
-    /(\d+(?:\.\d+)?)\s*[~～\-－]\s*(\d+(?:\.\d+)?)\s*(hz|fps)/gi,
-    (_m, a, b, unit) => `${chineseNumber(a)}到${chineseNumber(b)}${/fps/i.test(unit) ? '帧' : '赫兹'}`,
-  ],
-  // 刷新率 / 频率
-  [/(\d+(?:\.\d+)?)\s*hz/gi, (_m, n) => `${chineseNumber(n)}赫兹`],
-  // 帧率
-  [/(\d+(?:\.\d+)?)\s*fps/gi, (_m, n) => `${chineseNumber(n)}帧`],
-  // 分辨率 P（1080P / 720P）：按位读，「一零八零P」才是口语
-  [/(\d{3,4})\s*p(?![a-z])/gi, (_m, n) => `${readDigits(n)}P`],
-  // 分辨率 K（2K / 2.5K / 4K）：中文口语本来就说「两K」，保留 K 更自然
-  [/(\d+(?:\.\d+)?)\s*k(?![a-z])/gi, (_m, n) => `${n === '2' ? '两' : chineseNumber(n)}K`],
-  // 容量
-  [/(\d+(?:\.\d+)?)\s*gb/gi, (_m, n) => `${chineseNumber(n)}个G`],
-  [/(\d+(?:\.\d+)?)\s*tb/gi, (_m, n) => `${chineseNumber(n)}个T`],
-  [/(\d+(?:\.\d+)?)\s*mb/gi, (_m, n) => `${chineseNumber(n)}兆`],
-  // 时间
-  [/(\d+(?:\.\d+)?)\s*ms(?![a-z])/gi, (_m, n) => `${chineseNumber(n)}毫秒`],
-  [/(\d+(?:\.\d+)?)\s*min(?![a-z])/gi, (_m, n) => `${chineseNumber(n)}分钟`],
-  // 温度 / 长度 / 重量
-  [/(\d+(?:\.\d+)?)\s*(?:℃|°c)/gi, (_m, n) => `${chineseNumber(n)}摄氏度`],
-  [/(\d+(?:\.\d+)?)\s*km\s*\/\s*h/gi, (_m, n) => `${chineseNumber(n)}公里每小时`],
-  [/(\d+(?:\.\d+)?)\s*km(?![a-z])/gi, (_m, n) => `${chineseNumber(n)}公里`],
-  [/(\d+(?:\.\d+)?)\s*cm(?![a-z])/gi, (_m, n) => `${chineseNumber(n)}厘米`],
-  [/(\d+(?:\.\d+)?)\s*mm(?![a-z])/gi, (_m, n) => `${chineseNumber(n)}毫米`],
-  [/(\d+(?:\.\d+)?)\s*kg(?![a-z])/gi, (_m, n) => `${chineseNumber(n)}公斤`],
-  // 剩下裸的英文缩写
-  [/\bHDR\b/g, '高动态范围'],
-  [/\bUSB\b/g, 'U S B'],
-]
-
-/**
- * 把「要念出来的文本」翻译成 TTS 友好的中文读法。
- * 只动数字 + 单位，不动正文措辞；返回串会比原文长一些（中文数字）。
- */
-export function normalizeSpeakText(text) {
-  let s = String(text || '')
-  for (const [re, to] of SPEAK_RULES) s = s.replace(re, to)
-  return s.replace(/[ \t]{2,}/g, ' ').replace(/\s*\n\s*/g, ' ').trim()
 }
 
 export class VoiceMaker {
@@ -243,10 +73,6 @@ export class VoiceMaker {
     maxChars = 160,
     maxSeconds = 0,
     maxKeep = 200,
-    // 2026-10-26（主人 m00855 拍板）：把「语速 / 句间静音」真正接上。
-    // 之前 engine 一直在传 voiceSpeed / voicePauseMs，但这里没接收，speed_factor 永远 1.0。
-    speed = 1.0,
-    pauseMs = 0,
     logger = () => {},
   } = {}) {
     this.dir = dir
@@ -265,15 +91,11 @@ export class VoiceMaker {
     // 0 / 非正数 = 不限时长（老行为）；配了值就按秒卡（QQ 硬上限 60，默认配 58）。
     this.maxSeconds = Number(maxSeconds) || 0
     this.maxKeep = Number(maxKeep) || 200
-    // speed：GPT-SoVITS 的 speed_factor（0.93 = 比模型默认慢 7%，1.0 = 原速）。
-    // pauseMs：多句时逐句合成后插在句间的静音毫秒数（0 = 不插，退回整段一次合成）。
-    this.speed = Number(speed) > 0 ? Number(speed) : 1.0
-    this.pauseMs = Number(pauseMs) > 0 ? Number(pauseMs) : 0
     this.logger = logger
     this._python = ''
     this._ready = false
     // over：产物超时长的次数（不是失败，是主动放弃发语音）
-    this.stats = { ok: 0, fail: 0, over: 0, cached: 0, lastMs: 0, lastError: '', lastBackend: '', lastParts: 0, lastSpeed: 0 }
+    this.stats = { ok: 0, fail: 0, over: 0, cached: 0, lastMs: 0, lastError: '', lastBackend: '' }
   }
 
   /** 探测 python（edge-tts 兜底时用）：优先配置值，其次本机候选路径，最后 PATH。 */
@@ -305,9 +127,7 @@ export class VoiceMaker {
 
   /** 合成一句语音；返回 `{file, bytes, ms, cached, backend}` 或 null（失败/文本不可用）。 */
   async synthesize(text, { signal } = {}) {
-    // 先清洗（去掉 CQ 码/表情，否则单位正则会被它们打断）再规范化数字单位，
-    // 让「2K 60Hz」这类词以中文读法送进 GPT-SoVITS，避免整句切英文音素。
-    const clean = normalizeSpeakText(cleanVoiceText(text)).slice(0, this.maxChars)
+    const clean = cleanVoiceText(text).slice(0, this.maxChars)
     if (clean.length < 2) return null
     if (signal?.aborted) return null
     await this.ensureDir()
@@ -315,7 +135,7 @@ export class VoiceMaker {
     const ext = useBackend === 'sovits' ? 'wav' : 'mp3'
     const hash = crypto
       .createHash('sha1')
-      .update(`${useBackend}|${this.voiceName}|${this.rate}|${this.pitch}|${this.speed}|${this.pauseMs}|${clean}`)
+      .update(`${useBackend}|${this.voiceName}|${this.rate}|${this.pitch}|${clean}`)
       .digest('hex')
       .slice(0, 16)
     const file = path.join(this.dir, `${hash}.${ext}`)
@@ -327,7 +147,6 @@ export class VoiceMaker {
         if (cachedSeconds === -1) return null
         this.stats.cached++
         this.stats.lastBackend = useBackend
-        this.stats.lastSpeed = this.speed
         return { file, bytes: st.size, ms: 0, cached: true, backend: useBackend, seconds: cachedSeconds }
       }
     } catch {
@@ -337,7 +156,7 @@ export class VoiceMaker {
     const startedAt = Date.now()
     let err = null
     if (useBackend === 'sovits') {
-      err = await this._sovitsSynth(clean, file, { signal })
+      err = await this._sovits(clean, file, { signal })
       if (err && this.fallbackEdge) {
         this.logger('warn', `Dania 语音合成失败（${String(err.message || err).slice(0, 120)}），改用 edge-tts`)
         const edgeFile = path.join(this.dir, `${hash}.mp3`)
@@ -379,7 +198,6 @@ export class VoiceMaker {
     if (seconds === -1) return null
     this.stats.ok++
     this.stats.lastMs = Date.now() - startedAt
-    this.stats.lastSpeed = this.speed
     this.stats.lastBackend = backend
     this.prune().catch(() => {})
     return { file, bytes, ms: this.stats.lastMs, cached: false, backend, seconds }
@@ -438,55 +256,6 @@ export class VoiceMaker {
     return -1
   }
 
-  /**
-   * sovits 合成入口：单句 / 关静音 / 句数超限 → 整段一次合成；
-   * 多句且 pauseMs > 0 → 逐句合成再按 PCM 拼接，句间插 pauseMs 静音。
-   * 拼接用首句的 fmt（GPT-SoVITS 每次输出格式固定），静态清零即静音，不用额外库。
-   */
-  async _sovitsSynth(clean, file, { signal } = {}) {
-    const sentences = this.pauseMs > 0 ? splitVoiceSentences(clean) : []
-    if (sentences.length < 2 || sentences.length > MAX_JOIN_SENTENCES) {
-      const err = await this._sovits(clean, file, { signal })
-      // 没走拼接也记成 1 段：/state 和自测靠它区分「单段」与「压根没合成」。
-      if (!err) this.stats.lastParts = 1
-      return err
-    }
-    const tmpDir = await fsp.mkdtemp(path.join(this.dir, '.join-')).catch(() => null)
-    if (!tmpDir) {
-      const err = await this._sovits(clean, file, { signal })
-      if (!err) this.stats.lastParts = 1
-      return err
-    }
-    try {
-      const parts = []
-      for (const s of sentences) {
-        if (signal?.aborted) return new Error('已中止')
-        const part = path.join(tmpDir, `p${parts.length}.wav`)
-        const err = await this._sovits(s, part, { signal })
-        if (err) return err
-        const chunks = readWavChunks(await fsp.readFile(part))
-        if (!chunks) return new Error('拼接失败：子句不是可解析的 wav')
-        parts.push(chunks)
-      }
-      const first = parts[0]
-      const align = Math.max(2, first.blockAlign || 2)
-      const silenceBytes = Math.max(align, Math.round((first.byteRate * this.pauseMs) / 1000 / align) * align)
-      const silence = Buffer.alloc(silenceBytes)
-      const datas = []
-      parts.forEach((p, i) => {
-        if (i > 0) datas.push(silence)
-        datas.push(p.data)
-      })
-      await fsp.writeFile(file, buildWav(first.fmt, Buffer.concat(datas)))
-      this.stats.lastParts = parts.length
-      return null
-    } catch (e) {
-      return e instanceof Error ? e : new Error(String(e))
-    } finally {
-      await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
-    }
-  }
-
   /** GPT-SoVITS 本地 HTTP（api_v2.py）：文字 → wav。返回 Error 或 null。 */
   async _sovits(clean, file, { signal } = {}) {
     if (!this.refAudio) return new Error('未配置参考音频 refAudio')
@@ -498,7 +267,7 @@ export class VoiceMaker {
       prompt_lang: this.promptLang || 'zh',
       text_split_method: 'cut5',
       batch_size: 1,
-      speed_factor: this.speed,
+      speed_factor: 1.0,
       media_type: 'wav',
       streaming_mode: false,
     }

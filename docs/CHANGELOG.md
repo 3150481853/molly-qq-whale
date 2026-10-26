@@ -9,6 +9,43 @@
 
 ---
 
+## 2026-10-26 · v1.1.5-Hotfix.2：撤回坏版本 + 认人修复 + 私聊 `#` 菜单 + 密钥按目录找
+
+> 主人 m01716：「先撤回github的1.1.5和其hotfix（两个有问题的版本），然后发布1.1.5-Hotfix.2」。
+
+**撤回**
+- GitHub 上 `v1.1.5`（id 423843992）与 `v1.1.5-Hotfix.1`（id 423894508）两个 Release **连同 tag 一起删除**；提交历史保留，`voice-pack-v1.2` 不动。
+- 原因：1.1.5 动记忆时把「称谓」做坏（`他希望你叫他「什」`、自称被当硬要求），Hotfix.1 只加固了解析、没解决真机认错人（15:00 群里把 999999999 叫成「主人」、把主人叫成「群友哥们儿」）。
+
+**回归基线**
+- 线上先回退到 `v1.1.5-preview.3`（两份副本：`${MOLLY_ROOT}\qq-whale\plugin\dsh-qq-whale` 与 `${HOME}\.dsh\profiles\desktop\node_modules\dsh-qq-whale`，逐字节比对 `lib` 48 个 js），再在其上叠加本版补丁；回退记录见 `${MOLLY_ROOT}\backup\rollback-20261026\ROLLBACK.md`。
+
+**认人（`lib/memory.js` / `lib/engine-context.js` / `lib/web.js`）**
+- 新增 `addressName(text)`：只认 `叫他X` / `叫你X` / `喊(他|你)X` / `称呼|叫法「X」`，单字、疑问词、「一声/一句」这类量词一律丢弃。
+- 新增 `MemoryStore.addressOf({ who, qq, limit })`：只取 `kind='address'`、按 QQ 匹配、**按权重新→旧**（同权重再按时间），解析不出名字的不进提示词。
+- `buildSystemPrompt()` 在「记忆」之前插 `# 怎么称呼` 段，每条 `- 叫他「X」`；段内加硬禁：群里打闹不许改用「哥们儿/兄弟/群友/老铁」，没记到的用群名片或「你」，别自己编。
+- `contextFor()` 把 `address` 从「你记得的事」里排除，避免自称句混进去。
+- 控制台 `MEMORY_KINDS` 收 `address`（不再当非法 kind）。
+
+**私聊 `#` 菜单（新文件 `lib/hash-commands.js`，`lib/main.js` 接在 `drop-self` 之后）**
+- 命令：`#`（菜单）/ `#状态` / `#记忆 关键词` / `#谁 名字或QQ` / `#开关`；纯文本直出、不进模型、不花额度；非主人只回一句人话并吞掉。
+- 群里发 `#molly` 只回一行摘要（版本 · 在不在线 · 运行时长），任何人都能触发、同群 30 秒一条；`#状态` 在群里不回。
+
+**记忆密钥定位（`lib/memcrypt.js` / `lib/memory.js`）**
+- 删掉写死的 `DEFAULT_KEY_FILE` 兜底逻辑，新增 `KEY_DIR_NAME` / `keyCandidates()` / `resolveKeyFile()`：显式配置 > `<dataDir 同级>/qq-whale-keys/memory.key` > `<dataDir>/memory.key` > 老 `${MOLLY_ROOT}\keys\memory.key`。
+- `MemoryStore` 新增 `dataDir` 选项；**有密文却没有钥匙时 `broken=true`、拒绝 `save()`**，密文原样不动，只报「记忆是加密的，但本机密钥不可用」。
+- 自测：`tools/memcrypt-key-resolution-selftest.mjs` 10/10。
+
+**自测**
+- `tools/memory-address-parse-selftest.mjs` 15/15；`tools/hash-command-selftest.mjs` 39/39；`tools/memcrypt-key-resolution-selftest.mjs` 10/10；`lib/*.js` 全量 `node --check` 通过。
+
+**退回**
+- 认人：换回 `${MOLLY_ROOT}\backup\rollback-20261026\installed-preview3-pre-patch\lib\` 三个文件并热重载；
+- `#` 菜单：删 `lib/hash-commands.js` + 撤销 `main.js` 三处接线 + `module-health.js` 的 manifest 项；
+- 密钥定位：`resolveKeyFile` 改回直接返回 `DEFAULT_KEY_FILE`。
+
+---
+
 ## 2026-10-26 · v1.1.5-Hotfix.1：称谓读取加固（热修复，已发布）
 
 > 主人 m02960：「为什么 Molly 叫子房还是不叫宝宝，是没调用称谓吗」。

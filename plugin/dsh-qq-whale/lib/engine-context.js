@@ -24,6 +24,7 @@
  */
 
 import { clockSection, clockParts, inClockWindow } from './clock.js'
+import fs from 'node:fs'
 
 export function buildSystemPrompt(input, deps) {
   const {
@@ -114,31 +115,38 @@ export function buildSystemPrompt(input, deps) {
     }
 
     /*
-     * 称谓（2026-10-26，主人 m01649 / m01672）。
+     * 称谓（2026-10-26 回退到 preview.3 之后的「认人」补丁）。
      *
-     * 事故：子房有礼了（888888888）反复说「不是说好叫我宝宝吗」，她照旧不叫——
-     * 那条记忆躺在池子里，等关键词命中才轮到它出场，而日常对话几乎不会聊到
-     * 「宝宝」这个词。
+     * 真机事故（主人给的截图，2026-10-26 14:57 / 15:00）：她三分钟前才刚说
+     * 「主人就是主人，222222222」，转头又把 Wishing（999999999）叫成「主人」。
+     * 查出来的原因：Wishing 的记忆里有一条「他深夜还在外面漂泊，**自称"主人"**」，
+     * 而池子里 47 个 QQ 只有 11 个有真正的称谓，其余人只能靠这类自述——
+     * 模型把「他自称主人」读成「我要叫他主人」。
      *
-     * 主人给的两条硬规矩：① 称谓单独成一类（kind='address'）；② **不受记忆
-     * 权重限制**。所以这里按 QQ 直取、每轮无条件拼进去，不参与上面的窗口裁剪；
-     * 连降智档也照带（称呼只要几个字，省不出什么，忘掉代价最大）。
+     * 所以规矩只有一条：**只认记忆里明确写着「叫他X」的**（memory.addressName
+     * 已经把自称/外号全筛掉了）。没写到的，用群名片或者「你」，不许自己编。
      */
     const addrItems = typeof deps.memory.addressOf === 'function' ? deps.memory.addressOf({ who: userName, qq, limit: 8 }) : []
     if (addrItems.length) {
-      /*
-       * 只拼抽好的名字（memory.addressName），不要把整句自然语言丢进去。
-       * 2026-10-26 真机事故：库里混进过 `他希望你叫他「什」`，排在「宝宝」前面，
-       * 三段硬要求互相打架，她干脆退回群名片。现在一条一行、只说结论。
-       */
       const names = addrItems.map((e) => String(e.name || '').trim()).filter(Boolean)
-      sp +=
-        '\n\n# 怎么称呼\n' +
-        names.map((n) => `- 叫他「${n}」`).join('\n') +
-        (names.length > 1 ? '\n（同一人有多条时，**按上面第一行**叫——那是最新一次说的。）' : '') +
-        '\n上面是称呼上的硬要求。每句话都按这里的叫法开口，**不用等对方再提醒**；' +
-        '和群名片、昵称、你自己临时起的外号冲突时，这里优先。' +
-        '这里没写到的，就用群名片或者「你」，别自己编一个。'
+      if (names.length) {
+        sp +=
+          '\n\n# 怎么称呼\n' +
+          names.map((n) => `- 叫他「${n}」`).join('\n') +
+          (names.length > 1 ? '\n（同一人有多条时按上面第一行叫——那是最新一次说的。）' : '') +
+          '\n这是称呼上的硬要求：每句话都按这里的叫法开口，不用等对方再提醒；' +
+          '和群名片、昵称、你自己临时起的外号冲突时，这里优先。\n' +
+          '记忆里写「他自称…」「他外号…」的，是他自己怎么称呼自己，**不是你该怎么叫他**，别拿来当称呼。\n' +
+          /*
+           * 2026-10-26 真机：主人问「我是谁」，她回「你是我的群友哥们儿呗」——
+           * 提示词里明明写着「- 叫他「主人」」。群里一打闹，她就把正经称谓
+           * 换成了「哥们儿/兄弟」这种泛称。所以这句必须点名禁掉泛称，
+           * 光说「按这里的叫法」她会在玩笑语境里自己找台阶下。
+           */
+          '不管群里在打闹、开玩笑，还是别人怎么称呼他，你都不许改用「哥们儿」「兄弟」' +
+          '「群友」「老铁」这类泛称——那等于没认出他。\n' +
+          '这里没写到的，就用群名片或者「你」——**别自己编一个称呼出来**（尤其别把谁都叫成「主人」）。'
+      }
     }
 
     // 记忆：这个人的 + 跟他相关关键词的
@@ -252,6 +260,36 @@ export function buildSystemPrompt(input, deps) {
 
     // 当前活动（给主动消息和"在干嘛"一个由头）
     sp += `\n\n# 刚刚你在\n${deps.pickActivity()}`
+
+    /*
+     * 提示词落盘（只在 config.debugSystemPromptPath 配了路径时启用）。
+     *
+     * 2026-10-26 真机排查用：群里主人问「我是谁」，她回「你是我的群友哥们儿呗」。
+     * 光看 simulate 判断不了——simulate 的 userName 是写死的 'example'，
+     * 而且没有真实群历史。所以把「这一轮到底给她看了什么」原样落一份，
+     * 才能分清是「称谓段没拼进去」还是「拼了但模型没照做」。
+     * 默认关闭：路径为空就完全不做 IO，退出这个 if 之后没有任何副作用。
+     */
+    const dumpPath = deps.config?.debugSystemPromptPath
+    if (dumpPath) {
+      try {
+        /*
+         * 按 QQ 分文件：群里每来一条消息都会覆盖一次，只留「最后一个说话的人」。
+         * 排查认人时必须能翻到「主人那一轮给她看了什么」，所以文件名带上号
+         * （xxx.txt → xxx-222222222.txt）；没号就退回原文件名。
+         */
+        const raw = String(dumpPath)
+        const tag = String(qq || '').replace(/[^\d]/g, '') || 'nogq'
+        const target = raw.includes('.') ? raw.replace(/(\.[^./\\]+)$/, `-${tag}$1`) : `${raw}-${tag}.txt`
+        fs.writeFileSync(
+          target,
+          `at=${new Date().toISOString()}\nscene=${scene}\nuserName=${userName}\nqq=${qq}\ngroupName=${groupName || ''}\nchars=${sp.length}\n----\n${sp}`,
+          'utf8',
+        )
+      } catch (err) {
+        deps.logger?.('warn', `提示词落盘失败：${err?.message || err}`)
+      }
+    }
     return sp
 }
 

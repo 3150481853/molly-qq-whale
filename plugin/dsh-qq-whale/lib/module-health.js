@@ -22,9 +22,8 @@ export const MODULE_MANIFEST = Object.freeze([
   { name: 'qqtools', required: false },
   { name: 'workshop', required: false },
   { name: 'roles', required: false },
-  // 底层状态指令（#molly）。纯附加通道：加载不上就只是没有这条指令，聊天不受影响，
-  // 所以是 optional —— 但也必须在 expected 里点名，否则「悄悄少一块」没人看得见。
-  { name: 'statusCommand', required: false },
+  // 私聊 `#` 命令通道（主人 m01007）。缺了只是没有菜单，聊天不受影响 → 可选。
+  { name: 'hashCommands', required: false },
 ])
 
 /** 进程内 registry（一份）。 */

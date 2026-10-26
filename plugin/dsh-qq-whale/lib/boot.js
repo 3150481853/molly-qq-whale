@@ -24,7 +24,6 @@
  */
 
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -73,19 +72,8 @@ function materialize(rev) {
   return genDir
 }
 
-/**
- * 落盘失败时退回的数据目录。
- *
- * 2026-10-26 部署可移植性：不再写死 G 盘（没有 G: 的机器上 mkdir 会 ENOENT，
- * 而这条路是「main.js 已经挂了、还想留个证据」的最后兜底，它自己更不能炸）。
- * 优先 `MOLLY_DATA_DIR`，否则 `<DSH_HOME|~/.dsh>/qq-whale`。
- */
-const BOOT_HEALTH_FALLBACK_DIR = (() => {
-  const env = String(process.env.MOLLY_DATA_DIR || '').trim()
-  if (env) return env
-  const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh')
-  return path.join(home, 'qq-whale')
-})()
+/** 落盘失败时退回的数据目录（部署到别的机器用 MOLLY_DATA_DIR / config.dataDir 覆盖）。 */
+const BOOT_HEALTH_FALLBACK_DIR = 'G:\\Molly\\data\\qq-whale'
 
 /**
  * boot-health.json 的路径（task-51 追加）。

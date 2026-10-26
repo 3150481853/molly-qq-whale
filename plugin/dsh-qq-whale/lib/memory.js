@@ -20,9 +20,9 @@ import path from 'node:path'
 import { localDateKey, localDateTime } from './budget.js'
 import {
   decryptText,
-  defaultKeyFile,
   isEnvelope,
   loadKey,
+  resolveKeyFile,
   writeEncryptedFile,
 } from './memcrypt.js'
 
@@ -98,12 +98,10 @@ if (!MEMORY_WINDOW) {
 
 /**
  * 记忆条目：
- *   { id, kind: 'fact'|'preference'|'promise'|'person'|'event'|'work'|'sticker'|'meme'|'address', who, qq, text, weight, at }
- *
- * address（称谓，2026-10-26 主人 m01649）：这个人希望被怎么称呼。
- * 它是**唯一不受记忆权重窗口限制**的 kind —— 由 addressOf() 按 QQ 直取、
- * 每轮必带，不参与 recall 的裁剪预算。原因见 addressOf 的注释。
+ *   { id, kind: 'fact'|'preference'|'promise'|'person'|'event'|'work'|'sticker'|'meme', who, qq, text, weight, at }
  * 2026-10-25（主人第 5 条）：新增 'meme'（梗/名场面/口头禅），她闲聊时能直接拿来玩。
+ * 2026-10-26（回退到 preview.3 后的「认人」补丁）：新增 'address'（称谓），
+ * 只由 addressOf() 按 QQ 读取、每轮必带，不参与普通召回（contextFor 里被过滤掉）。
  * weight 1..5，越高越不该被压缩掉。
  *
  * `who` 与 `qq`（2026-10-19 用户需求）：
@@ -127,45 +125,37 @@ export function isValidQq(value) {
 }
 
 /**
- * 从一条 address 记忆里抽出「该怎么叫他」的那个名字。
+ * 从一条记忆里抽出「该叫他什么」，抽不出来就返回 ''。
  *
- * 为什么要在读的时候就抽：库里存的是一整句自然语言（还混着模型层随手写的
- * 各种说法），直接拼进提示词会变成「- 他希望你叫他「什」」这种，模型只能猜。
- * 抽成名字之后，提示词里只剩干净的一行 `- 叫他「宝宝」`。
+ * 2026-10-26 真机事故（主人 m01649 / m01672，回退后补的最小补丁）：
+ * 群里 47 个 QQ 只有 11 个人有称谓，剩下的人只能靠记忆里的自述
+ * （「他自称「小鲸鱼」」「他认下了「哦鲸鲸」这个叫法」）。模型会把自述读成
+ * "要我这么叫他"，于是出现了这一幕：
  *
- * 只认第二人称指令句式；自称（他自称「X」）返回 ''，因为那是他的自称、
- * 不是要 Molly 用的称呼——真实事故里「你宝宝呢」被当成硬要求塞过一次。
+ *   Wishing（999999999）的记忆里有一条「他深夜还在外面漂泊，自称"主人"」，
+ *   而她三分钟前才刚对真正的主人（222222222）说过「主人就是主人」，
+ *   转头就把 Wishing 叫成了「主人」。
+ *
+ * 所以这里只认**明确要求**的句式：叫他X / 叫你X / 喊他X，以及
+ * 「X 这个称呼」「称呼为X」。自称、外号、叫法回忆一律不算——宁可退回
+ * 群名片，也不要她编一个称呼出来。
  */
 export function addressName(text) {
-  const s = String(text ?? '').trim()
-  if (!s) return ''
-  /*
-   * 不能一票否决「自称」：真实条目里就有
-   *   他自称「茶茶」，可以直接叫他茶茶
-   * 这种既是自称、又明确说了「叫他X」的句式。所以判定完全靠下面的指令句式，
-   * 纯自称（他自称「打工人」）因为没有「叫他」自然抽不出名字。
-   */
-  const NAME = '[「“"\']?([^」”"\'，,。；;：:！!？?\\s]{1,10})'
-  const patterns = [
-    new RegExp(`他?希望?你叫他\\s*${NAME}`),
-    new RegExp(`他?不要[^，,。；;]{0,12}[，,]\\s*叫他\\s*${NAME}`),
-    new RegExp(`(?:习惯|可以|就)叫你\\s*${NAME}`),
-    new RegExp(`你叫他\\s*${NAME}`),
-    new RegExp(`叫他\\s*${NAME}`),
-  ]
-  let name = ''
-  for (const re of patterns) {
-    const m = s.match(re)
-    if (m?.[1]) {
-      name = String(m[1]).trim()
-      break
-    }
-  }
-  name = name.replace(/[「」“”"'。，,！!？?；;：:]+$/u, '')
-  if (!name || name.length > 10) return ''
-  // 疑问词/无意义单字/动作词不能当称呼（真实事故：存过「他希望你叫他「什」」）
-  if (/^(什么|啥|谁|哪|怎么样|什么呀|什么玩意|什|出来|过去|起来|过来|回去|一声|一下|一下下|吗|呢|了|的)$/.test(name)) return ''
-  if (/^[的了着吧啊呀哦嘛吗呢]/.test(name)) return ''
+  const t = String(text ?? '').trim()
+  if (!t) return ''
+  const hit =
+    t.match(/叫他\s*[「『"'“]?([^」』"'”，,。；;\s]{1,12})/) ||
+    t.match(/叫你\s*[「『"'“]?([^」』"'”，,。；;\s]{1,12})/) ||
+    t.match(/喊(他|你)\s*[「『"'“]?([^」』"'”，,。；;\s]{1,12})/) ||
+    t.match(/(?:称呼|叫法)[^「『"'“]{0,8}[「『"'“]([^」』"'”]{1,12})/)
+  if (!hit) return ''
+  const name = String(hit[hit.length - 1] || '').trim()
+  // 单字一律不认：真事里出问题的那条是 `他希望你叫他「什」`（把「你叫我什么」
+  // 抽成了称呼）。单字称呼（哥/姐）本来也少，宁可退回群名片，也不要把半截字
+  // 塞进提示词里当硬要求。
+  if ([...name].length < 2) return ''
+  // 抽出来的是问句/代词（「他希望你叫他「什么」」）就作废，别把垃圾塞进提示词
+  if (/^(谁|什么|啥|怎么|称呼|叫法|他|你|我)$/.test(name)) return ''
   return name
 }
 
@@ -178,9 +168,12 @@ export class MemoryStore {
    * @param {number} [options.growTo] 记满后自动扩到的上限（主人要求 10000；0=不自动扩）
    * @param {{keyFile?: string}|null} [options.crypt] 传了就加密落盘（生产用）；null=明文（测试/迁移工具）
    * @param {string} [options.poolFile] 扩容状态落盘位置，默认 dir/memory-pool.json
+   * @param {string} [options.dataDir] 数据目录（密钥默认放在它的**同级** qq-whale-keys/ 里）；
+   *   不传就按 dir 的上一级推断（dir 通常是 <dataDir>/memory）
    */
-  constructor({ dir, logger, limit = 2000, growTo = 0, crypt = null, poolFile = '' }) {
+  constructor({ dir, logger, limit = 2000, growTo = 0, crypt = null, poolFile = '', dataDir = '' }) {
     this.dir = dir
+    this.dataDir = String(dataDir || '').trim() || path.dirname(path.resolve(dir))
     this.logger = logger || (() => {})
     this.crypt = crypt || null
     this.broken = false
@@ -197,30 +190,34 @@ export class MemoryStore {
     this.limit = this.readGrownLimit() || this.baseLimit
     if (this.crypt) {
       /*
-       * 部署可移植性（2026-10-26）：密钥起不来**不能**让构造函数炸。
-       * 之前 loadKey 抛错会顺着 MemoryStore → ChatEngine 构造函数一路上去，
-       * boot() 直接失败，表现是「插件加载成功但 OneBot 从未连过」。
-       * 现在的口径：
-       *   - 钥匙文件在、能解析     → 正常加密
-       *   - 这台机器建不出/读不了  → 降级明文 + 一条 warn，插件照常跑（可读性还更好）
-       *   - 钥匙在但解析不了/长度错 → 仍然抛（那是数据问题，静默降级等于把密文冲掉）
+       * 密钥定位（2026-10-26，1.1.5-Hotfix.2）：
+       *   配置里的 memoryKeyFile > 已存在的候选（数据目录同级的 qq-whale-keys/、数据目录里、
+       *   老的 ${MOLLY_ROOT}\keys）> 新建在「数据目录同级/qq-whale-keys/memory.key」。
+       *   老代码把默认值写死成 ${MOLLY_ROOT}\keys\memory.key，换台机器没有 G 盘时
+       *   mkdir 报 ENOENT，插件看着加载成功、实际记忆全空（官方事故记录在 memcrypt.js 顶部）。
        */
-      try {
-        const info = loadKey({
-          keyFile: this.crypt.keyFile || defaultKeyFile({ baseDir: path.dirname(dir) }),
-          create: true,
-        })
-        this.key = info.key
-        this.keyFile = info.file
-        this.keySource = info.source
-      } catch (err) {
-        if (err?.name !== 'KeyUnavailableError') throw err
-        this.crypt = null
-        this.keyError = String(err.message || err)
+      const keyFile = resolveKeyFile({
+        keyFile: this.crypt.keyFile,
+        dataDir: this.dataDir,
+        // 测试/迁移工具可以传 null 关掉「老 G 盘钥匙」这条兜底，免得在本机误用真钥匙
+        legacy: this.crypt.legacyKeyFile === null ? '' : this.crypt.legacyKeyFile,
+      })
+      this.keyFile = keyFile
+      // 已经有密文却找不到钥匙：绝不新建一把新的（那等于默认记忆清空），直接冻住不写
+      if (!fs.existsSync(keyFile) && fs.existsSync(this.file)) {
+        this.broken = true
         this.logger(
-          'warn',
-          `记忆加密不可用，已降级为明文存储（记忆仍可读可写）：${this.keyError}`,
+          'error',
+          `记忆是加密的，但本机密钥不可用：${keyFile}（已停止记忆读写以免覆盖密文；把 memoryKeyFile 指回原钥匙，或设 memoryEncrypt:false 后手工迁移）`,
         )
+        return
+      }
+      const info = loadKey({ keyFile, create: true })
+      this.key = info.key
+      this.keyFile = info.file
+      this.keySource = info.source
+      if (info.source === 'created') {
+        this.logger('info', `记忆密钥已新建在 ${info.file}（备份时请把它单独拷走）`)
       }
     }
     this.load()
@@ -272,13 +269,13 @@ export class MemoryStore {
       return
     }
     let text = raw
-    let outer = null
-    try {
-      outer = JSON.parse(raw)
-    } catch {
-      outer = null
-    }
     if (this.crypt) {
+      let outer = null
+      try {
+        outer = JSON.parse(raw)
+      } catch {
+        outer = null
+      }
       if (outer && isEnvelope(outer)) {
         try {
           text = decryptText(outer, this.key)
@@ -293,19 +290,6 @@ export class MemoryStore {
         // 历史明文文件：标记迁移，下面会先去重再整体加密
         this.needsMigration = true
       }
-    } else if (outer && isEnvelope(outer)) {
-      /*
-       * 降级路径的反向保护（2026-10-26）：密钥不可用已经降级成明文模式，
-       * 但盘上躺着的仍是密文 —— 此时绝不能当普通 JSON 处理（那会把 entries 读成空、
-       * 下一次 save() 用明文把唯一一份密文冲掉）。停下来，等钥匙修好。
-       */
-      this.broken = true
-      this.entries = []
-      this.logger(
-        'error',
-        '记忆是加密的，但本机密钥不可用：已停止记忆读写以免覆盖密文（把 memoryKeyFile 指回原钥匙，或设 memoryEncrypt:false 后手工迁移）',
-      )
-      return
     }
     try {
       const parsed = JSON.parse(text)
@@ -488,8 +472,6 @@ export class MemoryStore {
       encrypted: Boolean(this.crypt),
       keyFile: this.crypt ? this.keyFile : '',
       keySource: this.crypt ? this.keySource : '',
-      // 2026-10-26 部署可移植性：加密起不来时这里说明原因（/state.memory.keyError）
-      keyError: this.keyError || '',
       broken: this.broken,
       deduped: this.deduped,
       merged: this.mergedCount,
@@ -666,8 +648,6 @@ export class MemoryStore {
       if (id.qqHit || id.sameName) strongHit = true
       s += (e.weight || 3) * 0.3
       if (wantMeme && e.kind === 'meme') s += 3 // 问梗时梗优先
-      // 称谓永远排在同一个人的其他记忆前面：问「你知道我是谁」时先看到称呼
-      if (e.kind === 'address') s += 2
       // 越新越值钱，但只值一点点，避免"全是刚说的废话"
       const ageDays = (Date.now() - e.at) / 86400000
       s += Math.max(0, 2 - ageDays / 30) * 0.3
@@ -727,59 +707,48 @@ export class MemoryStore {
   }
 
   /**
-   * 称谓语直查：这个人希望被怎么称呼。
+   * 按 QQ 取称谓（2026-10-26 认人补丁）。
    *
-   * 主人 m01649 / m01672 给的两条硬规矩：「称谓类的单独列出」「称谓不受记忆权重限制」。
+   * 跟别的记忆不一样：**不看权重、不参与窗口裁剪、每轮无条件带上**。
+   * 原因很简单——称谓只有几个字，省不出什么；而忘掉的代价是「你是谁啊」
+   * 和把别人叫成主人。
    *
-   * 为什么要单独一条通道：
-   *   - recall 是按关键词打分再截断的（窗口 24 条，降智档 8 条），称呼这种短句
-   *     在打分上永远打不过「他上周去杭州出差」这种长条目，被挤出窗口是常态；
-   *   - 可称呼是每句话都要用的东西。真实事故：子房有礼了（888888888）在群里
-   *     反复说「不是说好叫我宝宝吗」，她照旧一次都没叫——那条记忆存在库里，
-   *     只是从来没排进上下文。
-   *
-   * 所以这里绕开打分与预算：按 QQ（唯一身份）直取，按时间新→旧，全量返回，
-   * 由 engine-context 每轮拼进 system prompt。limit 只是防脏数据的兜底上限。
+   * 只认 addressName() 抽得出名字的条目（也就是「叫他X」这种明确要求）。
+   * 自称、外号一律抽不出来，直接丢——这是这次事故的正解。
    */
   addressOf({ who = '', qq = '', limit = 8 } = {}) {
     const q = normalizeQq(qq)
     const name = String(who || '').trim()
-    const items = this.entries.filter((e) => {
-      if (e.kind !== 'address') return false
-      if (q && normalizeQq(e.qq) === q) return true
-      // 老条目可能没有 QQ（早期明文时期），名字对得上也算
-      return !q && !!name && e.who === name
-    })
     /*
-     * 2026-10-26 第三修（主人 m02960「为什么还是不叫宝宝」）。
+     * 排序：**先看权重，再看时间**（2026-10-26 主人 m01431：「恢复称谓的权重，
+     * 但是维持 5 级权重」）。
      *
-     * 第一条修完就上线了，但真机上她还是叫「子房」——回查提示词发现「怎么称呼」
-     * 段里排在最前面的是 `他希望你叫他「什」`：规则层/模型层把一句「你叫我什么」
-     * 抽成了称谓，还按「新的优先」压在了真正的「宝宝」上面。三段硬要求互相打架，
-     * flash 档就退回到最保险的群名片叫法。
-     *
-     * 所以读取时再筛一遍，只认**明确的第二人称指令**：
-     *   - 必须是他希望你叫他「X」/ 叫他 X / 你叫他「X」这种句式；
-     *   - 自称（他自称「X」）一律不算称呼要求——那是他的自称，不是让他叫的；
-     *   - 抽出来的名字要过黑名单（什么/啥/谁/什…），单字无意义的不算。
-     * 同一个人给了多个称呼时按时间新→旧，engine-context 只带前几个并提示以最新为准。
+     * 为什么不能只按时间：同一个人可能同时有「他希望你叫他「宝宝」」(w=4) 和
+     * 「他是主人本人，你叫他「主人」」(w=5)；纯按 at 排，谁后写谁在前，
+     * 一条新写的闲聊外号就能把人工确认过的正经称谓挤到第二行——而
+     * engine-context 的规矩是「同一人多条以第一行为准」。权重是人确认过的
+     * 强度，比「谁后说的」更该说了算。权重相同再按时间新→旧。
      */
-    const seen = new Set()
+    const raw = this.entries
+      .filter((e) => e.kind === 'address')
+      .filter((e) => (q ? normalizeQq(e.qq) === q : Boolean(name) && e.who === name))
+      .sort((a, b) => (b.weight || 0) - (a.weight || 0) || (b.at || 0) - (a.at || 0))
     const out = []
-    for (const e of items.sort((a, b) => (b.at || 0) - (a.at || 0))) {
+    const seen = new Set()
+    for (const e of raw) {
       const n = addressName(e.text)
       if (!n || seen.has(n)) continue
       seen.add(n)
       out.push({ ...e, name: n })
-      if (out.length >= Math.max(1, limit)) break
+      if (out.length >= limit) break
     }
     return out
   }
 
   /** 给模型看的记忆段落 */
   contextFor({ who = '', qq = '', query = '', limit = MEMORY_WINDOW.contextLimit } = {}) {
-    // 称谓由 engine-context 单独成段注入（每轮必带、绕开窗口），这里剔掉避免同一句
-    // 称呼在 system prompt 里出现两遍——模型会以为是两个人有两种叫法。
+    // 称谓单列一段（engine-context 里每轮必带），这里必须滤掉：
+    // 否则「他自称茶茶」会混进「你记得的事」，又变成可被当成称呼的证据。
     const items = this.recall({ who, qq, query, limit }).filter((e) => e.kind !== 'address')
     if (items.length === 0) return ''
     // 单条过长时截断（见 MEMORY_WINDOW.entryChars 的说明），避免一条长记忆挤掉别人
@@ -826,16 +795,9 @@ export class MemoryStore {
  * 存在的理由：关键词召回对「我喜欢什么」这种问题天然失效——记忆条目里
  * 压根没有"喜欢"两个字。可这类问题恰恰是用户检验"你到底记不记得我"的首选。
  */
-export function intentKinds(q) {
+function intentKinds(q) {
   const s = String(q || '')
   // 先摘掉问句外壳，只看实义部分
-  /*
-   * 称谓（2026-10-26，主人 m01649）：问「你该叫我什么」「知道我是谁吗」时，
-   * 先信 address，再信 person。放在 person 前面，否则「我叫什么」永远只召回自称类。
-   */
-  if (/(叫我什么|叫我啥|怎么叫我|称呼我什么|你该叫我|我该叫你|该叫你什么|该叫你啥|叫错|忘了我叫)/.test(s)) {
-    return ['address', 'person']
-  }
   if (/(喜欢|爱吃|爱喝|爱好|口味|讨厌|受不了|雷点|忌口)/.test(s)) {
     return ['preference', 'fact']
   }

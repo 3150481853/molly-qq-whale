@@ -317,9 +317,6 @@ export class WebWidget {
           backend: String(c.voiceBackend || ''),
           quietStart: String(c.voiceQuietStart || ''),
           quietEnd: String(c.voiceQuietEnd || ''),
-          // 2026-10-26（主人 m01180）：语速/句间静音也回读，改完 reload 直接核「到底吃上没」。
-          speed: Number(c.voiceSpeed ?? 1),
-          pauseMs: Number(c.voicePauseMs ?? 0),
           // VoiceMaker 没建出来（voiceEnabled=false）时 ready=false
           ready: Boolean(e?.voice),
           stats: e?.voice?.stats ? { ...e.voice.stats } : null,
@@ -374,11 +371,6 @@ export class WebWidget {
             welcomed: e.stats?.welcomeSent || 0,
             failed: e.stats?.lotterySendFail || 0,
           },
-          // 2026-10-26（主人 m06713）：到点没开奖的排查口——
-          // lastTick 持续前进 = 插件内定时器活着；stalled 不动 = 定时器已停。
-          lastTick: e.groupfun?.lastTick || null,
-          lastAuto: e.groupfun?.lastAuto || null,
-          sweeps: e.groupfun?.sweeps || 0,
         }
         out.poke = {
           enabled: e.config?.pokeEnabled !== false,
@@ -727,19 +719,6 @@ export class WebWidget {
       out.qqTool = this.state?.qqTool || { registered: false, error: '未初始化' }
     } catch {
       out.qqTool = { registered: false, error: '读取异常' }
-    }
-    /*
-     * 底层状态指令的生效配置（主人 m00001 的 `#molly`）。
-     *
-     * 这里必须显式挂出去：`makeStatePayload` 是白名单式拼装的，
-     * main.js 上加了 getter 也不会自动出现在 /state 里 —— 不挂就永远是空的，
-     * 排查时会误以为「代码没生效」，实际是没人把它抄出来。
-     * 值直接取 main.js 的 state.statusCommand（它内部已 try/catch，读不到会给 available:false）。
-     */
-    try {
-      out.statusCommand = this.state?.statusCommand || { available: false, error: '未挂载' }
-    } catch (err) {
-      out.statusCommand = { available: false, error: String(err?.message || err) }
     }
     /*
      * 事件环形缓冲（用户 m16800「molly 为什么不回 333333333」）。
@@ -1965,123 +1944,6 @@ export class WebWidget {
     })
 
     /*
-     * POST /dsh-qq-whale/lottery/simulate ?? ???????????????
-     * ????????? / ???? / ?????????????????????
-     * body: { groupId, userId, card?, text }
-     */
-    add({
-      kind: 'exact',
-      path: `${ROUTE_PREFIX}/lottery/simulate`,
-      ...wrap(async (req, res) => {
-        if (req.method !== 'POST') {
-          sendJson(res, 405, { ok: false, error: 'method not allowed' })
-          return
-        }
-        const raw = await readBody(req)
-        let body
-        try {
-          body = JSON.parse(raw || '{}')
-        } catch {
-          sendJson(res, 400, { ok: false, error: 'bad json' })
-          return
-        }
-        const rawText = String(body?.text || '').trim()
-        const groupId = String(body?.groupId || '')
-        const userId = String(body?.userId || '')
-        // ??????????? @Molly ???????????????????
-        let text = rawText.replace(/^\[CQ:at,[^\]]*\]\s*/gu, '').trim()
-        text = text.replace(/^@\S+\s+/u, '').trim()
-        if (!text || !groupId || !userId) {
-          sendJson(res, 400, { ok: false, error: 'groupId/userId/text ????' })
-          return
-        }
-        const e = this.engineRef()
-        if (!e?.maybeGroupFun) {
-          sendJson(res, 503, { ok: false, error: 'engine ????' })
-          return
-        }
-        const ev = {
-          post_type: 'message',
-          message_type: 'group',
-          group_id: Number(groupId),
-          user_id: Number(userId),
-          message_id: Date.now() % 1000000,
-          time: Math.floor(Date.now() / 1000),
-          raw_message: text,
-          sender: { card: String(body?.card || ''), nickname: String(body?.card || '') },
-          message: [{ type: 'text', data: { text } }],
-        }
-        try {
-          const out = await e.maybeGroupFun({ ev, text })
-          const gf = e.groupfun
-          sendJson(res, 200, {
-            ok: true,
-            text,
-            result: out || null,
-            rooms: gf?.rooms ? gf.rooms.size : null,
-            lastAuto: gf?.lastAuto || null,
-          })
-        } catch (err) {
-          sendJson(res, 500, { ok: false, error: String(err?.stack || err).slice(0, 1500) })
-        }
-      }),
-    })
-
-    /*
-     * POST /dsh-qq-whale/groupfun/notice —— 本地调试：用合成的入群通知驱动
-     * engine.onNotice，验证「新人入群自动欢迎」整条链路（会真的往群里发欢迎语）。
-     * body: { groupId, userId }
-     */
-    add({
-      kind: 'exact',
-      path: `${ROUTE_PREFIX}/groupfun/notice`,
-      ...wrap(async (req, res) => {
-        if (req.method !== 'POST') {
-          sendJson(res, 405, { ok: false, error: 'method not allowed' })
-          return
-        }
-        const rawBody = await readBody(req)
-        let body
-        try {
-          body = JSON.parse(rawBody || '{}')
-        } catch {
-          sendJson(res, 400, { ok: false, error: 'bad json' })
-          return
-        }
-        const groupId = String(body?.groupId || '')
-        const userId = String(body?.userId || '')
-        if (!groupId || !userId) {
-          sendJson(res, 400, { ok: false, error: 'groupId/userId 不能为空' })
-          return
-        }
-        const e = this.engineRef()
-        if (!e?.onNotice) {
-          sendJson(res, 503, { ok: false, error: 'engine 还没就绪' })
-          return
-        }
-        const ev = {
-          post_type: 'notice',
-          notice_type: 'group_increase',
-          sub_type: 'increase',
-          group_id: Number(groupId),
-          user_id: Number(userId),
-          time: Math.floor(Date.now() / 1000),
-        }
-        try {
-          const out = await e.onNotice(ev)
-          const gf = e.groupfun
-          sendJson(res, 200, {
-            ok: true,
-            result: out || null,
-            welcomeCooldownKeys: gf?.welcomeAt ? [...gf.welcomeAt.keys()] : null,
-          })
-        } catch (err) {
-          sendJson(res, 500, { ok: false, error: String(err?.stack || err).slice(0, 1500) })
-        }
-      }),
-    })
-
-    /*
      * POST /dsh-qq-whale/chat/simulate —— 空跑一轮「决策 + 生成」，**不发送**。
      *
      * 为什么要有：2026-10-21 晚「@ 了不回」事故里，决策日志明明是 yes，
@@ -2147,8 +2009,10 @@ export class WebWidget {
                 norm,
                 scene,
                 conv,
-                userName: 'example',
-                groupName: '示例测试群',
+                // userName/groupName 允许调用方覆盖：真机事故排查时要用
+                // 真实的群名片和群名，否则称谓按 qq 命中、跟线上不是同一份输入。
+                userName: String(body?.userName || 'example'),
+                groupName: String(body?.groupName || '示例测试群'),
                 mood: null,
                 signal: new AbortController().signal,
               })

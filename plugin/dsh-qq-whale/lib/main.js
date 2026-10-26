@@ -103,6 +103,16 @@ const registerQqTool = qqtoolsMod?.registerQqTool || null
 const registerWorkshopTool = qqtoolsMod?.registerWorkshopTool || null
 
 /*
+ * 私聊 `#` 命令通道（主人 m01007）：私聊发 `#` 直接给菜单，不经过模型。
+ *
+ * 为什么单独一个模块而不是塞进 commands.js：那套是「自然语言路由」，
+ * 要过模型、过角色门，主人已经嫌它爱报没权限；这条通道必须是
+ * 「本地直读、不花额度、不猜意图」。纯函数在 hash-commands.js 里，能离线自测。
+ */
+const hashMod = await loadModule('hashCommands', './hash-commands.js', { optional: true })
+const createHashHandler = hashMod?.createHashHandler || null
+
+/*
  * task-55：上下文/记忆窗口只有一处定义（memory.js 顶部的 profiles），
  * 这里只负责把「当前生效值」读出来放进 /state 的只读字段。
  * 不走 loadModule：它不是可选子模块，取不到就等于窗口算不出来，直接装配失败更诚实。
@@ -113,25 +123,6 @@ const WINDOW_PROFILE = memoryMod.WINDOW_PROFILE
 
 const workshopMod = await loadModule('workshop', './workshop.js', { optional: true })
 const Workshop = workshopMod?.Workshop || null
-
-/*
- * 底层状态激发指令（#molly，主人 m00001 / m00093 拍板）。
- *
- * 跟 loadModule 的其它 optional 模块一致：没加载上 = 这条指令不存在，
- * 并在 /state.plugins 的 missing 里点名（module-health 已登记 statusCommand）。
- * 绝不能因为它加载失败就把整个插件带下去 —— 它本身是「排查用」的旁路通道。
- */
-const statusMod = await loadModule('statusCommand', './status-command.js', { optional: true })
-const createStatusHandler = statusMod?.createStatusHandler || null
-const statusVersion = statusMod?.version || null
-// 形状说明（_configShapeReference）要用到默认值：模块没加载上时退化成同一份常量，
-// 免得因为没有默认值把整个 schema 拆了。
-const DEFAULT_STATUS_COMMAND = statusMod?.DEFAULT_STATUS_COMMAND || {
-  enabled: true,
-  trigger: '#molly',
-  cooldownSeconds: 30,
-  ownerDetail: true,
-}
 
 // 三级角色（owner / adm / guest）。用户 m25316 给 333333333 一个「管理员」位，
 // 权限低于主人。解析与判定全在 roles.js 里，main.js 只负责把配置喂进去、
@@ -419,13 +410,7 @@ export const DEFAULTS = {
   // 只有排查问题才该关掉——加密是主人明确要求的行为，默认开。
   memoryEncrypt: true,
   // 密钥位置：故意**不在记忆目录里**——密文和钥匙分开放，备份外泄也解不开。
-  //
-  // 2026-10-26 部署者可移植性修复：这里**不再写死 ${MOLLY_ROOT}\keys**。
-  // 空 = 运行时按 dataDir 推导出「qq-whale-keys」兄弟目录（见 resolveDirs），
-  // 这样没有 G 盘的机器也能正常建钥；作者机在 cordis.patch.yml 里显式配了原路径，
-  // 行为与以前完全一致。硬编码盘符曾经让部署者在 mkdir 处 ENOENT，
-  // 进而把 ChatEngine 构造函数带崩（插件「加载成功」但 OneBot 从未连过）。
-  memoryKeyFile: '',
+  memoryKeyFile: 'G:\\Molly\\keys\\memory.key',
   // 这是"聊着聊着就忘了我"的真正解法：人能记住的从来不只是自我介绍。
   // 节流两道：攒够 MinLines 条、且距上次抽取超过 MinGapMinutes 才调一次，
   // 否则每轮多烧一次调用，额度扛不住。
@@ -487,10 +472,8 @@ export const DEFAULTS = {
   // 所以必须是真实存在的绝对路径（不存在会当场 mkdir）。
   workCwd: '',
   // 干活会话的默认沙箱目录（task-41：和主会话/项目源码物理分开）。
-  // 空 = 运行时落在 dataDir 的兄弟目录 `sandbox/qq-work`（见 resolveDirs）。
-  // 2026-10-26：以前写死 ${MOLLY_ROOT}\sandbox\qq-work，没有 G 盘的机器执行「命令」时 mkdir 会炸；
-  // 作者机在 cordis.patch.yml 里显式配了原路径，行为不变。
-  workSandboxDir: '',
+  // 部署到别的机器时改这里，或直接配 workCwd。
+  workSandboxDir: 'G:\\Molly\\sandbox\\qq-work',
   // 单轮干活硬上限（毫秒）。task-44：原来只受 commandTimeoutMinutes（默认 15 分钟）
   // 约束，撞上「模型在等一个没人能点的弹窗」时整条命令队列陪葬。
   // 180s 足够覆盖查资料 + 写文件 + 发 QQ 的常见组合。
@@ -517,18 +500,6 @@ export const DEFAULTS = {
   // 打听一件事最多等多久（秒）。查资料不能让她在群里失联太久，
   // 超时就当没查到、照常聊天。2026-10-20 主人要求放宽到 5 分钟（原 45 秒）。
   researchTimeoutSeconds: 300,
-
-  // —— 底层状态激发指令（#molly，2026-10-26 主人 m00001）——
-  // 整条消息只等于触发词，就当场回一条她自己的真实状态：不进聊天历史、
-  // 不调模型、不花额度，闭眼模式/群里没被 @/她正忙都照样应答。
-  // 总开关（enabled）关掉时它也不吭声 —— 那是「彻底闭嘴」的唯一手段。
-  // 跟 SnowLuma 的 `#sl` 是同一类东西，只是状态维度是 Molly 自己的。
-  statusCommand: {
-    enabled: true,
-    trigger: '#molly',
-    cooldownSeconds: 30,
-    ownerDetail: true,
-  },
 
   // —— 调试 ——
   blindMode: false,
@@ -582,10 +553,7 @@ export const DEFAULTS = {
   // backend='edge' 可退回 edge-tts（晓晓）；本地服务挂了会按 voiceFallbackEdge 自动退。
   voiceBackend: 'sovits',
   voiceSovitsUrl: 'http://127.0.0.1:9880',
-  // 空 = 运行时用 `<dataDir>/voice-ref/molly-ref.wav`（见 resolveDirs）。
-  // 2026-10-26：以前写死 ${MOLLY_ROOT}\data\qq-whale\voice-ref\...，部署机没这份文件时
-  // 合成会 400（9880 拿不到参考音频）；留空 + 运行时推导，作者的 yml 里配的是原路径。
-  voiceRefAudio: '',
+  voiceRefAudio: 'G:\\Molly\\data\\qq-whale\\voice-ref\\molly-ref.wav',
   voicePromptText: '想的美，今天本鱼才是老大，你喝白开水去！',
   voicePromptLang: 'zh',
   voiceFallbackEdge: true,
@@ -620,16 +588,10 @@ export const DEFAULTS = {
   // 私聊却正常。这里用 SnowLuma get_record 取 wav + 本机 faster-whisper 识别。
   // 只对「QQ 拿不到 + 有音频文件」的群语音生效；私聊走上面那条，不跑本地模型。
   voiceAsrEnabled: true,
-  // 常驻 Python worker 用的解释器（装了 faster-whisper 的那个 venv）。
-  // 2026-10-26 部署可移植性：默认留空 = 「本机没配就没有本地 ASR」，不再写死作者机的 G 盘 venv；
-  // 空值时 local-asr 会直接回退到「只用 QQ 服务端转写」，不会去 spawn 一个不存在的 exe。
-  voiceAsrPython: '',
+  // 常驻 Python worker 用的解释器（装了 faster-whisper 的那个 venv）
+  voiceAsrPython: 'G:\\Molly\\data\\video\\venv\\Scripts\\python.exe',
   // faster-whisper 模型（离线缓存，不联网下载）
   voiceAsrModel: 'small',
-  // 模型缓存目录（faster-whisper 的 download_root）。空 = 运行时用 `<dataDir>/asr/models`。
-  // 2026-10-26 部署可移植性：以前写死在 local-asr.js 的 ASR_DEFAULTS 里（作者机 G 盘），
-  // 现在挪到这里统一按 dataDir 推导，作者机由 cordis.patch.yml 显式指回原目录。
-  voiceAsrModelDir: '',
   voiceAsrThreads: 8,
   // 单次识别总超时（秒）：冷启动约 1.6 秒、2.5 秒音频约 1.6 秒识别
   voiceAsrTimeoutMs: 25000,
@@ -648,8 +610,7 @@ export const DEFAULTS = {
   gifFramesColumns: 3,
   // 每帧缩放后的宽度（像素）：320 → 拼图约 976 宽，视觉得清又不太吃 token
   gifFrameWidth: 320,
-  // 2026-10-26 部署可移植性：空 = 没配就用纯 JS 兜底（GIF 只取首帧），不再写死作者机的 venv 路径。
-  gifFramesPython: '',
+  gifFramesPython: 'G:\\Molly\\data\\video\\venv\\Scripts\\python.exe',
   // 拆帧总超时（毫秒）：单张实测 0.2–1.2 秒
   gifFramesTimeoutMs: 12000,
   // 带图轮次的输出预算上限（2026-10-26）：同图思考 token 波动 250~1450，
@@ -662,9 +623,8 @@ export const DEFAULTS = {
   // 有人私聊/群里 @ 她说「唱歌 小星星」时，逐字合成 + 音高搬移 + WSOLA 拉伸，
   // 直接发一条语音条（不走模型）。算法与曲库在 lib/singing.js。
   singingEnabled: false, // 2026-10-25 下架：音色未达标（训练数据只有 3.5 分钟），代码保留待社区歌唱模型接入
-  // 渲染用 python（复用本地 ASR 那个 venv：numpy 已在，不需要新装依赖）。
-  // 2026-10-26 部署可移植性：默认留空，没配就不渲染（唱歌本来就是关着的）。
-  singingPython: '',
+  // 渲染用 python（复用本地 ASR 那个 venv：numpy 已在，不需要新装依赖）
+  singingPython: 'G:\\Molly\\data\\video\\venv\\Scripts\\python.exe',
   // 整首渲染超时（毫秒）：40 音节实测 4~20 秒
   singingTimeoutMs: 180000,
   // —— 戳一戳回应（2026-10-23，主人 m01231；2026-10-24 主人 m01908 改成模型说一句）——
@@ -753,39 +713,6 @@ function resolveDirs(config) {
     stickerDir,
     memoryDir: config.memoryDir || path.join(dataDir, 'memory'),
     dataDir,
-    /*
-     * 记忆密钥位置（2026-10-26 部署可移植性）。
-     *
-     * 以前 DEFAULTS 里写死 `${MOLLY_ROOT}\keys\memory.key`：没有 G 盘的机器在
-     * `mkdir ${MOLLY_ROOT}\keys` 处抛 ENOENT，而这步在 MemoryStore 构造函数里，
-     * 构造函数一抛 → ChatEngine 建不起来 → 插件「加载成功」但 OneBot 从不连接。
-     *
-     * 现在：显式配置（作者机的 yml）> dataDir 的兄弟目录 `qq-whale-keys/memory.key`。
-     * 仍然满足「密钥不和密文同目录」（密文在 dataDir/memory、密钥在 dataDir 外一层）。
-     */
-    memoryKeyFile: String(config.memoryKeyFile || '').trim()
-      || path.join(path.dirname(dataDir), 'qq-whale-keys', 'memory.key'),
-    /*
-     * 干活沙箱（2026-10-26 同上）：以前写死 ${MOLLY_ROOT}\sandbox\qq-work。
-     * 部署机没有 G 盘时，「命令 xxx」一执行就在 mkdir 处炸。
-     * 现在默认落在 dataDir 的兄弟目录 sandbox/qq-work，作者机由 yml 显式配回原路径。
-     */
-    workSandboxDir: String(config.workSandboxDir || '').trim()
-      || path.join(path.dirname(dataDir), 'sandbox', 'qq-work'),
-    /*
-     * 语音参考音频（2026-10-26）：留空时指向 dataDir 下的 voice-ref/，
-     * 部署者把参考 wav 放那儿就行；作者机 yml 里配的是原路径。
-     * 不存在时 voice.js 会跳过本地 SoVITS、按 voiceFallbackEdge 退回 edge-tts（不再 400 硬失败）。
-     */
-    voiceRefAudio: String(config.voiceRefAudio || '').trim()
-      || path.join(dataDir, 'voice-ref', 'molly-ref.wav'),
-    /*
-     * faster-whisper 模型缓存目录（2026-10-26 部署可移植性）：空 = <dataDir>/asr/models。
-     * 作者机由 cordis.patch.yml 显式指回 ${MOLLY_ROOT}\data\video\models（离线模型就在那儿，
-     * 留空会让 worker 去 HuggingFace 下载，等于把本地兜底静默关掉）。
-     */
-    voiceAsrModelDir: String(config.voiceAsrModelDir || '').trim()
-      || path.join(dataDir, 'asr', 'models'),
     // 工坊默认落在「数据盘根」下（当前 dataDir=${MOLLY_ROOT}\data\qq-whale →
     // ${MOLLY_ROOT}\plugin-workshop），和线上插件、用户数据都分开；用户可用
     // config.workshopDir 指到别处。dataDir 没配「\data\」这一层时退回工作区同级。
@@ -987,7 +914,6 @@ function _configShapeReference(Schema) {
     voiceAsrEnabled: s.boolean().default(DEFAULTS.voiceAsrEnabled).description('本地 ASR 兜底：QQ 服务端转写拿不到时（群语音常见），用本机 faster-whisper 识别'),
     voiceAsrPython: s.string().default(DEFAULTS.voiceAsrPython).description('运行 faster-whisper 的 Python 解释器路径（需装 faster-whisper）'),
     voiceAsrModel: s.string().default(DEFAULTS.voiceAsrModel).description('faster-whisper 模型名/路径（默认 small，离线缓存读取）'),
-    voiceAsrModelDir: s.string().default('').description('faster-whisper 模型缓存目录（空 = <dataDir>/asr/models）'),
     voiceAsrThreads: s.natural().default(DEFAULTS.voiceAsrThreads).description('本地识别 CPU 线程数（默认 8）'),
     voiceAsrTimeoutMs: s.natural().default(DEFAULTS.voiceAsrTimeoutMs).description('本地识别单次超时（毫秒，默认 25000，含首次模型加载）'),
     voiceAsrIdleSeconds: s.natural().default(DEFAULTS.voiceAsrIdleSeconds).description('worker 空闲自动退出（秒，默认 600；0 = 常驻）'),
@@ -1031,21 +957,18 @@ function _configShapeReference(Schema) {
     groupEchoRepeatWindowSeconds: s.natural().default(DEFAULTS.groupEchoRepeatWindowSeconds).description('她说「私聊」之后多久内的追问算「第二次坚持」（秒，默认 300）'),
     groupEchoMaxBubbleChars: s.natural().default(DEFAULTS.groupEchoMaxBubbleChars).description('群里照发时每颗气泡的字数上限（默认 400）'),
     groupEchoMaxTotalChars: s.natural().default(DEFAULTS.groupEchoMaxTotalChars).description('群里照发时一次最多发多少字（默认 1200，超了截断并说明）'),
-    // —— 底层状态激发指令（#molly，2026-10-26 主人 m00001）——
-    // 跟 SnowLuma 的 `#sl` 同类：低层拦截、整条消息精确匹配、每会话冷却、
-    // 不进模型链路。区别是状态维度是 Molly 自己的，且总开关关掉时不吭声。
-    statusCommand: s
-      .object({
-        enabled: s.boolean().default(DEFAULT_STATUS_COMMAND.enabled).description('是否应答状态指令（关掉不影响聊天；总开关 enabled 关掉时也一律不吭声）'),
-        trigger: s.string().default(DEFAULT_STATUS_COMMAND.trigger).description('触发词：整条消息（去空白、不分大小写）必须只等于它才算'),
-        cooldownSeconds: s.natural().default(DEFAULT_STATUS_COMMAND.cooldownSeconds).description('同一会话两次应答的最小间隔秒数（0=不限；主人不受限）'),
-        ownerDetail: s.boolean().default(DEFAULT_STATUS_COMMAND.ownerDetail).description('主人看多行详情，其他人只看一行'),
-      })
-      .description('底层状态激发指令：整条消息等于触发词就当场回状态（不进模型、不花额度）'),
   })
 }
 
 export function apply(root, rawConfig = {}) {
+  // 临时诊断（task-53 拆包排查）：证明「这次 apply 跑的是哪份模块、写盘是否可行」。
+  try {
+    fs.writeFileSync(
+      'G:\\Molly\\qq-whale\\out\\main-apply-beat.txt',
+      `${new Date().toISOString()} pid=${process.pid} url=${import.meta.url}\n`,
+      'utf8',
+    )
+  } catch {}
   const config = resolveDirs({ ...DEFAULTS, ...rawConfig })
 
   // logger：优先用 DSH 的 logger 服务，退回 console
@@ -1101,13 +1024,6 @@ export function apply(root, rawConfig = {}) {
   // 落盘到 dataDir：重载插件后「上次说话」「已聊几条」不该归零
   const metrics = new Metrics({ dir: config.dataDir || config.memoryDir })
 
-  /*
-   * 本次插件加载的时刻：状态指令用它算「已运行多久」。
-   * 语义就是「这一份活代码活了多久」——热重载后重新计时是对的，
-   * 因为重启之后模型记忆、Redis 连接、定时器全都是新的。
-   */
-  const bootedAt = Date.now()
-
   const state = {
     get enabled() {
       return config.enabled !== false
@@ -1130,22 +1046,6 @@ export function apply(root, rawConfig = {}) {
      * 主包不 import 该包的任何文件，双向只认这两个宿主服务名。
      */
     attachPest: (api) => attachPest(api),
-    /*
-     * 底层状态指令的当前生效值（只读侦查字段）。
-     *
-     * 控制台的「她到底认哪个词、冷却多久、主人能不能看详情」不用去翻 yml ——
-     * 这里摊开的就是 effectiveOption() 合并完默认值之后真正生效的那份。
-     * available:false 表示 status-command.js 没加载上（/state.plugins 会点名）。
-     */
-    get statusCommand() {
-      try {
-        const opt = statusHandler?.option?.()
-        if (!opt) return { available: false, version: statusVersion?.() || '' }
-        return { available: true, version: statusVersion?.() || '', ...opt }
-      } catch (err) {
-        return { available: false, error: String(err?.message || err) }
-      }
-    },
     get pestSource() {
       return pestSource
     },
@@ -1617,20 +1517,17 @@ export function apply(root, rawConfig = {}) {
   state.events = eventRing
 
   /*
-   * 底层状态激发指令的处理器（主人 m00001 / m00093 拍板）。
+   * 私聊 `#` 命令通道（主人 m01007）。
    *
-   * 为什么建在这里而不是 apply 开头：
-   *   - 它要往事件环（pushEvent）里留痕，事件环是这个作用域里刚建好的；
-   *   - engine / client 都是 boot() 里才创建的，所以「状态现场」用 getEnv 现取，
-   *     不能建的时候就快照 —— 否则永远是 null。
-   *
-   * 发送直接用 client 的原始 OneBot 段格式（跟下面加好友请求那几处一致）：
-   * 不经过 engine 的分段/打字机/表情包那套，状态指令要的是「一条，立刻」。
+   * 为什么建在这里：事件环刚建好（命令命中要留痕），engine / metrics 已经能
+   * 用 getEnv 现取（建的时候就快照永远是 null）。发送直接用 client 的原始
+   * OneBot 段格式——命令要的是「一条，立刻」，不经过分段/打字机/表情包那套。
    */
-  const statusHandler = createStatusHandler
-    ? createStatusHandler({
+  const pluginBootedAt = Date.now()
+  const hashHandler = createHashHandler
+    ? createHashHandler({
         config,
-        getEnv: () => ({ state, engine, metrics, bootedAt }),
+        getEnv: () => ({ state, engine, metrics, bootedAt: pluginBootedAt }),
         logger,
         onEvent: (type, ev, extra) => pushEvent(type, ev, extra),
         send: async ({ scene, id, text }) => {
@@ -1641,8 +1538,8 @@ export function apply(root, rawConfig = {}) {
         },
       })
     : null
-  if (!statusHandler) {
-    logger('warn', '底层状态指令未启用：status-command.js 没加载上（/state.plugins 里点了名）')
+  if (!hashHandler) {
+    logger('warn', '私聊 # 命令通道未启用：hash-commands.js 没加载上（/state.plugins 里点了名）')
   }
 
   /** OneBot 事件总入口：过滤自己、过滤命令、转给引擎 */
@@ -1687,15 +1584,12 @@ export function apply(root, rawConfig = {}) {
           return
         }
         /*
-         * 底层状态指令（主人 m00001 / m00093）。**必须放在闭眼模式和总开关判定之前** ——
-         * 「底层」就是这个意思：她闭着眼、她正忙、群里没 @ 她、模型/额度已经坏了，
-         * 这条通道都照样应答。它不进聊天历史、不调模型、不花额度，也不计进
-         * metrics 的「收到消息/回复耗时」（那是聊天的账，别把它搅进去）。
-         *
-         * 三个拒答都在 handler 内部：触发词不匹配、冷却中、陌生私聊/未授权群。
-         * 返回 true = 这条已经被吃掉，主链路必须 return，不能再往下走。
+         * 私聊 `#` 命令（主人 m01007）。**必须放在闭眼模式判定之前**：
+         * 命令是管理通道，不是聊天——她闭着眼也照样能回菜单和状态；
+         * 但总开关关了就是「彻底闭嘴」，这一条由 handler 内部自己判。
+         * 返回 true = 这条已经被吃掉，绝不能继续往下走到模型链路。
          */
-        if (statusHandler && statusHandler.handle(ev)) return
+        if (hashHandler && hashHandler.handle(ev)) return
         if (config.blindMode) {
           pushEvent('drop-blind', ev)
           return
@@ -1765,18 +1659,11 @@ export function apply(root, rawConfig = {}) {
           return
         }
         if (config.blindMode) return
-        /*
-         * 2026-10-26（主人 m07147：「你新人欢迎又是我手动的」）。
-         *
-         * 这里原来只把 poke 递给 engine，group_increase 一路落到 return 被静默
-         * 丢弃 —— 表现就是「新人入群从不自动欢迎，只能主人手动发一句」。
-         *
-         * 现在所有 notice 都交给 engine.onNotice 判：它在内部先看 group_increase
-         * （新人欢迎），再处理 poke（反戳/回话），其它类型一律返回 ignored。
-         */
-        engine
-          ?.onNotice?.(ev)
-          .catch((err) => logger('warn', `处理通知事件失败: ${err?.message || err}`))
+        if (ev.notice_type === 'notify' && ev.sub_type === 'poke') {
+          engine
+            ?.onNotice?.(ev)
+            .catch((err) => logger('warn', `处理戳一戳失败: ${err?.message || err}`))
+        }
         return
       }
     } catch (err) {

@@ -101,14 +101,17 @@ export function verifyMainSource(src) {
   const text = String(src || '')
   const loadHits = (text.match(/loadModule\('statusCommand'/g) || []).length
   if (loadHits !== 1) problems.push(`statusCommand 模块装载应恰好 1 处，实际 ${loadHits}`)
-  if (!text.includes('const createStatusHandler = statusCommandMod?.createStatusHandler')) {
+  // 变量名两代都接受：回填工具插入的是 statusCommandMod，源码里后来简写成 statusMod
+  if (!/const createStatusHandler = status(?:Command)?Mod\?\.createStatusHandler/.test(text)) {
     problems.push('缺少 createStatusHandler 取用')
   }
   const handlerDecl = (text.match(/const statusHandler = createStatusHandler/g) || []).length
   if (handlerDecl !== 1) problems.push(`statusHandler 装配应恰好 1 处，实际 ${handlerDecl}`)
   const hookHits = (text.match(/statusHandler\.handle\(ev\)/g) || []).length
   if (hookHits !== 1) problems.push(`消息拦截应恰好 1 处，实际 ${hookHits}`)
-  if (!text.includes('statusBootedAt')) problems.push('缺少 statusBootedAt（运行时长起点）')
+  // 运行时长起点：回填块自带 statusBootedAt；源码里直接用 boot() 里的 bootedAt
+  const bootedOk = text.includes('statusBootedAt') || /bootedAt[)\s,]/.test(text)
+  if (!bootedOk) problems.push('缺少运行时长起点（statusBootedAt / bootedAt）')
   // 拦截必须在 blindMode 之前，否则闭眼模式下不应答（主人拍板：闭眼也要能问）
   const branchAt = text.indexOf(ANCHORS.branch)
   const hookAt = text.indexOf('statusHandler.handle(ev)')

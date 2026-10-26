@@ -118,6 +118,7 @@ const FILES = [
   ['tools/voice-param-selftest.mjs', 'tools/voice-param-selftest.mjs'],
   ['tools/voice-live-selftest.mjs', 'tools/voice-live-selftest.mjs'],
   ['tools/memory-address-selftest.mjs', 'tools/memory-address-selftest.mjs'],
+  ['tools/memory-address-parse-selftest.mjs', 'tools/memory-address-parse-selftest.mjs'],
   ['tools/path-portability-selftest.mjs', 'tools/path-portability-selftest.mjs'],
   ['tools/backup-memory.ps1', 'tools/backup-memory.ps1'],
   ['tools/install-memory-backup-task.cmd', 'tools/install-memory-backup-task.cmd'],

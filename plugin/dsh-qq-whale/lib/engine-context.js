@@ -126,9 +126,16 @@ export function buildSystemPrompt(input, deps) {
      */
     const addrItems = typeof deps.memory.addressOf === 'function' ? deps.memory.addressOf({ who: userName, qq, limit: 8 }) : []
     if (addrItems.length) {
+      /*
+       * 只拼抽好的名字（memory.addressName），不要把整句自然语言丢进去。
+       * 2026-10-26 真机事故：库里混进过 `他希望你叫他「什」`，排在「宝宝」前面，
+       * 三段硬要求互相打架，她干脆退回群名片。现在一条一行、只说结论。
+       */
+      const names = addrItems.map((e) => String(e.name || '').trim()).filter(Boolean)
       sp +=
         '\n\n# 怎么称呼\n' +
-        addrItems.map((e) => `- ${String(e.text || '').trim()}`).join('\n') +
+        names.map((n) => `- 叫他「${n}」`).join('\n') +
+        (names.length > 1 ? '\n（同一人有多条时，**按上面第一行**叫——那是最新一次说的。）' : '') +
         '\n上面是称呼上的硬要求。每句话都按这里的叫法开口，**不用等对方再提醒**；' +
         '和群名片、昵称、你自己临时起的外号冲突时，这里优先。' +
         '这里没写到的，就用群名片或者「你」，别自己编一个。'

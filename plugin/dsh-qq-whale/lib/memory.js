@@ -125,6 +125,50 @@ export function isValidQq(value) {
   const s = String(value ?? '').trim()
   return s === '' || QQ_PATTERN.test(s)
 }
+
+/**
+ * 从一条 address 记忆里抽出「该怎么叫他」的那个名字。
+ *
+ * 为什么要在读的时候就抽：库里存的是一整句自然语言（还混着模型层随手写的
+ * 各种说法），直接拼进提示词会变成「- 他希望你叫他「什」」这种，模型只能猜。
+ * 抽成名字之后，提示词里只剩干净的一行 `- 叫他「宝宝」`。
+ *
+ * 只认第二人称指令句式；自称（他自称「X」）返回 ''，因为那是他的自称、
+ * 不是要 Molly 用的称呼——真实事故里「你宝宝呢」被当成硬要求塞过一次。
+ */
+export function addressName(text) {
+  const s = String(text ?? '').trim()
+  if (!s) return ''
+  /*
+   * 不能一票否决「自称」：真实条目里就有
+   *   他自称「茶茶」，可以直接叫他茶茶
+   * 这种既是自称、又明确说了「叫他X」的句式。所以判定完全靠下面的指令句式，
+   * 纯自称（他自称「打工人」）因为没有「叫他」自然抽不出名字。
+   */
+  const NAME = '[「“"\']?([^」”"\'，,。；;：:！!？?\\s]{1,10})'
+  const patterns = [
+    new RegExp(`他?希望?你叫他\\s*${NAME}`),
+    new RegExp(`他?不要[^，,。；;]{0,12}[，,]\\s*叫他\\s*${NAME}`),
+    new RegExp(`(?:习惯|可以|就)叫你\\s*${NAME}`),
+    new RegExp(`你叫他\\s*${NAME}`),
+    new RegExp(`叫他\\s*${NAME}`),
+  ]
+  let name = ''
+  for (const re of patterns) {
+    const m = s.match(re)
+    if (m?.[1]) {
+      name = String(m[1]).trim()
+      break
+    }
+  }
+  name = name.replace(/[「」“”"'。，,！!？?；;：:]+$/u, '')
+  if (!name || name.length > 10) return ''
+  // 疑问词/无意义单字/动作词不能当称呼（真实事故：存过「他希望你叫他「什」」）
+  if (/^(什么|啥|谁|哪|怎么样|什么呀|什么玩意|什|出来|过去|起来|过来|回去|一声|一下|一下下|吗|呢|了|的)$/.test(name)) return ''
+  if (/^[的了着吧啊呀哦嘛吗呢]/.test(name)) return ''
+  return name
+}
+
 export class MemoryStore {
   /**
    * @param {object} options
@@ -706,8 +750,30 @@ export class MemoryStore {
       // 老条目可能没有 QQ（早期明文时期），名字对得上也算
       return !q && !!name && e.who === name
     })
-    items.sort((a, b) => (b.at || 0) - (a.at || 0))
-    return items.slice(0, Math.max(1, limit))
+    /*
+     * 2026-10-26 第三修（主人 m02960「为什么还是不叫宝宝」）。
+     *
+     * 第一条修完就上线了，但真机上她还是叫「子房」——回查提示词发现「怎么称呼」
+     * 段里排在最前面的是 `他希望你叫他「什」`：规则层/模型层把一句「你叫我什么」
+     * 抽成了称谓，还按「新的优先」压在了真正的「宝宝」上面。三段硬要求互相打架，
+     * flash 档就退回到最保险的群名片叫法。
+     *
+     * 所以读取时再筛一遍，只认**明确的第二人称指令**：
+     *   - 必须是他希望你叫他「X」/ 叫他 X / 你叫他「X」这种句式；
+     *   - 自称（他自称「X」）一律不算称呼要求——那是他的自称，不是让他叫的；
+     *   - 抽出来的名字要过黑名单（什么/啥/谁/什…），单字无意义的不算。
+     * 同一个人给了多个称呼时按时间新→旧，engine-context 只带前几个并提示以最新为准。
+     */
+    const seen = new Set()
+    const out = []
+    for (const e of items.sort((a, b) => (b.at || 0) - (a.at || 0))) {
+      const n = addressName(e.text)
+      if (!n || seen.has(n)) continue
+      seen.add(n)
+      out.push({ ...e, name: n })
+      if (out.length >= Math.max(1, limit)) break
+    }
+    return out
   }
 
   /** 给模型看的记忆段落 */

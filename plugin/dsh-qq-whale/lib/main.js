@@ -1753,6 +1753,17 @@ export function apply(root, rawConfig = {}) {
       engine?.stopTraeHealthLoop?.()
     } catch {}
     /*
+     * 停掉抽奖心跳、清掉房间里的定时器（2026-10-26，主人：「A 群那场没开奖」）。
+     * 房间本身已经在每次 start/join/draw 时落盘到 dataDir/out/lottery-rooms.json，
+     * dispose() 只清内存不写盘，所以重载后能原样恢复、该补开的补开。
+     */
+    try {
+      engine?.stopGroupfunHeartbeat?.()
+    } catch {}
+    try {
+      engine?.groupfun?.dispose?.()
+    } catch {}
+    /*
      * 把节流攒下的关系改动落盘（用户 m17037）。
      * RelationsStore.touch() 有 5 秒节流，平时靠下一次 touch 兜底，
      * 但卸载是一条捷径——这里不 flush，最后一次聊天计数就白记了。

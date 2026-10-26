@@ -425,6 +425,12 @@ export class ChatEngine {
           replyText: (poke) => this.pokeReplyText(poke),
         })
     // 群趣味（2026-10-25，主人 m06096）：抽奖房间 + 新人欢迎冷却
+    // 2026-10-26（主人）：「A 群开了场，再去 B 群开，A 群那场没开奖」——
+    // 房间只存在内存里，宿主热重载一次就整张表清空。现在落盘到 dataDir/out/lottery-rooms.json。
+    this.groupfunStoreFile = config.dataDir || config.memoryDir
+      ? path.join(String(config.dataDir || config.memoryDir), 'out', 'lottery-rooms.json')
+      : ''
+    this.groupfunRestore = null
     this.groupfun =
       config.groupfunEnabled === false
         ? null
@@ -444,6 +450,7 @@ export class ChatEngine {
             onDraw: () => {
               this.stats.lotteryDrawn += 1
             },
+            save: (rooms) => this.persistGroupfunRooms(rooms),
           })
     this.welcomeAt = new Map()
     this.groupfunTimer = null
@@ -872,6 +879,8 @@ export class ChatEngine {
     this.startTraeHealthLoop()
     // 抽奖兜底心跳（2026-10-26 事故：到点没发公告）
     this.startGroupfunHeartbeat()
+    // 抽奖房间恢复（2026-10-26：热重载会清空内存房间，A 群那场因此没开奖）
+    await this.restoreGroupfunRooms()
   }
 
   /**
@@ -954,6 +963,60 @@ export class ChatEngine {
   stopGroupfunHeartbeat() {
     if (this.groupfunTimer) clearInterval(this.groupfunTimer)
     this.groupfunTimer = null
+  }
+
+  /**
+   * 抽奖房间落盘（groupfun 每次 start/join/draw/cancel 后回调）。
+   * 用「写临时文件再改名」保证不会读到半截 JSON。
+   */
+  persistGroupfunRooms(rooms) {
+    const file = this.groupfunStoreFile
+    if (!file) return
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true })
+      const payload = { version: 1, savedAt: new Date().toISOString(), rooms: Array.isArray(rooms) ? rooms : [] }
+      const tmp = `${file}.tmp`
+      fs.writeFileSync(tmp, `${JSON.stringify(payload, null, 2)}\n`, 'utf8')
+      fs.renameSync(tmp, file)
+    } catch (err) {
+      this.logger('warn', `抽奖房间落盘失败：${err?.message || err}`)
+    }
+  }
+
+  /**
+   * 启动时恢复抽奖房间（宿主热重载/重启后调用）。
+   * 没到期的重新挂定时器；已经过期的当场补开，并在公告里说明是补开的。
+   */
+  async restoreGroupfunRooms() {
+    if (!this.groupfun || !this.groupfunStoreFile) return null
+    let records = []
+    try {
+      const raw = JSON.parse(fs.readFileSync(this.groupfunStoreFile, 'utf8'))
+      records = Array.isArray(raw?.rooms) ? raw.rooms : []
+    } catch {
+      records = []
+    }
+    if (!records.length) {
+      this.groupfunRestore = { at: new Date().toISOString(), restored: 0, expired: [], pending: 0 }
+      return this.groupfunRestore
+    }
+    let info
+    try {
+      info = await this.groupfun.hydrate(records, { config: this.config })
+    } catch (err) {
+      this.logger('warn', `抽奖房间恢复失败：${err?.message || err}`)
+      return null
+    }
+    this.groupfunRestore = { at: new Date().toISOString(), ...info }
+    if (info.expired.length) {
+      this.logger('info', `抽奖房间恢复：${info.restored} 场，其中 ${info.expired.length} 场已过期，补开中（${info.expired.join(',')}）`)
+      try {
+        await this.groupfun.sweep({ config: this.config })
+      } catch (err) {
+        this.logger('warn', `抽奖补开失败：${err?.message || err}`)
+      }
+    }
+    return this.groupfunRestore
   }
 
   // ———————————————— 会话状态 ————————————————

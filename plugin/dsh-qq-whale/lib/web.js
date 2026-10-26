@@ -372,6 +372,12 @@ export class WebWidget {
           lastTick: e.groupfun?.lastTick || null,
           lastAuto: e.groupfun?.lastAuto || null,
           sweeps: Number(e.groupfun?.sweeps || 0),
+          // 落盘与恢复（2026-10-26：热重载会清空房间，A 群那场因此没开奖）
+          persistAt: e.groupfun?.lastPersist || null,
+          restore: e.groupfunRestore || null,
+          // 公告发不出去时的重试（2026-10-26：宿主启动顺序导致补开第一次必发不出）
+          requeue: e.groupfun?.lastRequeue || null,
+          storeFile: e.groupfunStoreFile || '',
           stats: {
             started: e.stats?.lotteryStarted || 0,
             joined: e.stats?.lotteryJoined || 0,

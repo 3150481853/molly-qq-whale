@@ -113,6 +113,43 @@ export function menuText({ version: v = '' } = {}) {
 }
 
 /**
+ * 把 `state.link` 归一成 `{ready, state}`。
+ *
+ * 这个字段有两种历史写法：早期是 `{ready, state: 'online'}` 对象；现在
+ * onebot.js 的 `setState(s)` 直接把**字符串**（'connecting' / 'handshaking' /
+ * 'online' / 'reconnecting' / 'stopped'）回调出去，main.js 原样赋给
+ * `state.link`。只按对象读的话 `.ready` 永远是 undefined ——
+ * 于是 `#molly` 在群里一直回「没连上」，人看着就是「离线」
+ * （2026-10-26 主人反馈：明明在群里回着话，#molly 却说离线）。
+ *
+ * web.js 的 snapshot() 早就做了同样的兼容（见那里的注释），这里是命令通道那份。
+ *
+ * @param {any} link
+ * @returns {{ready: boolean, state: string}}
+ */
+export function linkInfo(link) {
+  if (typeof link === 'string') {
+    const state = link.trim()
+    return { ready: state === 'online', state }
+  }
+  if (link && typeof link === 'object') {
+    const state = String(link.state || '').trim()
+    return { ready: !!link.ready || state === 'online', state }
+  }
+  return { ready: false, state: '' }
+}
+
+/** 链路状态 → 中文。不把 'connecting' 这类内部英文直接摊到群里。 */
+export function linkWords(link) {
+  const { ready, state } = linkInfo(link)
+  if (ready) return '在线'
+  if (state === 'connecting' || state === 'handshaking') return '连接中'
+  if (state === 'reconnecting') return '断线重连中'
+  if (state === 'stopped') return '已停止'
+  return state || '没连上'
+}
+
+/**
  * 群里的一行摘要（主人 m01116：群里只要简约摘要，详细的留私聊）。
  *
  * 为什么只给一行：群里有 35 个人看着，状态细节（模型、开关、记忆条数）
@@ -122,9 +159,7 @@ export function menuText({ version: v = '' } = {}) {
  */
 export function summaryText({ config = {}, getEnv = () => ({}) } = {}) {
   const env = getEnv() || {}
-  const link = env.state?.link || {}
-  const where = link.ready ? '在线' : link.state === 'reconnecting' ? '断线重连中' : String(link.state || '没连上')
-  const bits = [`Molly ${version()}`, where]
+  const bits = [`Molly ${version()}`, linkWords(env.state?.link)]
   if (env.bootedAt) bits.push(`运行 ${humanDuration(Date.now() - Number(env.bootedAt))}`)
   if (config?.enabled === false) bits.push('总开关关着')
   return bits.join(' · ')
@@ -226,7 +261,7 @@ export function buildReply(parsed, { config = {}, getEnv = () => ({}) } = {}) {
 
   if (cmd === 'status') {
     const env = getEnv() || {}
-    const link = env.state?.link || {}
+    const link = env.state?.link
     const model = env.state?.model || {}
     const mem = (() => {
       try {
@@ -236,7 +271,7 @@ export function buildReply(parsed, { config = {}, getEnv = () => ({}) } = {}) {
       }
     })()
     const lines = [`# 状态（${version()}）`]
-    lines.push(`链路：${link.ready ? '已连上' : `没连上（${link.state || '未知'}）`}`)
+    lines.push(`链路：${linkWords(link)}`)
     if (model?.ok) lines.push(`模型：${model.model || '?'}${model.fallback ? `（备用 ${model.fallback}）` : ''}`)
     else lines.push(`模型：不可用${model?.error ? `（${String(model.error).slice(0, 60)}）` : ''}`)
     if (mem) {

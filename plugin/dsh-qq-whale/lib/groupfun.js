@@ -29,6 +29,10 @@ export const GROUPFUN_DEFAULTS = {
   lotteryMaxSeconds: 3600,
   lotteryJoinKeyword: '参加',
   lotteryKeywordMaxChars: 16,
+  // 开奖公告发不出去（宿主刚启动、OneBot 还没连上）时的重试：最多 8 次，每次隔 15 秒。
+  // 8 次足够覆盖「启动到 WS 握手完成」那几十秒；再多就是群没了/号出问题，不该死磕。
+  lotteryAnnounceRetries: 8,
+  lotteryAnnounceRetryMs: 15000,
   // 新人欢迎
   welcomeEnabled: true,
   welcomeCooldownSeconds: 60,
@@ -139,8 +143,13 @@ export function namesText(entries, max = 20) {
 }
 
 /**
- * 抽奖房间（每群一个）。纯内存：宿主热重载/重启即清空——
- * 抽奖是「一分钟热度」的功能，没必要落盘；重启丢了就重开，反而干净。
+ * 抽奖房间（每群一个）。
+ *
+ * 2026-10-26（主人：「用户在 A 群开了一场，再去 B 群开，A 群那场没开奖」）：
+ * 原来房间纯内存、宿主热重载就整张表清空，重载前开的场次会**静默消失**。
+ * 现在房间交给 engine 落盘（本文件仍然不碰 fs，只通过注入的 `save` 回调交快照），
+ * 重载后用 `hydrate()` 恢复：没到期的重新挂定时器，已经过期的当场补开，
+ * 并在公告前加一句「刚才我重载了一下，这场补开」，不让人以为中奖被吞了。
  */
 export class LotteryBox {
   /**
@@ -149,6 +158,8 @@ export class LotteryBox {
    *   now?: () => number,
    *   random?: () => number,
    *   send?: (gid: string, payload: {text: string, at?: string[]}) => Promise<any>,
+   *   onDraw?: Function,
+   *   save?: (rooms: any[]) => void,
    * }} opts
    */
   constructor({
@@ -157,6 +168,7 @@ export class LotteryBox {
     random = Math.random,
     send = async () => {},
     onDraw = () => {},
+    save = null,
   } = {}) {
     this.logger = logger
     this.now = now
@@ -164,17 +176,101 @@ export class LotteryBox {
     this.send = send
     // 2026-10-26（主人 m07064）：自动/兜底开奖也要能被 engine 计数
     this.onDraw = typeof onDraw === 'function' ? onDraw : () => {}
+    // 2026-10-26：房间落盘回调（engine 写文件；本文件保持不碰 fs）
+    this.save = typeof save === 'function' ? save : null
     /** @type {Map<string, any>} gid → 场次 */
     this.rooms = new Map()
     // 2026-10-26：诊断与自愈（历史事故：定时器没落地/丢失时，房间永远停在待开奖）
     this.lastAuto = null
     this.lastTick = null
     this.sweeps = 0
+    this.lastPersist = null
+    this.restored = 0
+    // 2026-10-26：公告没发出去而排进重试时记一笔（/state.groupfun 能看到）
+    this.lastRequeue = null
   }
 
   /** 当前场次（只读） */
   room(gid) {
     return this.rooms.get(String(gid)) || null
+  }
+
+  /** 房间快照（纯数据，交 engine 落盘用）。 */
+  snapshot() {
+    return [...this.rooms.values()].map((room) => ({
+      gid: room.gid,
+      owner: room.owner,
+      ownerName: room.ownerName,
+      count: room.count,
+      seconds: room.seconds,
+      startedAt: room.startedAt,
+      endsAt: room.endsAt,
+      mode: room.mode,
+      keyword: room.keyword,
+      recovered: !!room.recovered,
+      entries: [...room.entries.values()].map((e) => ({ qq: e.qq, nick: e.nick, at: e.at })),
+    }))
+  }
+
+  /** 任何一次房间变化后调用：把快照交给 engine 写盘（失败只记日志，不影响抽奖）。 */
+  flush() {
+    if (!this.save) return
+    try {
+      this.save(this.snapshot())
+      this.lastPersist = new Date(this.now()).toISOString()
+    } catch (err) {
+      this.logger('warn', `抽奖房间落盘失败：${err?.message || err}`)
+    }
+  }
+
+  /**
+   * 从落盘快照恢复场次（宿主重载/重启后调用）。
+   * @returns {Promise<{restored: number, expired: string[], pending: number}>}
+   */
+  async hydrate(records, { config = {} } = {}) {
+    const list = Array.isArray(records) ? records : []
+    const expired = []
+    let restored = 0
+    for (const rec of list) {
+      const gid = String(rec?.gid || '')
+      if (!gid || this.rooms.has(gid)) continue
+      const endsAt = Number(rec?.endsAt)
+      if (!Number.isFinite(endsAt)) continue
+      const entries = new Map()
+      for (const e of Array.isArray(rec?.entries) ? rec.entries : []) {
+        const qq = String(e?.qq || '')
+        if (!qq) continue
+        entries.set(qq, { qq, nick: String(e.nick || qq), at: Number(e.at) || 0 })
+      }
+      const room = {
+        gid,
+        owner: String(rec?.owner || ''),
+        ownerName: String(rec?.ownerName || rec?.owner || ''),
+        count: clampInt(rec?.count, 1, Number(config.lotteryMaxCount) || GROUPFUN_DEFAULTS.lotteryMaxCount),
+        seconds: Number(rec?.seconds) || 0,
+        startedAt: Number(rec?.startedAt) || endsAt,
+        endsAt,
+        mode: rec?.mode === 'keyword' ? 'keyword' : 'open',
+        keyword: String(rec?.keyword || ''),
+        entries,
+        recovered: true,
+        timer: null,
+      }
+      this.rooms.set(gid, room)
+      restored += 1
+      const left = room.endsAt - this.now()
+      if (left <= 0) {
+        expired.push(gid)
+        continue
+      }
+      const timer = setTimeout(() => {
+        this.sweep({ config, only: gid }).catch((err) => this.logger('warn', `抽奖自动开奖失败: ${err?.message || err}`))
+      }, left)
+      timer?.unref?.()
+      room.timer = timer
+    }
+    this.restored = restored
+    return { restored, expired, pending: restored - expired.length }
   }
 
   /**
@@ -217,6 +313,8 @@ export class LotteryBox {
     timer?.unref?.()
     room.timer = timer
     this.rooms.set(key, room)
+    // 落盘：哪怕下一秒宿主就热重载，这场也还在
+    this.flush()
     const howto = kw
       ? `🎁 口令抽奖开始！在场内发「${kw}」才算参加（只认整句）。`
       : `🎁 抽奖开始！发「抽奖 参加」（或直接发「${config.lotteryJoinKeyword || '参加'}」）报名。`
@@ -253,14 +351,21 @@ export class LotteryBox {
       return { ok: false, message: `${nick || qq} 已经在名单里啦` }
     }
     room.entries.set(String(qq), { qq: String(qq), nick: String(nick || qq), at: this.now() })
+    this.flush()
     return { ok: true, message: `✅ ${nick || qq} 报名成功（第 ${room.entries.size} 位）` }
   }
 
   /**
    * 开奖。by = owner / auto；其他人调用返回拒绝。
+   *
+   * `keep`（2026-10-26 补）：只算结果、**不结束这场**，留给调用方在公告真的
+   * 发出去之后再收尾。自动开奖走这条路 —— 原来是「先删场次+落盘，再发消息」，
+   * 而宿主启动时 engine.client 还没挂上（main.js 里 init() 在 client 赋值之前），
+   * 发送必抛，等 catch 兜住时名单已经从盘上消失了。
+   *
    * @returns {Promise<{ok: boolean, message: string, winners?: any[]}>}
    */
-  async draw({ gid, by = 'auto', config = {} }) {
+  async draw({ gid, by = 'auto', config = {}, keep = false }) {
     const key = String(gid)
     const room = this.rooms.get(key)
     if (!room) return { ok: false, message: '现在没有进行中的抽奖，先发「抽奖 开 3 人 60秒」开一场吧' }
@@ -268,13 +373,18 @@ export class LotteryBox {
       return { ok: false, message: '只有发起人能开奖哦（等时间到也会自动开）' }
     }
     if (room.timer) clearTimeout(room.timer)
-    this.rooms.delete(key)
+    room.timer = null
+    if (!keep) {
+      this.rooms.delete(key)
+      this.flush()
+    }
+    const recovered = room.recovered ? '（刚才我重载了一下，这场补开）\n' : ''
     const entries = [...room.entries.values()]
     if (!entries.length) {
       const empty = room.mode === 'keyword'
         ? `🎁 时间到，不过没人发出口令「${room.keyword}」，抽奖取消～`
         : '🎁 时间到，不过这局没人报名，抽奖取消～下次再来'
-      return { ok: true, message: empty, winners: [] }
+      return { ok: true, message: recovered + empty, winners: [] }
     }
     const winners = this.pick(entries, room.count)
     const list = winners.map((w) => ({ qq: w.qq, nick: w.nick }))
@@ -285,7 +395,7 @@ export class LotteryBox {
       title +
       list.map((w, i) => `${i + 1}. @${w.nick}`).join('\n') +
       '\n恭喜以上朋友～'
-    return { ok: true, message: msg, winners: list, entries: entries.length }
+    return { ok: true, message: recovered + msg, winners: list, entries: entries.length }
   }
 
   /**
@@ -296,22 +406,38 @@ export class LotteryBox {
   async sweep({ config = {}, only = '' } = {}) {
     const onlyKey = only ? String(only) : ''
     const due = [...this.rooms.values()].filter(
-      (room) => (!onlyKey || room.gid === onlyKey) && Number(room.endsAt) <= this.now(),
+      (room) => (!onlyKey || room.gid === onlyKey) && Number(room.endsAt) <= this.now() && !room.announcing,
     )
     const out = []
     for (const room of due) {
       const gid = room.gid
+      // 补发定时器和 15 秒心跳可能同时扫到同一场；打了这个标记，后到的那个直接跳过，
+      // 否则同一场会被发两遍公告。
+      room.announcing = true
       try {
-        const res = await this.draw({ gid, by: 'auto', config })
+        // keep：先要消息，发送成功了才真正结束这场（见 draw() 的注释）。
+        const res = await this.draw({ gid, by: 'auto', config, keep: true })
         let sent = false
         if (res?.ok) {
-          await this.send(gid, { text: res.message, at: (res.winners || []).map((w) => String(w.qq)) })
-          sent = true
           try {
-            this.onDraw({ gid, winners: res.winners || [], mode: room.mode || 'open' })
+            await this.send(gid, { text: res.message, at: (res.winners || []).map((w) => String(w.qq)) })
+            sent = true
+            // 公告真的发出去了，这时才清场并落盘
+            this.rooms.delete(gid)
+            this.flush()
+            try {
+              this.onDraw({ gid, winners: res.winners || [], mode: room.mode || 'open' })
+            } catch (err) {
+              this.logger('warn', `抽奖开奖回调失败: ${err?.message || err}`)
+            }
           } catch (err) {
-            this.logger('warn', `抽奖开奖回调失败: ${err?.message || err}`)
+            // 最常见的原因是宿主刚启动、OneBot 还没连上。名单和结果都留着，过会儿再来。
+            this.requeue(room, { config, error: err })
           }
+        } else {
+          // 算不出结果（正常不会发生）：别让它每 15 秒空转
+          this.rooms.delete(gid)
+          this.flush()
         }
         this.lastAuto = {
           at: new Date().toISOString(),
@@ -325,10 +451,50 @@ export class LotteryBox {
         this.lastAuto = { at: new Date().toISOString(), gid, ok: false, error: String(err?.message || err) }
         this.logger('warn', `抽奖兜底开奖失败：${err?.message || err}`)
         out.push(this.lastAuto)
+      } finally {
+        room.announcing = false
       }
     }
     if (due.length) this.sweeps += 1
     return out
+  }
+
+  /**
+   * 开奖公告没发出去：把场次放回去，过一会儿重试。
+   *
+   * 2026-10-26 事故根因之一：宿主的启动顺序是 init()（含恢复+补开）在前、
+   * `engine.client = client` 在后，所以「重载/重启后补开」这一路第一次必抛。
+   * 原来的写法是先删场次再发送，一抛就把这场连名单一起丢了 —— 群里什么都没有，
+   * 正是主人说的「A 群那场没开奖」。
+   *
+   * 重试有上限（lotteryAnnounceRetries，默认 8 次），群没了/号被封时不会无限撞墙。
+   * @returns {boolean} true = 已排进重试；false = 放弃
+   */
+  requeue(room, { config = {}, error = null } = {}) {
+    const gid = String(room.gid)
+    const tries = (Number(room.sendTries) || 0) + 1
+    const max = Math.max(1, Number(config.lotteryAnnounceRetries) || GROUPFUN_DEFAULTS.lotteryAnnounceRetries)
+    const why = String(error?.message || error || '未知原因')
+    if (tries > max) {
+      this.rooms.delete(gid)
+      this.flush()
+      this.lastRequeue = { at: new Date().toISOString(), gid, tries, giveUp: true, error: why }
+      this.logger('warn', `抽奖公告连续 ${tries} 次发不出去，这场放弃：${gid}（${why}）`)
+      return false
+    }
+    const delay = Math.max(1000, Number(config.lotteryAnnounceRetryMs) || GROUPFUN_DEFAULTS.lotteryAnnounceRetryMs)
+    room.sendTries = tries
+    room.endsAt = this.now() + delay
+    const timer = setTimeout(() => {
+      this.sweep({ config, only: gid }).catch((err) => this.logger('warn', `抽奖补发重试失败：${err?.message || err}`))
+    }, delay)
+    timer?.unref?.()
+    room.timer = timer
+    this.rooms.set(gid, room)
+    this.flush()
+    this.lastRequeue = { at: new Date().toISOString(), gid, tries, giveUp: false, error: why }
+    this.logger('warn', `抽奖公告发送失败（第 ${tries}/${max} 次），${Math.round(delay / 1000)} 秒后重试：${why}`)
+    return true
   }
 
   /** 心跳：记录插件进程内的定时器是否还活着，并顺带扫尾。 */
@@ -345,6 +511,7 @@ export class LotteryBox {
     if (String(by) !== room.owner) return { ok: false, message: '只有发起人能取消这场抽奖' }
     if (room.timer) clearTimeout(room.timer)
     this.rooms.delete(key)
+    this.flush()
     return { ok: true, message: `这场抽奖已取消（原本 ${room.entries.size} 人报名）` }
   }
 

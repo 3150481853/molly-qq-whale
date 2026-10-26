@@ -76,6 +76,11 @@ const FILES = [
   ['tools/install-watchdog.cmd', 'tools/install-watchdog.cmd'],
   ['tools/start-console.ps1', 'tools/start-console.ps1'],
   ['tools/start-molly.ps1', 'tools/start-molly.ps1'],
+  // 2026-10-26：DSH（Molly 的大脑 + 插件宿主）自启脚本。
+  // 开机后 QQ/NapCat 有 SnowLuma-Boot + start-molly.ps1 拉起，DSH 一个自启项都没有，
+  // 于是重启后 QQ 在线、Molly 一句话不说。计划任务 Molly-DSH 在登录后 30 秒调它，
+  // watchdog 的 ensureDsh 兜底也调它 —— 漏了它，发布版的「大脑自启/兜底」直接失效。
+  ['tools/start-dsh.ps1', 'tools/start-dsh.ps1'],
   // 2026-10-22：掉登录治理相关脚本 —— watchdog.mjs 会调 login-doctor.mjs，
   // 漏了它发布版的自动恢复（快速登录/二维码）等于残废；heartbeat-push 与两个隐藏启动
   // vbs 是控制台/心跳自启链路的一部分，一并带上（build-publish 会做脱敏替换）。
@@ -155,6 +160,7 @@ const DOCS = [
   'llm-adapter.md',
   'persona-guide.md',
   'memory-guide.md',
+  'CARE-MOLLY.md',
   'AUDIT-2026-10-25-context-budget.md',
   'github-upload.md',
 ]

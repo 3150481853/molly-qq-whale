@@ -13,23 +13,12 @@
 基于 **DeepSeek Harness** 的 QQ 通道插件：稳定的人设、长期记忆、表情包习惯、会发语音，
 以及一个能看懂她此刻在干什么的控制台。
 
-**v1.1.3-Hotfix.3** —— 两个「静默失败」的补齐：**新人入群自动欢迎**（`lib/main.js` 的 notice 分发只把 poke 转给引擎，`group_increase` 一路落到 `return` 被丢掉，所以欢迎开关开着也不会自动发，只能手动补）和**自动开奖计入统计**（`LotteryBox` 加 `onDraw` 回调，定时器到点 / 心跳兜底开奖成功都记一次 `stats.drawn`，手动「开奖」仍只计一次）。另加本地调试路由 `POST /dsh-qq-whale/groupfun/notice`，用合成入群通知验证欢迎链路（仅本机可达）。详见 `docs/CHANGELOG.md`。
+**最近版本：** `v1.1.3-Hotfix.3` → `v1.1.3-plus.2` → `v1.1.3` 正式版 · 完整记录见 [docs/CHANGELOG.md](docs/CHANGELOG.md) 与 [Releases](https://github.com/222222222/molly-qq-whale/releases)。
 
-上一版 **v1.1.3-plus.3** —— 修「抽奖到点不开奖」：自动开奖时 @ 中奖者的消息段字段放错了位置（`{ type:'at', data:{ qq } }`），SnowLuma 直接拒发整条消息、且只在本机 `/state.groupfun.lastAuto` 留痕，群里看起来就是「到点了没开」。已改成 `{ type:'at', qq }`，并给它加了 15 秒心跳扫尾兜底（`sweep`/`lastTick`/`lastAuto` 可在 `/state` 查）。另新增本地调试路由 `POST /dsh-qq-whale/lottery/simulate`（以任意群员身份驱动抽奖/欢迎命令，只绑 127.0.0.1，需知道宿主端口）。上一版 **v1.1.3-plus.2** —— 小玩具统一入口：**`@我 #`** 打开小玩具菜单（`@我 #抽奖` 直达抽奖菜单；菜单同时也是使用说明）。这次新增 / 加强的都是群趣味：①**抽奖**（`@我 抽奖` 发菜单；`抽奖 开 3 人 60秒` 开局，`参加` 报名，`抽奖 开奖` / `取消` / `名单`，到点自动开奖，每群同时一场）；②**口令抽奖**（`抽奖 口令 干饭 3 人 60秒`：窗口内发「干饭」的人才算参加，到点只从这些人里抽，整句匹配）；③**新人欢迎**（有人入群自动欢迎，`welcomeTexts` 可自定义模板与 `{name}/{group}/{molly}` 占位符，60 秒冷却）。总开关 `groupfunEnabled`，分开关 `lotteryEnabled` / `welcomeEnabled`，都在 `cordis.patch.yml`；口令长度上限 `lotteryKeywordMaxChars`（默认 16）。
-
-上一版 **v1.1.3-plus.1** —— 群趣味：**抽奖**（群里 @我 + 「抽奖」发菜单；「抽奖 开 3 人 60秒」开局，「参加」报名，「开奖」「取消」「名单」，到点自动开奖，每群同时只能一场）+ **新人欢迎**（有人入群自动欢迎，`welcomeTexts` 可自定义模板与 `{name}/{group}/{molly}` 占位符，60 秒冷却）；总开关 `groupfunEnabled`，分开关 `lotteryEnabled` / `welcomeEnabled`，都在 `cordis.patch.yml`。
-
-更早 **v1.1.5-preview.3**（预览）—— 她会看时间、按北京时间作息、表情包里的动图也能重新打 tag（唱歌暂缓）：①每轮提示词都带「北京时间」，问几点/星期几不再靠猜（`timeContextEnabled`，默认北京时间）；②作息改由北京时间判断（`sleepWindowStart/End`，默认 23:50–09:00）：窗口内不主动找人、群聊不插话，私聊叫醒带起床气；控制台「设置 → 作息时间」可改，保存立即生效（`${MOLLY_ROOT}\data\qq-whale\sleep-window.json`）；③新增 `tools/rescan-gif-stickers.mjs`：升级后跑一遍就能用新的动图识别把表情包库里的 GIF 重新打 tag（默认 dry-run，`--apply` 才改名，报告在 `out/rescan-gif-report.json`）；④唱歌能力已内置但**默认关闭**（`singingEnabled: false`）——算法做完了，音色没过关：她的语音包 fine-tune 数据只有 54 句 / 3.5 分钟，等收集到足够原始录音后改用社区歌唱模型再开。
-
-上一版 **v1.1.5-preview.2**（预览）—— 让她看懂动图：以前群里的 GIF / 动画表情她只能看见第一帧（多模态模型对 `image/gif` 只解码首帧），现在发模型前用本机 Pillow 把 GIF 采样成 6 帧拼成一张带帧号的图，模型能按顺序看懂整个动作；没装 Pillow / 拆帧超时会自动回退原图，不影响回复。顺带修了「她看了图却一声不响」——带图轮次的思考 token 波动极大，会把输出预算吃光、正文变成空串，现在带图请求统一抬预算并用 `reasoning_effort: minimal`。
-
-上一版 **v1.1.5-preview.1**（预览）—— 控制台补数据、QQ 页合并：①学习器、记忆、群数不再显示「—」——插件 `/state` 本来就有记忆条数、学习器累计/今日、SnowLuma 群列表（10 个群）等数据，是控制台没接上；现在由 `tools/console-server.mjs` 统一补齐（群数走 OneBot `get_group_list`；记忆在 QQ 记忆池加密后走插件兜底，并标注来源「插件」）。②QQ 下「登录」「QQ 连接」两个模块合并为一页「QQ 连接」：连接状态卡 + 扫码登录同页，没连上时顶部黄条直接指过去；旧地址 `#/login` 自动跳到 `#/qq`。
-
-上一版 **v1.1.3-Hotfix.2**（热修复）—— 给「她读不懂别人发的语音」再加一层本地兜底：群聊里别人发的语音，QQ 自带转写拿不到结果时（之前实测会 20 秒超时、回「[语音：没听清]」），改用本机 faster-whisper 识别（复用 `${MOLLY_ROOT}\data\video\venv` 里已装的模型，不联网、无新依赖，首次加载约 1.6 秒、之后每段 1.4–1.6 秒），失败才降级「[语音：没听清]」；控制台**左下角版本号改可点击**，点开就是「本次更新」，内容直接读仓库 `docs/CHANGELOG.md` 最新一节，不再另外维护文案。
-
-上一版 **v1.1.3-Hotfix.1**（热修复）—— 修「她读不懂别人发的语音」：别人发语音时，用 QQ 自带的语音转文字（SnowLuma 扩展 `fetch_ptt_text`，实测 0.2–0.3 秒）先转成文字再交给模型（以前她只看得见「[语音]」三个字，只能回「听不出说的啥，换成字」）；转写失败降级成「[语音：没听清]」，不会当成空消息丢掉；带 10 分钟缓存，同一条语音只转一次；不想花这次接口往返可以 `voiceTranscribeEnabled: false` 关掉。
-
-上一版 **v1.1.3**（正式版）—— 三个预览版合并发布：戳一戳改用模型回一句；控制台清掉 NapCat 品牌、改四态 QQ 状态判定，**左下角版本号改为从插件版本自动读取**（以前写死显示 1.0）；记忆池新增「梗」类；上下文体积优化 A（一轮完整提示词 6,869 → 5,935 token，省 13.6%）；修「@ 错人」——她不再靠猜着 @ 人，模型写的 @ 号必须先过校验（只认最近 20 条里真说过话的人），拥挤/被空 @/点名时按条件带「引用」，引用发不出去自动退回纯文字；QQ 不支持「引用 + 语音」，引用时语音段会自动降级成文字。**控制台表情包页新增搜索**：按名字 / 关键词即时过滤（空格分隔多个词 = 同时匹配，`_` 当空格，「白猫 偷笑」能直接找到「白猫_眯眼_偷笑_坏笑」），副标题显示「命中 M / 共 N 张」，没搜到时空态里一键清空。更早 **v1.1.3-preview.3** 只含 @ 修复；**v1.1.3-preview.1** 是戳一戳模型回话 + 控制台改版。
+- **v1.1.3-Hotfix.3** —— 新人欢迎修复：入群通知不再被静默丢弃，自动欢迎真正发出；自动开奖也计入 `stats.drawn`；新增本机调试路由 `/groupfun/notice`。
+- **v1.1.3-plus.2** —— `@我 #` 小玩具统一入口；群趣味：抽奖 / 口令抽奖 / 新人欢迎。
+- **v1.1.3** —— 三个预览合并：戳一戳模型回话、控制台改版、记忆「梗」类、上下文优化、@ 错人修复、表情包搜索。
+- 更早版本（`v1.1.0` 起至 `v1.1.3-Hotfix.2`，以及 `v1.1.5-preview.*`）见 CHANGELOG。
 
 [![license](https://img.shields.io/badge/license-MIT-1aae39?style=flat-square)](LICENSE) [![node](https://img.shields.io/badge/node-22%2B-1aae39?style=flat-square)](https://nodejs.org) [![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0075de?style=flat-square)](#环境要求) [![host](https://img.shields.io/badge/host-DeepSeek%20Harness-5645d4?style=flat-square)](#环境要求) [![QQ](https://img.shields.io/badge/QQ-OneBot%2011-0075de?style=flat-square)](#环境要求)
 

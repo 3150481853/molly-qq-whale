@@ -73,6 +73,8 @@
 - 群里人特别多时，她仍可能只回一条（本版是「只接最近那条」，不是逐条引用）——主人已确认这个取舍。
 - 抽奖房间存在内存里，插件热重载/进程重启会丢那场（心跳兜底只解决「定时器被吞」，解决不了进程重启）。
 
+**发布**：GitHub Release [v1.1.5-A](https://github.com/3150481853/molly-qq-whale/releases/tag/v1.1.5-A)（**#424147415**，`latest`），tag → `14bf283`，附件 `molly-qq-whale-v1.1.5-A.zip` 1,306,383 B / 177 文件，sha256 `a971bf062489f8d93564a3f4dd4738839400e5032e2867deede6e4efed989e7e`；本版**不含语音包**。
+
 ## 2026-10-26 · v1.1.5-Hotfix.3：部署修复——看板数据服务随包走 + 工具默认路径不再写死作者机
 
 > 部署者反馈（主人转述 m03207）：装完控制台第一屏就是「数据服务 19391 不可达」，记忆/表情/概览三块全空。
@@ -80,7 +82,7 @@
 **根因**
 - 大看板的数据来自 `127.0.0.1:19391` 的 sidecar，实现是 `tools/panel-data.mjs`（`tools/console-server.mjs:130` 默认 `SIDECAR=http://127.0.0.1:19391`，`:1363`/`:1370` 代理 `/api/memory`、`/api/stickers`）。
 - 这个文件**从来没进过发布白名单**（`tools/build-publish.mjs` 的白名单是显式列举），所以发布包里根本没有它，任何新部署都起不来 19391。不是部署姿势问题。
-- 即使有人手动补上，它内部还写死了作者机的 `${MOLLY_ROOT}\data\qq-whale`，别的机器读不到数据。
+- 即使有人手动补上，它内部还写死了作者机的 `G:\Molly\data\qq-whale`，别的机器读不到数据。
 
 **改动**
 - `tools/panel-data.mjs`：数据目录按 `MOLLY_DATA_DIR` → DSH 插件配置里的 `dataDir`（`~/.dsh/profiles/*/cordis.patch.yml` 的 `dsh-qq-whale` 项）→ `<用户目录>/.dsh/qq-whale` 的顺序解析；端口支持 `MOLLY_SIDECAR_PORT`；密钥按插件同一套规则找（`MOLLY_MEMORY_KEY_FILE` 可覆盖）。版本 1.0.1。
@@ -90,7 +92,7 @@
 - `tools/build-publish.mjs`：白名单新增 `tools/panel-data.mjs` 与 `tools/resolve-paths.mjs`，否则下次构建又漏。
 
 **验证**
-- `node --check` 全过；本机不带任何 `MOLLY_*` 环境变量起实例，`/api/health` 返回 `dataDir=${MOLLY_ROOT}\data\qq-whale`，`/api/all` → memory 1307 条 / stickers 409 / metrics 10125，与线上一致。
+- `node --check` 全过；本机不带任何 `MOLLY_*` 环境变量起实例，`/api/health` 返回 `dataDir=G:\Molly\data\qq-whale`，`/api/all` → memory 1307 条 / stickers 409 / metrics 10125，与线上一致。
 - console-server 在备用端口 19498 起实例：`/api/overview` 里 `sidecar.reachable=true`、`sidecar.memory.count=1307`。
 
 **退回**
@@ -101,11 +103,11 @@
 **补发（2026-10-26 10:5x，同版本重切）**：首次发布只带上了工具链的可移植性，插件本体与语音规范化漏了。这次补齐两项，版本号不变（同一天、同版本、无人下载过旧包）：
 - **插件本体路径可移植**：`lib/main.js` 的 `memoryKeyFile` / `workSandboxDir` / `voiceRefAudio` / `voiceAsrPython` / `gifFramesPython` / `singingPython` 默认值全部改为空串，运行期按 `dataDir` 推导（`<dataDir 父目录>/qq-whale-keys/memory.key`、`<dataDir 父目录>/sandbox/qq-work`、`<dataDir>/voice-ref/molly-ref.wav`、`<dataDir>/asr/models`）；`lib/boot.js` 的健康文件回退目录改为 `MOLLY_DATA_DIR` / 包根同级 / cwd 三级；`lib/commands.js` 的沙箱路径与受保护路径改由 `PROTECTED_PREFIXES` 与 `config.workSandboxDir` 生成；`lib/work-guard.js` 的护栏前缀改为「插件包根 + `~/.dsh/profiles` + 存在的宿主工作区」；三个用 Python 的模块（`local-asr.js` / `gif-frames.js` / `singing.js`）解释器默认留空 = 没配就静默跳过；`lib/engine.js` 的兜底目录、`lib/main.js` 的 `main-apply-beat.txt` 诊断落点同样不再写死盘符。整份 `lib` 现在只剩 `memcrypt.js` 的 `DEFAULT_KEY_FILE` 一处字面量（legacy 只读兜底，`resolveKeyFile` 绝不拿它新建）。
 - **语音「英文腔」修复回到本版**：`lib/voice.js` 从 v1.1.5 搬回「念稿中文规范化」（`chineseNumber` / `readDigits` / `SPEAK_RULES` / `normalizeSpeakText`），合成前把 `2K 60Hz`、`1080P`、`16GB`、`40%`、`28℃`、`5km`、`12ms` 这类写法念成中文；`cleanVoiceText` 之后接 `normalizeSpeakText` 再截断。
-- 验证：`node --check` 全 49 个 js 通过；称谓解析 15/15、`#` 命令 39/0、密钥定位 10/0、抽奖开奖 8/0、群趣兜底 15/0、引用精确 11/0；新写 `${MOLLY_ROOT}\out\_portability_check.mjs` 9/0（换到没有 G 盘的假数据目录时不选 G 盘、受保护前缀跟着包根走）；真机热重载 `gen-mvp538ln-ks4bre` 后 `link=online`、`memory=1313`、`broken=false`、`keySource=file`、`voice=sovits`、`plugins` 9 个全加载、`groupfun.lastTick` 在跳。
+- 验证：`node --check` 全 49 个 js 通过；称谓解析 15/15、`#` 命令 39/0、密钥定位 10/0、抽奖开奖 8/0、群趣兜底 15/0、引用精确 11/0；新写 `G:\Molly\out\_portability_check.mjs` 9/0（换到没有 G 盘的假数据目录时不选 G 盘、受保护前缀跟着包根走）；真机热重载 `gen-mvp538ln-ks4bre` 后 `link=online`、`memory=1313`、`broken=false`、`keySource=file`、`voice=sovits`、`plugins` 9 个全加载、`groupfun.lastTick` 在跳。
 
 **版本**：`1.1.5-Hotfix.3`（不含语音包；语音包仍用 `voice-pack-v1.2`）。
 
-**发布**：GitHub Release [v1.1.5-Hotfix.3](https://github.com/222222222/molly-qq-whale/releases/tag/v1.1.5-Hotfix.3)（#424138530，tag → `fd82f1c`），附件 `molly-qq-whale-v1.1.5-Hotfix.3.zip` 1,305,885 B / 177 文件，sha256 `<REDACTED>`。
+**发布**：GitHub Release [v1.1.5-Hotfix.3](https://github.com/3150481853/molly-qq-whale/releases/tag/v1.1.5-Hotfix.3)（#424138530，tag → `fd82f1c`），附件 `molly-qq-whale-v1.1.5-Hotfix.3.zip` 1,305,885 B / 177 文件，sha256 `f539c34b0f260548b883c8a83ec60287d6c3520ff72c3f1ff26588d915f5d32a`。
 > 同版本重切过两次：#424127469（10:45，1,300,624 B，sha256 `bb09e620…`）漏了本版补发的两处修复，已删除；重切后旧 tag `b7dab06`/`d80c8c6` 一并作废。
 
 ---
@@ -121,7 +123,7 @@
 - 原因：1.1.5 动记忆时把「称谓」做坏（`他希望你叫他「什」`、自称被当硬要求），Hotfix.1 只加固了解析、没解决真机认错人（15:00 群里把 999999999 叫成「主人」、把主人叫成「群友哥们儿」）。
 
 **回归基线**
-- 线上先回退到 `v1.1.5-preview.3`（两份副本：`${MOLLY_ROOT}\qq-whale\plugin\dsh-qq-whale` 与 `${HOME}\.dsh\profiles\desktop\node_modules\dsh-qq-whale`，逐字节比对 `lib` 48 个 js），再在其上叠加本版补丁；回退记录见 `${MOLLY_ROOT}\backup\rollback-20261026\ROLLBACK.md`。
+- 线上先回退到 `v1.1.5-preview.3`（两份副本：`G:\Molly\qq-whale\plugin\dsh-qq-whale` 与 `C:\Users\jndnbd\.dsh\profiles\desktop\node_modules\dsh-qq-whale`，逐字节比对 `lib` 48 个 js），再在其上叠加本版补丁；回退记录见 `G:\Molly\backup\rollback-20261026\ROLLBACK.md`。
 
 **认人（`lib/memory.js` / `lib/engine-context.js` / `lib/web.js`）**
 - 新增 `addressName(text)`：只认 `叫他X` / `叫你X` / `喊(他|你)X` / `称呼|叫法「X」`，单字、疑问词、「一声/一句」这类量词一律丢弃。
@@ -135,7 +137,7 @@
 - 群里发 `#molly` 只回一行摘要（版本 · 在不在线 · 运行时长），任何人都能触发、同群 30 秒一条；`#状态` 在群里不回。
 
 **记忆密钥定位（`lib/memcrypt.js` / `lib/memory.js`）**
-- 删掉写死的 `DEFAULT_KEY_FILE` 兜底逻辑，新增 `KEY_DIR_NAME` / `keyCandidates()` / `resolveKeyFile()`：显式配置 > `<dataDir 同级>/qq-whale-keys/memory.key` > `<dataDir>/memory.key` > 老 `${MOLLY_ROOT}\keys\memory.key`。
+- 删掉写死的 `DEFAULT_KEY_FILE` 兜底逻辑，新增 `KEY_DIR_NAME` / `keyCandidates()` / `resolveKeyFile()`：显式配置 > `<dataDir 同级>/qq-whale-keys/memory.key` > `<dataDir>/memory.key` > 老 `G:\Molly\keys\memory.key`。
 - `MemoryStore` 新增 `dataDir` 选项；**有密文却没有钥匙时 `broken=true`、拒绝 `save()`**，密文原样不动，只报「记忆是加密的，但本机密钥不可用」。
 - 自测：`tools/memcrypt-key-resolution-selftest.mjs` 10/10。
 
@@ -143,7 +145,7 @@
 - `tools/memory-address-parse-selftest.mjs` 15/15；`tools/hash-command-selftest.mjs` 39/39；`tools/memcrypt-key-resolution-selftest.mjs` 10/10；`lib/*.js` 全量 `node --check` 通过。
 
 **退回**
-- 认人：换回 `${MOLLY_ROOT}\backup\rollback-20261026\installed-preview3-pre-patch\lib\` 三个文件并热重载；
+- 认人：换回 `G:\Molly\backup\rollback-20261026\installed-preview3-pre-patch\lib\` 三个文件并热重载；
 - `#` 菜单：删 `lib/hash-commands.js` + 撤销 `main.js` 三处接线 + `module-health.js` 的 manifest 项；
 - 密钥定位：`resolveKeyFile` 改回直接返回 `DEFAULT_KEY_FILE`。
 
@@ -161,7 +163,7 @@
   - `lib/engine-context.js`：「# 怎么称呼」只拼 `- 叫他「X」`；同一人多条时提示「以第一行为准（最近一次说的）」。
   - `lib/engine.js`：模型层 address 入库前必须含「叫他」；`guessKind()` 的 address 触发词去掉 `昵称/自称叫`（归 person）。
 - **数据清理**：删 3 条 `他希望你叫他「什」`、1 条把子房名片记成「梦梦」的错误条目（走插件 HTTP API，不直接改加密盘）。
-- **自测**：`${MOLLY_ROOT}\out\_addrname_test.mjs` 15 条解析用例全过；真库审计 8 个 QQ 称呼可用，子房只剩「宝宝」。
+- **自测**：`G:\Molly\out\_addrname_test.mjs` 15 条解析用例全过；真库审计 8 个 QQ 称呼可用，子房只剩「宝宝」。
 - **上线**：gen `gen-mvorxuj7-llrtgn`（`boot-health ok=true`、link online）；`/chat/simulate` 以 888888888 试三条，两条回复带「宝宝」。
 - **发布**：版本号 `1.1.5` → **`1.1.5-Hotfix.1`**（package.json / 控制台 FALLBACK_VERSION / 控制台页脚 / README 一并改）。本版 Release **只挂插件 zip，不带语音包**；音色包 v1.2 单独发成 `voice-pack-v1.2` Release。v1.1.5 上原有的 `molly-voice-pack-v1.2.zip` 附件**保留不动**（主人 m02960 定：已有链接别失效）。
 - **顺带修的发布工具**：`tools/status-carry.mjs` 校验接受 `statusMod` / `bootedAt` 两代写法——v1.1.5 发版时正常回填被误判成 `blocked-carry`。
@@ -195,14 +197,14 @@
 
 **部署可移植性（重点）**
 
-- **没有 G: 盘也能启动**：`memoryKeyFile`、`workSandboxDir`、`voiceRefAudio`、`voiceAsrModelDir`、boot-health 路径、三个 Python 路径、work-guard 护栏、`sleepOverridePath()` 全部改为「从 dataDir 推导 + 配置可覆盖」，不再出现盘符字面量。以前无 G 盘的机器会 `mkdir ${MOLLY_ROOT}\keys` 抛 ENOENT → `ChatEngine` 构造失败 → 插件「加载成功但 OneBot 从未连过」。
+- **没有 G: 盘也能启动**：`memoryKeyFile`、`workSandboxDir`、`voiceRefAudio`、`voiceAsrModelDir`、boot-health 路径、三个 Python 路径、work-guard 护栏、`sleepOverridePath()` 全部改为「从 dataDir 推导 + 配置可覆盖」，不再出现盘符字面量。以前无 G 盘的机器会 `mkdir G:\Molly\keys` 抛 ENOENT → `ChatEngine` 构造失败 → 插件「加载成功但 OneBot 从未连过」。
 - **加密失败降级而不是炸**：钥匙目录建不出来时降级明文 + warn（`/state.memory.keyError` 写明原因）；盘上是密文但没有钥匙时置 `broken` 并拒绝写回，避免明文覆盖唯一一份密文。
 - **配置项**：新增 `voiceAsrModelDir`（空 = `<dataDir>/asr/models`）；`memoryKeyFile`、`workSandboxDir`、`voiceRefAudio` 默认值改由 dataDir 推导。
 - 自测：`tools\path-portability-selftest.mjs`（8 项，模拟无盘机器）。
 
 **音色包 v1.2（随本版 Release 附件发布）**
 
-- 附件 `molly-voice-pack-v1.2.zip`（78 文件 / 315.93 MB，sha256 `<REDACTED>`）：54 句训练素材、参考音频、5 条样例、切分/训练/合成脚本与权重（GPT e10 + SoVITS e16_s864）。
+- 附件 `molly-voice-pack-v1.2.zip`（78 文件 / 315.93 MB，sha256 `1a1a0ed60cc2df56d3ac9149169c49b750fe3115ab6732c9e73184664ba6890f`）：54 句训练素材、参考音频、5 条样例、切分/训练/合成脚本与权重（GPT e10 + SoVITS e16_s864）。
 - 与 v1.1 差别：5 条样例按线上参数（`speed_factor 0.93` + 句间 30 ms）重渲染；文档修正 `voicePauseMs` 笔误、补「QQ 语音转文字」实测与限制说明；数据与权重未变。直接覆盖旧的 `molly-voice-pack-v1.1.zip` 即可。
 - 主人 m02313「语音目前改完qq转文字识别不了……测完后命名为v1.2的语音包并内置进v1.1.5正式版」；实测四组参数（1.0 整段 / 0.93 整段 / 1.05 整段 / 0.93 逐句 30 ms）都能被 QQ 转文字识别，结论是此前的「识别不了」为偶发，线上参数保持 `0.93 + 30 ms` 不变。
 
@@ -232,7 +234,7 @@
 
 ### 实测
 
-- 合成入群通知（群 `666666666`、假 QQ `1234567890`）→ 返回 `{"acted":true,"kind":"welcome"}`；群内真实发出「欢迎 新朋友 加入 本群～我是 Molly，有问题随时 @我」（message_id `1160694340`），`/state.groupfun.stats.welcomed` 由 0 → 1。
+- 合成入群通知（群 `1012639381`、假 QQ `1234567890`）→ 返回 `{"acted":true,"kind":"welcome"}`；群内真实发出「欢迎 新朋友 加入 本群～我是 Molly，有问题随时 @我」（message_id `1160694340`），`/state.groupfun.stats.welcomed` 由 0 → 1。
 
 ## 2026-10-26 · v1.1.3-plus.3：抽奖 @ 段修复（自动开奖能发了）+ 本地调试路由
 
@@ -244,7 +246,7 @@
 
 **3）兜底** `lib/groupfun.js` 新增 `sweep()`（到点未开的房间补开）与 `tick()` 心跳；`engine` 每 15 秒调一次；`/state.groupfun` 暴露 `lastTick` / `lastAuto` / `sweeps`。
 
-**4）自测** `out/_lottery_sweep_test.mjs` 15 项、`_lottery_keyword_test.mjs` 33 项、`_groupfun_test.mjs` 51 项全过；并在群 666666666 用调试路由实跑一局（3 人报名 → 到点开奖 @ 三位，`lastAuto.ok=true, sent=true`）。
+**4）自测** `out/_lottery_sweep_test.mjs` 15 项、`_lottery_keyword_test.mjs` 33 项、`_groupfun_test.mjs` 51 项全过；并在群 1012639381 用调试路由实跑一局（3 人报名 → 到点开奖 @ 三位，`lastAuto.ok=true, sent=true`）。
 
 ---
 
@@ -341,7 +343,7 @@ welcomeCooldownSeconds: 60
 
 - 窗口内：不主动找人、群聊不接话（被 @ 才回），私聊叫她会醒、语气带起床气，但不会长篇大论。
 - 窗口外：想聊多久聊多久，不再中途喊困。
-- 配置在控制台「设置」页的「作息时间」卡片里改，保存后立即生效、无需重启；覆盖值落盘 `${MOLLY_ROOT}\data\qq-whale\sleep-window.json`，插件接口 `GET/POST /dsh-qq-whale/sleep`（控制台 `/api/sleep`）。
+- 配置在控制台「设置」页的「作息时间」卡片里改，保存后立即生效、无需重启；覆盖值落盘 `G:\Molly\data\qq-whale\sleep-window.json`，插件接口 `GET/POST /dsh-qq-whale/sleep`（控制台 `/api/sleep`）。
 - 自测：`out/_sleep_test.mjs` 15/15（跨午夜窗口、边界含端点、非法输入 400、控制台代理、私聊叫醒）。
 
 ## 2026-10-26 · v1.1.5-preview.2：让她看懂动图（GIF 多帧）+ 带图轮次不再「看了不吭声」
@@ -353,7 +355,7 @@ welcomeCooldownSeconds: 60
 - 是模型侧的问题：多模态模型对 `image/gif` 只解码第一帧，插件原来把 GIF 原样当 data URL 发，等于只给模型看首帧。
 
 **改法（新增 `lib/gif-frames.js`，约 250 行，无新依赖）**
-- 下载后按魔数确认是 GIF → 调本机 `${MOLLY_ROOT}\data\video\venv` 的 Pillow，把整段动画采样成 N 帧（默认 6 帧 / 3 列 / 每帧 320px），拼成一张 PNG，每格左上角标「n/N」帧号。
+- 下载后按魔数确认是 GIF → 调本机 `G:\Molly\data\video\venv` 的 Pillow，把整段动画采样成 N 帧（默认 6 帧 / 3 列 / 每帧 320px），拼成一张 PNG，每格左上角标「n/N」帧号。
 - 接入点在 `engine-context.loadImages`：拆帧函数由 engine 通过 deps 注入，该文件保持「只组装、不 import 能力」；没装 Pillow / 超时 / 单帧 GIF 一律回退原图，绝不影响这轮回复。
 - 配置（cordis.patch.yml）：`gifFramesEnabled` / `gifFramesCount` / `gifFramesColumns` / `gifFrameWidth` / `gifFramesPython` / `gifFramesTimeoutMs`。实测拆帧 204–235 ms，拼图输出 21 KB。
 - 真机 A/B：原图首帧 → 「两只小猫抱在一起，一只用爪子捂着另一只的嘴」；拆帧图 → 按帧号讲出「捂嘴 → 蓝色液体漏出 → 又大量溢出」的完整动作。`out/_gif_frames_test.mjs` 16/16；`out/_gif_e2e.mjs` 用群里真实 GIF 跑通（8 帧取 6）。
@@ -407,7 +409,7 @@ welcomeCooldownSeconds: 60
 - 新增 `lib/local-asr.js`（无新 npm 依赖、无 ffmpeg）：
   - `fetchRecordWav(client, file)`：调 SnowLuma `get_record { file, out_format:'wav' }` 取 24k/16bit/mono wav（SnowLuma 自带解码）；超时 12 秒、体积上限 8 MB、失败永远返回 `{ok:false,error}`。
   - `wavSeconds(buffer)`：解析 RIFF 头算时长，给「太长不识别」的判断用。
-  - `LocalAsr`：常驻 Python worker（借用 `${MOLLY_ROOT}\data\video\venv` 里已装的 faster-whisper + 本地缓存模型，`local_files_only` 不联网），首次加载约 1.6 秒、之后每段 1.4–1.6 秒；空闲 10 分钟自动退出；串行队列避免并发拖爆 CPU；旧 worker 迟到的 exit/error 不会影响新 worker（踩过：dispose 后立刻重启会被旧子进程的退出事件打成 `asr worker 未就绪`）。
+  - `LocalAsr`：常驻 Python worker（借用 `G:\Molly\data\video\venv` 里已装的 faster-whisper + 本地缓存模型，`local_files_only` 不联网），首次加载约 1.6 秒、之后每段 1.4–1.6 秒；空闲 10 分钟自动退出；串行队列避免并发拖爆 CPU；旧 worker 迟到的 exit/error 不会影响新 worker（踩过：dispose 后立刻重启会被旧子进程的退出事件打成 `asr worker 未就绪`）。
 - `lib/engine.js`：`transcribeVoice(messageId, { file })` 改成分级返回 `{text, source}`——
   1. 先走 QQ 服务端 `fetch_ptt_text`（快、免费）；
   2. 失败且 `voiceAsrEnabled !== false` 时：`get_record` 转 wav → `voiceAsrMaxSeconds`（默认 15 秒）以内 → 本地识别；
@@ -563,18 +565,18 @@ welcomeCooldownSeconds: 60
 ## 2026-10-24 · 音色包：molly_own（自录 54 句微调）上线并开源
 
 **换音色（`tools/voice-sovits-start.ps1`、`cordis.patch.yml`）**
-- 语音后端从社区 Dania 换成作者自己录 **54 句**中文微调的 **molly_own**（GPT-SoVITS v2ProPlus）：GPT `molly_own-e10.ckpt`（155,312,694 B）+ SoVITS `molly_own_e16_s864.pth`（172,764,661 B），参考音频 `${MOLLY_ROOT}\data\qq-whale\voice-ref\molly-ref.wav`，参考文本「想的美，今天本鱼才是老大，你喝白开水去！」。
+- 语音后端从社区 Dania 换成作者自己录 **54 句**中文微调的 **molly_own**（GPT-SoVITS v2ProPlus）：GPT `molly_own-e10.ckpt`（155,312,694 B）+ SoVITS `molly_own_e16_s864.pth`（172,764,661 B），参考音频 `G:\Molly\data\qq-whale\voice-ref\molly-ref.wav`，参考文本「想的美，今天本鱼才是老大，你喝白开水去！」。
 - `voice-sovits-start.ps1` 第 35–37 行写死上述三条路径，服务就绪后幂等调用 `/set_gpt_weights`、`/set_sovits_weights`、`/set_refer_audio`；`Molly-Voice` 计划任务每 5 分钟保活。
 - 行为不变：`voiceChance 0.35`、`voiceMaxChars 220`、`voiceMaxSeconds 58`、23:50–09:00 静默、失败回退 edge-tts。
 
 **开源音色包（产物在 `out/`，不是插件代码）**
-- `${MOLLY_ROOT}\out\molly-voice-pack-v1.0\`：权重 + 参考音频 + **切好的 54 句**训练音频（32 kHz，13.4 MB）+ 训练配置/脚本 + 5 条真实合成样例 + README / RELEASE-NOTES / LICENSE-VOICE / SHA256SUMS，共 343 MB、76 个文件；zip 约 301 MB。
+- `G:\Molly\out\molly-voice-pack-v1.0\`：权重 + 参考音频 + **切好的 54 句**训练音频（32 kHz，13.4 MB）+ 训练配置/脚本 + 5 条真实合成样例 + README / RELEASE-NOTES / LICENSE-VOICE / SHA256SUMS，共 343 MB、76 个文件；zip 约 301 MB。
 - **不含 7 段原始连续录音（.m4a，5.11 MB）**——只发切好的片段，保护作者原声。
 - 授权：CC BY-NC-SA 4.0 + 禁止冒充真人/商用（`LICENSE-VOICE.md`）。
 - GitHub 单文件 100 MB 硬限 → 走 Release 附件（≤2 GB）/ 网盘 / 模型站，上传路线待定。
 
 **验证**
-- `/state.voice.ready=true`；真机语音条正常（SnowLuma PTT）；`${MOLLY_ROOT}\data\qq-whale\voice\` 下 19:2x 之后的 wav 即新音色产物，5 条已放进包内 `samples/`。
+- `/state.voice.ready=true`；真机语音条正常（SnowLuma PTT）；`G:\Molly\data\qq-whale\voice\` 下 19:2x 之后的 wav 即新音色产物，5 条已放进包内 `samples/`。
 
 ## 2026-10-24 · v1.1.2：撤回不追回 + 群里明确要求就直发 + 查资料不再外发 + 好友申请不漏报
 
@@ -639,7 +641,7 @@ welcomeCooldownSeconds: 60
 - 写入去重：同一个人（同 `qq`；两边都没 `qq` 时同 `who`）+ 相似度 ≥ 0.7（表情包只认完全相同）→ 只留一条，**新的文本覆盖旧的**；历史数据可用 `dedupeAll()` 重跑。
 - 加密落盘：`memory.json` 变 AES-256-GCM 信封（`{"version":2,"enc":"aes-256-gcm",...}`），`memory.md` → `memory.md.enc`；密钥默认 `keys/memory.key`（`memoryKeyFile` / 环境变量 `MOLLY_MEMORY_KEY` 可改），与数据分目录存放。
 - 懒迁移：启动发现明文自动加密，改盘前先留 `*.plain.bak`；解不开则整池只读 `broken`，绝不写回覆盖唯一一份数据。
-- 备份：`tools/backup-memory.ps1` 默认每 2 小时把记忆文件拷到 `D:\MollyBackup\memory` 与 `${MOLLY_ROOT}Backup\memory`（保留 48 份），密钥单独备份到两盘 `keys\`；`tools/install-memory-backup-task.cmd` 装计划任务。
+- 备份：`tools/backup-memory.ps1` 默认每 2 小时把记忆文件拷到 `D:\MollyBackup\memory` 与 `G:\MollyBackup\memory`（保留 48 份），密钥单独备份到两盘 `keys\`；`tools/install-memory-backup-task.cmd` 装计划任务。
 - 控制台兜底：`GET /api/memory` 在旧 panel-data 读不到加密文件时，改走插件 `/memory/list`。
 
 **语音（`lib/voice.js`）**：`voiceMaxChars` 42 → 220（≈56 秒），新增 `voiceMaxSeconds: 58` 产物时长闸门（超了退回文字），`voiceTimeoutMs` 20000 → 90000。
@@ -653,7 +655,7 @@ welcomeCooldownSeconds: 60
 ## 2026-10-17 深夜 · 干活会话"写一次就坏"的根因（`lib/commands.js`）
 
 **症状**：`/work/run` 每次都报
-`stored session "qq-whale-work-111111111" failed validation:
+`stored session "qq-whale-work-3451469368" failed validation:
 session event at seq 8 message must have role "user"`，
 而且删掉会话目录重建之后**下一次又坏**——说明不是历史遗留，是每次写入都在写脏。
 
@@ -675,7 +677,7 @@ session event at seq 8 message must have role "user"`，
 **怎么退回**：删掉那个 role 字段即可退回（没理由退回）。
 
 **连带清理**：损坏的会话目录已删
-`${HOME}\.dsh\sessions\--C-Users-example-.dsh-profiles-desktop--\qq-whale-work-111111111`，
+`C:\Users\jndnbd\.dsh\sessions\--C-Users-jndnbd-.dsh-profiles-desktop--\qq-whale-work-3451469368`，
 连同 `.corrupt-*` / `.old-*` 备份。
 
 ---
@@ -786,8 +788,8 @@ active: {
 
 ```powershell
 # 1. 同步到安装副本（五样全拷）
-$src="${WORKSPACE}\qq-whale\plugin\dsh-qq-whale"
-$dst="${HOME}\.dsh\profiles\desktop\node_modules\dsh-qq-whale"
+$src="D:\Documents\deepseek-harness\default-workspace\qq-whale\plugin\dsh-qq-whale"
+$dst="C:\Users\jndnbd\.dsh\profiles\desktop\node_modules\dsh-qq-whale"
 Copy-Item "$src\lib\*" "$dst\lib\" -Force
 Copy-Item "$src\persona\*" "$dst\persona\" -Force
 Copy-Item "$src\assets\*" "$dst\assets\" -Force

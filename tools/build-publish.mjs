@@ -107,6 +107,9 @@ const FILES = [
   // 2026-10-25 m03530：把每个 tag 的提交树打包成 GitHub Release 附件（导出→隐私扫→就地脱敏→zip→API）。
   // 发布版带上它，接手的人重发/补发 release 时不用再找脚本。
   ['tools/release-assets.mjs', 'tools/release-assets.mjs'],
+  // 2026-10-26 m00525：release-assets 靠它给历史 release 打补丁（#molly），
+  // 少了它发布版里的 release-assets.mjs import 会直接失败。
+  ['tools/status-carry.mjs', 'tools/status-carry.mjs'],
   ['tools/backup-memory.ps1', 'tools/backup-memory.ps1'],
   ['tools/install-memory-backup-task.cmd', 'tools/install-memory-backup-task.cmd'],
   ['tools/uninstall-memory-backup-task.cmd', 'tools/uninstall-memory-backup-task.cmd'],
@@ -658,6 +661,26 @@ if (hits.length) {
   console.error(`\n✘ 复检未通过：${hits.length} 处命中`)
   for (const h of hits.slice(0, 40)) console.error(`   ${h.file}:${h.line}  [${h.cat}] ${h.masked}  ${h.why}`)
   fail('副本里仍有敏感信息')
+}
+
+console.log('③.5 发版必带检查：底层状态指令 `#molly`…')
+{
+  // 主人 m00525：以后每次发版都必须带这个功能。源码里被删掉/改坏时就让构建失败，
+  // 而不是等到 release 上传后才发现「这个包没有 #molly」。
+  const statusFile = path.join(OUT, 'plugin', 'dsh-qq-whale', 'lib', 'status-command.js')
+  const mainFile = path.join(OUT, 'plugin', 'dsh-qq-whale', 'lib', 'main.js')
+  const missing = []
+  if (!fs.existsSync(statusFile)) missing.push('lib/status-command.js')
+  let mainText = ''
+  try {
+    mainText = fs.readFileSync(mainFile, 'utf8')
+  } catch {
+    missing.push('lib/main.js 读不到')
+  }
+  if (mainText && !mainText.includes("loadModule('statusCommand'")) missing.push('main.js 未装载 statusCommand')
+  if (mainText && !mainText.includes('statusHandler.handle(ev)')) missing.push('main.js 未接消息拦截')
+  if (missing.length) fail(`发版必带检查未通过：缺 ${missing.join('、')}`)
+  console.log('   · `#molly` 已就位')
 }
 
 const files = []

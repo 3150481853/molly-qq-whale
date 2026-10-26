@@ -5,6 +5,10 @@
  * 主人要求：「上新版本的时候把挂在上面的旧版本打包作为 release 传上去，注意隐私管理」。
  *
  * 流程（每个 tag）：
+ *   0. **回填底层状态指令 `#molly`**（2026-10-26 m00525，默认开）：`status-carry.mjs`
+ *      往导出树里插三段代码 + 补 `lib/status-command.js`。历史 tag 的提交树不动，
+ *      只是打出来的附件带上这个功能；`--no-carry-status` 可关（几乎不需要）。
+ *      回填失败或校验不过 → 该 tag 拒绝上传（宁可不上，也不上坏包）。
  *   1. `git archive` 导出该 tag 的提交树到临时目录（不含 .git / 未提交文件）；
  *   2. **隐私扫描**：真实 QQ 号/群号、OneBot/NapCat/PushPlus token、本机用户目录；
  *   3. 命中就地**脱敏**（换成占位符），再扫一遍；仍有命中 → 拒绝上传并报文件:行号；
@@ -25,6 +29,7 @@ import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import { applyStatusCarry, STATUS_REL } from './status-carry.mjs'
 
 const DEFAULT_REPO_DIR = 'G:\\Molly\\publish\\molly-qq-whale'
 const WORK_DIR = path.join(process.cwd(), 'out', 'release-assets')
@@ -203,15 +208,16 @@ function walk(dir, out = []) {
 }
 
 function parseArgs(argv) {
-  const out = { repoDir: DEFAULT_REPO_DIR, tags: [], dryRun: false, bodyOnly: false }
+  const out = { repoDir: DEFAULT_REPO_DIR, tags: [], dryRun: false, bodyOnly: false, carryStatus: true }
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i]
     if (a === '--dry-run') out.dryRun = true
     else if (a === '--body-only') out.bodyOnly = true
+    else if (a === '--no-carry-status') out.carryStatus = false
     else if (a === '--repo-dir') out.repoDir = argv[(i += 1)]
     else if (a === '--tags') out.tags = String(argv[(i += 1)] || '').split(',').map((s) => s.trim()).filter(Boolean)
     else if (a === '--help' || a === '-h') {
-      console.log('用法: node tools/release-assets.mjs [--dry-run] [--body-only] [--tags a,b] [--repo-dir DIR]')
+      console.log('用法: node tools/release-assets.mjs [--dry-run] [--body-only] [--tags a,b] [--repo-dir DIR] [--no-carry-status]')
       process.exit(0)
     } else throw new Error(`未知参数：${a}`)
   }
@@ -275,6 +281,56 @@ function exportTag(repoDir, tag) {
   execFileSync('tar', ['-x', '-f', tarFile, '-C', dir])
   fs.rmSync(tarFile, { force: true })
   return dir
+}
+
+/* ── 某 tag 的提交树里是否已自带 `#molly`（--body-only 判正文用）──────────── */
+function treeHasStatus(repoDir, tag) {
+  try {
+    execFileSync('git', ['cat-file', '-e', `${tag}:${STATUS_REL}`], { cwd: repoDir, stdio: 'ignore' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+function tagVersion(repoDir, tag) {
+  try {
+    return String(JSON.parse(git(repoDir, ['show', `${tag}:package.json`]))?.version || '')
+  } catch {
+    return ''
+  }
+}
+
+/* ── 回填台账：哪些 tag 的**附件**已经带过 `#molly`（历史 tag 的提交树里没有）──
+ * `--body-only` 只改正文、不重打包，靠这份台账才敢继续宣称「带 #molly」；
+ * 台账由真正上传成功的那次写（不写进 git 也能接受：它只是本地记录，
+ * 丢了最多是正文少一行说明，功能本身在 zip 里）。
+ */
+const CARRY_LEDGER = path.join(process.cwd(), 'tools', 'release-carry.json')
+
+function readCarryLedger() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(CARRY_LEDGER, 'utf8'))
+    return raw && typeof raw === 'object' ? raw : {}
+  } catch {
+    return {}
+  }
+}
+
+function recordCarried(tag, carried, asset) {
+  if (!carried) return
+  try {
+    const ledger = readCarryLedger()
+    ledger[tag] = {
+      at: new Date().toISOString(),
+      version: carried.version || '',
+      sha256: asset?.sha || '',
+      bytes: asset?.bytes || 0,
+    }
+    fs.writeFileSync(CARRY_LEDGER, JSON.stringify(ledger, null, 2) + '\n', 'utf8')
+  } catch {
+    /* 台账写不进去不影响发布 */
+  }
 }
 
 /* ── 扫描 / 脱敏 ─────────────────────────────────────────────────────────── */
@@ -342,7 +398,7 @@ const DEPLOY_NOTICE = [
   '',
 ]
 
-function releaseBody(tag, asset, commit, redact) {
+function releaseBody(tag, asset, commit, redact, carried) {
   const kind = tag.includes('-preview') ? '预览版' : '正式版'
   const lines = []
   // 正式版置顶部署提醒；预览版不加，避免干扰（m05815）
@@ -352,6 +408,12 @@ function releaseBody(tag, asset, commit, redact) {
   const feats = RELEASE_FEATURES[tag]
   if (feats && feats.length) {
     lines.push('', '## 本版特性', ...feats.map((f) => '- ' + f))
+  }
+
+  // 底层状态指令 `#molly`：2026-10-26 起所有附件统一回填（m00525）
+  if (carried) {
+    const ver = carried.version ? '（v' + carried.version + '）' : ''
+    lines.push('', '## 内置状态指令', '- 群里/私聊**整条消息**发 \`#molly\`' + ver + '，她会回一条自己的真实状态（不花 token、不看上下文、闭眼模式也应答）。')
   }
 
   var replacements = redact && Number(redact.replacements) > 0 ? Number(redact.replacements) : 0
@@ -370,9 +432,9 @@ function releaseBody(tag, asset, commit, redact) {
   return lines.join('\n')
 }
 
-async function ensureRelease(token, repoInfo, tag, asset, commit, redact) {
+async function ensureRelease(token, repoInfo, tag, asset, commit, redact, carried) {
   const { owner, repo } = repoInfo
-  const body = releaseBody(tag, asset, commit, redact)
+  const body = releaseBody(tag, asset, commit, redact, carried)
   const existing = await gh(token, 'GET', `/repos/${owner}/${repo}/releases/tags/${encodeURIComponent(tag)}`)
   if (existing) {
     await gh(token, 'PATCH', `/repos/${owner}/${repo}/releases/${existing.id}`, {
@@ -445,7 +507,10 @@ async function main() {
       let commit = ''
       try { commit = git(repoDir, ['rev-list', '-n', '1', tag]) } catch { commit = '' }
       const redact = { replacements: RELEASE_REDACT[tag] || 0 }
-      const updated = await ensureRelease(token, repoInfo, tag, asset, commit, redact)
+      const carried = treeHasStatus(repoDir, tag)
+        ? { version: tagVersion(repoDir, tag) }
+        : readCarryLedger()[tag] || null
+      const updated = await ensureRelease(token, repoInfo, tag, asset, commit, redact, carried)
       console.log('- ' + tag + ' 正文已更新（release #' + updated.id + '，附件 ' + (asset ? asset.name : '无') + '）')
       summary.push({ tag, status: 'body-only', asset, redact })
       continue
@@ -453,6 +518,21 @@ async function main() {
     const commit = git(repoDir, ['rev-list', '-n', '1', tag])
     process.stdout.write(`- ${tag}（${commit.slice(0, 7)}）导出… `)
     const dir = exportTag(repoDir, tag)
+    // 0. 回填底层状态指令 `#molly`（2026-10-26 m00525；历史 tag 的提交树不动，只改打出来的包）
+    let carried = null
+    if (args.carryStatus) {
+      process.stdout.write('回填 #molly… ')
+      const carry = applyStatusCarry(dir)
+      if (!carry.ok) {
+        console.log('❌ 回填校验不过，拒绝上传')
+        for (const p of carry.problems.slice(0, 8)) console.log(`    - ${String(p).split('\n')[0]}`)
+        summary.push({ tag, status: 'blocked-carry', problems: carry.problems })
+        fs.rmSync(dir, { recursive: true, force: true })
+        continue
+      }
+      carried = { version: carry.manifest.version || '' }
+      process.stdout.write(`${carry.changed ? '已插入' : '已存在'} ${carry.manifest.addedLines} 行，`)
+    }
     let hits = scanTree(dir)
     let redact = { files: 0, replacements: 0 }
     if (hits.length) {
@@ -472,25 +552,31 @@ async function main() {
     const tagNote = redact.replacements ? `脱敏 ${redact.replacements} 处 / ${redact.files} 文件，` : ''
     console.log(`${tagNote}${asset.name} ${fmtSize(asset.bytes)} / ${asset.files} 文件 / sha256=${asset.sha.slice(0, 16)}…`)
     if (args.dryRun) {
-      summary.push({ tag, status: 'dry-run', asset, redact })
+      summary.push({ tag, status: 'dry-run', asset, redact, carried })
       continue
     }
-    const rel = await ensureRelease(token, repoInfo, tag, asset, commit, redact)
+    const rel = await ensureRelease(token, repoInfo, tag, asset, commit, redact, carried)
     await uploadAsset(token, repoInfo, rel.id, asset)
+    recordCarried(tag, carried, asset)
     console.log(`    release ${rel.created ? '已新建' : '已存在'} #${rel.id}，附件已上传`)
-    summary.push({ tag, status: redact.replacements ? 'sanitized' : 'ok', asset, releaseId: rel.id, redact })
+    summary.push({ tag, status: redact.replacements ? 'sanitized' : 'ok', asset, releaseId: rel.id, redact, carried })
   }
 
   console.log('\n=== 汇总 ===')
   for (const s of summary) {
-    const note = s.asset ? `${s.asset.name} ${fmtSize(s.asset.bytes)}${s.redact && s.redact.replacements ? `（脱敏 ${s.redact.replacements} 处）` : ''}` : ''
+    const carryNote = s.carried ? ' 含 #molly' : ''
+    const note = s.asset ? `${s.asset.name} ${fmtSize(s.asset.bytes)}${s.redact && s.redact.replacements ? `（脱敏 ${s.redact.replacements} 处）` : ''}${carryNote}` : carryNote.trim()
     console.log(`${s.tag.padEnd(22)} ${s.status.padEnd(10)} ${note}`)
   }
-  const bad = summary.filter((s) => s.status === 'blocked')
-  if (bad.length) {
-    console.log(`\n注意：${bad.length} 个 tag 脱敏后仍有敏感命中，未上传。`)
-    process.exitCode = 2
+  const blocked = summary.filter((s) => s.status === 'blocked')
+  const blockedCarry = summary.filter((s) => s.status === 'blocked-carry')
+  if (blocked.length) {
+    console.log(`\n注意：${blocked.length} 个 tag 脱敏后仍有敏感命中，未上传。`)
   }
+  if (blockedCarry.length) {
+    console.log(`\n注意：${blockedCarry.length} 个 tag 的 #molly 回填校验不过，未上传：${blockedCarry.map((s) => s.tag).join(', ')}`)
+  }
+  if (blocked.length || blockedCarry.length) process.exitCode = 2
 }
 
 main().catch((err) => {

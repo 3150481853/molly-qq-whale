@@ -726,6 +726,19 @@ export class WebWidget {
       out.qqTool = { registered: false, error: '读取异常' }
     }
     /*
+     * 底层状态指令的生效配置（主人 m00001 的 `#molly`）。
+     *
+     * 这里必须显式挂出去：`makeStatePayload` 是白名单式拼装的，
+     * main.js 上加了 getter 也不会自动出现在 /state 里 —— 不挂就永远是空的，
+     * 排查时会误以为「代码没生效」，实际是没人把它抄出来。
+     * 值直接取 main.js 的 state.statusCommand（它内部已 try/catch，读不到会给 available:false）。
+     */
+    try {
+      out.statusCommand = this.state?.statusCommand || { available: false, error: '未挂载' }
+    } catch (err) {
+      out.statusCommand = { available: false, error: String(err?.message || err) }
+    }
+    /*
      * 事件环形缓冲（用户 m16800「molly 为什么不回 333333333」）。
      *
      * 桌面版没有日志文件，之前排查"消息到底进没进来"只能靠关系表时间戳反推。

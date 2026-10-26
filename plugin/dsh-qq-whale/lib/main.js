@@ -114,6 +114,25 @@ const WINDOW_PROFILE = memoryMod.WINDOW_PROFILE
 const workshopMod = await loadModule('workshop', './workshop.js', { optional: true })
 const Workshop = workshopMod?.Workshop || null
 
+/*
+ * 底层状态激发指令（#molly，主人 m00001 / m00093 拍板）。
+ *
+ * 跟 loadModule 的其它 optional 模块一致：没加载上 = 这条指令不存在，
+ * 并在 /state.plugins 的 missing 里点名（module-health 已登记 statusCommand）。
+ * 绝不能因为它加载失败就把整个插件带下去 —— 它本身是「排查用」的旁路通道。
+ */
+const statusMod = await loadModule('statusCommand', './status-command.js', { optional: true })
+const createStatusHandler = statusMod?.createStatusHandler || null
+const statusVersion = statusMod?.version || null
+// 形状说明（_configShapeReference）要用到默认值：模块没加载上时退化成同一份常量，
+// 免得因为没有默认值把整个 schema 拆了。
+const DEFAULT_STATUS_COMMAND = statusMod?.DEFAULT_STATUS_COMMAND || {
+  enabled: true,
+  trigger: '#molly',
+  cooldownSeconds: 30,
+  ownerDetail: true,
+}
+
 // 三级角色（owner / adm / guest）。用户 m25316 给 333333333 一个「管理员」位，
 // 权限低于主人。解析与判定全在 roles.js 里，main.js 只负责把配置喂进去、
 // 把算好的映射挂到 config 上，判定本身不在这里。
@@ -490,6 +509,18 @@ export const DEFAULTS = {
   // 打听一件事最多等多久（秒）。查资料不能让她在群里失联太久，
   // 超时就当没查到、照常聊天。2026-10-20 主人要求放宽到 5 分钟（原 45 秒）。
   researchTimeoutSeconds: 300,
+
+  // —— 底层状态激发指令（#molly，2026-10-26 主人 m00001）——
+  // 整条消息只等于触发词，就当场回一条她自己的真实状态：不进聊天历史、
+  // 不调模型、不花额度，闭眼模式/群里没被 @/她正忙都照样应答。
+  // 总开关（enabled）关掉时它也不吭声 —— 那是「彻底闭嘴」的唯一手段。
+  // 跟 SnowLuma 的 `#sl` 是同一类东西，只是状态维度是 Molly 自己的。
+  statusCommand: {
+    enabled: true,
+    trigger: '#molly',
+    cooldownSeconds: 30,
+    ownerDetail: true,
+  },
 
   // —— 调试 ——
   blindMode: false,
@@ -947,6 +978,17 @@ function _configShapeReference(Schema) {
     groupEchoRepeatWindowSeconds: s.natural().default(DEFAULTS.groupEchoRepeatWindowSeconds).description('她说「私聊」之后多久内的追问算「第二次坚持」（秒，默认 300）'),
     groupEchoMaxBubbleChars: s.natural().default(DEFAULTS.groupEchoMaxBubbleChars).description('群里照发时每颗气泡的字数上限（默认 400）'),
     groupEchoMaxTotalChars: s.natural().default(DEFAULTS.groupEchoMaxTotalChars).description('群里照发时一次最多发多少字（默认 1200，超了截断并说明）'),
+    // —— 底层状态激发指令（#molly，2026-10-26 主人 m00001）——
+    // 跟 SnowLuma 的 `#sl` 同类：低层拦截、整条消息精确匹配、每会话冷却、
+    // 不进模型链路。区别是状态维度是 Molly 自己的，且总开关关掉时不吭声。
+    statusCommand: s
+      .object({
+        enabled: s.boolean().default(DEFAULT_STATUS_COMMAND.enabled).description('是否应答状态指令（关掉不影响聊天；总开关 enabled 关掉时也一律不吭声）'),
+        trigger: s.string().default(DEFAULT_STATUS_COMMAND.trigger).description('触发词：整条消息（去空白、不分大小写）必须只等于它才算'),
+        cooldownSeconds: s.natural().default(DEFAULT_STATUS_COMMAND.cooldownSeconds).description('同一会话两次应答的最小间隔秒数（0=不限；主人不受限）'),
+        ownerDetail: s.boolean().default(DEFAULT_STATUS_COMMAND.ownerDetail).description('主人看多行详情，其他人只看一行'),
+      })
+      .description('底层状态激发指令：整条消息等于触发词就当场回状态（不进模型、不花额度）'),
   })
 }
 
@@ -1014,6 +1056,13 @@ export function apply(root, rawConfig = {}) {
   // 落盘到 dataDir：重载插件后「上次说话」「已聊几条」不该归零
   const metrics = new Metrics({ dir: config.dataDir || config.memoryDir })
 
+  /*
+   * 本次插件加载的时刻：状态指令用它算「已运行多久」。
+   * 语义就是「这一份活代码活了多久」——热重载后重新计时是对的，
+   * 因为重启之后模型记忆、Redis 连接、定时器全都是新的。
+   */
+  const bootedAt = Date.now()
+
   const state = {
     get enabled() {
       return config.enabled !== false
@@ -1036,6 +1085,22 @@ export function apply(root, rawConfig = {}) {
      * 主包不 import 该包的任何文件，双向只认这两个宿主服务名。
      */
     attachPest: (api) => attachPest(api),
+    /*
+     * 底层状态指令的当前生效值（只读侦查字段）。
+     *
+     * 控制台的「她到底认哪个词、冷却多久、主人能不能看详情」不用去翻 yml ——
+     * 这里摊开的就是 effectiveOption() 合并完默认值之后真正生效的那份。
+     * available:false 表示 status-command.js 没加载上（/state.plugins 会点名）。
+     */
+    get statusCommand() {
+      try {
+        const opt = statusHandler?.option?.()
+        if (!opt) return { available: false, version: statusVersion?.() || '' }
+        return { available: true, version: statusVersion?.() || '', ...opt }
+      } catch (err) {
+        return { available: false, error: String(err?.message || err) }
+      }
+    },
     get pestSource() {
       return pestSource
     },
@@ -1506,6 +1571,35 @@ export function apply(root, rawConfig = {}) {
   }
   state.events = eventRing
 
+  /*
+   * 底层状态激发指令的处理器（主人 m00001 / m00093 拍板）。
+   *
+   * 为什么建在这里而不是 apply 开头：
+   *   - 它要往事件环（pushEvent）里留痕，事件环是这个作用域里刚建好的；
+   *   - engine / client 都是 boot() 里才创建的，所以「状态现场」用 getEnv 现取，
+   *     不能建的时候就快照 —— 否则永远是 null。
+   *
+   * 发送直接用 client 的原始 OneBot 段格式（跟下面加好友请求那几处一致）：
+   * 不经过 engine 的分段/打字机/表情包那套，状态指令要的是「一条，立刻」。
+   */
+  const statusHandler = createStatusHandler
+    ? createStatusHandler({
+        config,
+        getEnv: () => ({ state, engine, metrics, bootedAt }),
+        logger,
+        onEvent: (type, ev, extra) => pushEvent(type, ev, extra),
+        send: async ({ scene, id, text }) => {
+          if (!client) throw new Error('OneBot 还没连上')
+          const message = [{ type: 'text', data: { text } }]
+          if (scene === 'group') await client.sendGroupMsg(id, message)
+          else await client.sendPrivateMsg(id, message)
+        },
+      })
+    : null
+  if (!statusHandler) {
+    logger('warn', '底层状态指令未启用：status-command.js 没加载上（/state.plugins 里点了名）')
+  }
+
   /** OneBot 事件总入口：过滤自己、过滤命令、转给引擎 */
   const onOneBotEvent = (ev) => {
     try {
@@ -1547,6 +1641,16 @@ export function apply(root, rawConfig = {}) {
           pushEvent('drop-self', ev)
           return
         }
+        /*
+         * 底层状态指令（主人 m00001 / m00093）。**必须放在闭眼模式和总开关判定之前** ——
+         * 「底层」就是这个意思：她闭着眼、她正忙、群里没 @ 她、模型/额度已经坏了，
+         * 这条通道都照样应答。它不进聊天历史、不调模型、不花额度，也不计进
+         * metrics 的「收到消息/回复耗时」（那是聊天的账，别把它搅进去）。
+         *
+         * 三个拒答都在 handler 内部：触发词不匹配、冷却中、陌生私聊/未授权群。
+         * 返回 true = 这条已经被吃掉，主链路必须 return，不能再往下走。
+         */
+        if (statusHandler && statusHandler.handle(ev)) return
         if (config.blindMode) {
           pushEvent('drop-blind', ev)
           return

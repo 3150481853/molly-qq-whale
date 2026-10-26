@@ -34,6 +34,8 @@
 
 **版本**：`1.1.5-Hotfix.3`（不含语音包；语音包仍用 `voice-pack-v1.2`）。
 
+**发布**：GitHub Release [v1.1.5-Hotfix.3](https://github.com/222222222/molly-qq-whale/releases/tag/v1.1.5-Hotfix.3)（#424127469，2026-10-26T10:45:58Z），附件 `molly-qq-whale-v1.1.5-Hotfix.3.zip` 1,300,624 B / 177 文件，sha256 `<REDACTED>`；tag → `b7dab06`。
+
 ---
 
 ---

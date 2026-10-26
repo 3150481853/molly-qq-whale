@@ -41,6 +41,36 @@ export const DEFAULT_REPO_DIR = 'G:\\Molly\\publish\\molly-qq-whale'
 export const STATUS_SOURCE = path.join(WORKSPACE_DIR, 'plugin', 'dsh-qq-whale', 'lib', 'status-command.js')
 export const MAIN_REL = 'plugin/dsh-qq-whale/lib/main.js'
 export const STATUS_REL = 'plugin/dsh-qq-whale/lib/status-command.js'
+/** 原生实现所在的文件（≥ v1.1.5-Hotfix.3 的 `#molly` 就在这里的 hash 命令表里） */
+export const HASH_REL = 'plugin/dsh-qq-whale/lib/hash-commands.js'
+
+/** 该树自己的版本号（= 这个 tag 的 package.json）；没有就返回空串。 */
+export function versionOf(treeDir) {
+  // 注意发布仓库的 package.json 在 `plugin/dsh-qq-whale/` 下，根目录没有。
+  for (const rel of ['plugin/dsh-qq-whale/package.json', 'package.json']) {
+    try {
+      const v = JSON.parse(fs.readFileSync(path.join(treeDir, rel), 'utf8'))?.version
+      if (v) return String(v)
+    } catch {
+      /* 换下一个位置 */
+    }
+  }
+  return ''
+}
+
+/**
+ * 这棵树是否**原生**支持 `#molly`（2026-10-26 之后源码把这条指令并进了 hash 命令表，
+ * 不再有独立的 lib/status-command.js）。原生支持时回填是多余的：老包要补，
+ * 新包只要校验，别拿「源码里没有 status-command.js」把新 tag 拦下。
+ */
+export function hasNativeStatus(treeDir) {
+  try {
+    const src = fs.readFileSync(path.join(treeDir, HASH_REL), 'utf8')
+    return /molly\s*:\s*'status'/.test(src)
+  } catch {
+    return false
+  }
+}
 
 /* ── 第 1 段：模块装载（插在 onebot 装载之前，此时 loadModule 已定义）────── */
 const LOAD_BLOCK = [
@@ -201,6 +231,20 @@ export function applyStatusCarry(treeDir, { log = () => {}, sourceStatus = STATU
   if (!fs.existsSync(mainPath)) {
     return { ok: false, changed: false, already: false, problems: [`树里没有 ${MAIN_REL}`], manifest: {} }
   }
+
+  // 原生支持：源码已经不需要 status-command.js，只校验、不回填。
+  if (hasNativeStatus(treeDir)) {
+    const manifest = {
+      mainBytes: fs.statSync(mainPath).size,
+      statusBytes: 0,
+      addedLines: 0,
+      version: versionOf(treeDir),
+      native: true,
+    }
+    log(`已是原生 #molly（hash-commands 别名），跳过回填：main.js ${manifest.mainBytes} B，version ${manifest.version}`)
+    return { ok: true, changed: false, already: true, problems: [], manifest }
+  }
+
   if (!fs.existsSync(sourceStatus)) {
     return { ok: false, changed: false, already: false, problems: [`源码里没有 ${sourceStatus}`], manifest: {} }
   }

@@ -13,7 +13,7 @@
 基于 **DeepSeek Harness** 的 QQ 通道插件：稳定的人设、长期记忆、表情包习惯、会发语音，
 以及一个能看懂她此刻在干什么的控制台。
 
-**最近版本：** `v1.1.3-Hotfix.3` → `v1.1.3-plus.2` → `v1.1.3` 正式版 · 完整记录见 [docs/CHANGELOG.md](docs/CHANGELOG.md) 与 [Releases](https://github.com/222222222/molly-qq-whale/releases)。
+**最近版本：** `v1.1.3-Hotfix.3` → `v1.1.3-plus.2` → `v1.1.3` 正式版 · 完整记录见 [docs/CHANGELOG.md](docs/CHANGELOG.md) 与 [Releases](../../releases)。
 
 - **v1.1.3-Hotfix.3** —— 新人欢迎修复：入群通知不再被静默丢弃，自动欢迎真正发出；自动开奖也计入 `stats.drawn`；新增本机调试路由 `/groupfun/notice`。
 - **v1.1.3-plus.2** —— `@我 #` 小玩具统一入口；群趣味：抽奖 / 口令抽奖 / 新人欢迎。

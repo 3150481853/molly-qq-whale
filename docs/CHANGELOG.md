@@ -37,6 +37,12 @@
 - 线上 `http://127.0.0.1:14749/dsh-qq-whale/state` 实测 `link.ready=true`、`link.state='online'`、`model.ok=true`。
 - 线上数据清理：`data/qq-whale/out/lottery-rooms.json` 里有一条测试残留假场次（`gid=999999999` / `keyword=自测`，已过期），备份为 `lottery-rooms.json.bak-testroom-20261026-1925` 后清空 —— 否则下次重载会去一个不存在的群发假开奖。
 
+**发布**
+
+- GitHub Release [v1.1.5-A-Hotfix.1](https://github.com/222222222/molly-qq-whale/releases/tag/v1.1.5-A-Hotfix.1)（**#424182053**，`latest`），tag → `75cf38f`，附件 `molly-qq-whale-v1.1.5-A-Hotfix.1.zip` 1,317,133 B / 177 文件，sha256 `<REDACTED>`；本版**不含语音包**（音色包仍单独发 `voice-pack-v1.2`）。
+- 下载实测：解包 177 文件，包内 `plugin/dsh-qq-whale/package.json` = `1.1.5-A-Hotfix.1`，`lib/hash-commands.js` 含 `linkWords`，`lib/groupfun.js` 含 `requeue`；正文「本版特性」7 条与「内置状态指令」都在。
+- 打包注意：必须在**源仓库**跑 `node tools/release-assets.mjs --tags <tag>`（cwd = `qq-whale`）—— 从发布目录跑会读不到 `tools/release-assets.secrets.json`，隐私扫描退化成只用通用规则，本次实测该名单命中 7 处 / 5 文件。
+
 **踩坑（别重犯）**
 
 - `tools/release-assets.mjs` 是**脚本本体，不是库**：一旦 `import()` 它就等于跑了一遍 CLI。本次为了核对 `RELEASE_FEATURES` 键写了 `import('./tools/release-assets.mjs')`，结果它在没带 `--tags` 的情况下把 22 个 tag 全走了一遍，重建重传了 `v1.1.5-A` / `Hotfix.2` / `Hotfix.3` 三个**已发布**附件（内容不变、zip 字节变、sha256 变，正文被自动同步）；另外 19 个 tag 因 `#molly` 回填校验不过被拒，未受影响。

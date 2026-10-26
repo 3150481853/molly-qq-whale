@@ -6084,6 +6084,36 @@ export class ChatEngine {
      * 宁可少抓一点也不要抓错——记错的东西比不记更伤。
      */
     const patterns = [
+      /*
+       * 称谓（2026-10-26，主人 m01649）。
+       *
+       * 事故：子房有礼了（888888888）在群里说了八遍「叫我宝宝」「不是说好叫我
+       * 宝宝吗」，规则层一条没抓；模型层把它判成 promise 存了，于是她一次都没叫过。
+       *
+       * 必须排在「我叫(.{1,12})」前面：否则「叫我宝宝」会被当成自我介绍，
+       * 拼出「他自称叫「宝宝」」——听起来像他自己的名字，而不是"他希望被这么叫"。
+       *
+       * 三层护栏：否定（别叫我X）、提问（叫我什么）、动词（叫我出来）。
+       * 宁可漏记，也不能记成「他希望你叫他「出来」」这种。
+       */
+      {
+        re: /(?:叫我|喊我|称呼我|你可以叫我|就叫我|也能叫我|叫我一声|叫我做)([\u4e00-\u9fa5A-Za-z0-9]{1,8})/,
+        kind: 'address',
+        weight: 5,
+        fmt: (m) => {
+          const before = t.slice(Math.max(0, m.index - 3), m.index)
+          if (/[别不甭没]/.test(before)) return null
+          const w = String(m[1] || '')
+            .trim()
+            .replace(/[吗呢吧啊呀哦嘛了的却就都也么。！？!?，,、；;：:]+$/u, '')
+          if (!w) return null
+          if (/^(什么|啥|谁|哪|怎么样|什么呢|什么呀)/.test(w)) return null
+          // 「叫我出来 / 叫我过去 / 叫我一声」是叫人，不是称呼
+          if (/^(出来|过去|起来|过来|回去|走|滚|停|开|说|看|听|一下|一声|着)/.test(w)) return null
+          if (/^[的地得]/.test(w)) return null
+          return `他希望你叫他「${w}」`
+        },
+      },
       { re: /我叫(.{1,12})/, kind: 'person', weight: 4, fmt: (m) => `他自称叫「${m[1]}」` },
       { re: /我(?:喜欢|爱|爱吃|爱喝|爱玩|超爱|最爱)(.{1,20})/, kind: 'preference', weight: 4, fmt: (m) => `他喜欢${m[1]}` },
       { re: /我(?:不喜欢|讨厌|受不了|烦)(.{1,20})/, kind: 'preference', weight: 4, fmt: (m) => `他讨厌${m[1]}` },
@@ -6167,7 +6197,7 @@ export class ChatEngine {
       this.logger('debug', `记下记忆（规则）：${text}`)
       // 自称、偏好这类东西同时写进关系印象——下次见到他不用等人提醒就会想起来。
       // 被闸门拦住（written 为 null）就不写印象：骂人的话不该变成"对他的印象"。
-      if (written && (p.kind === 'person' || p.kind === 'preference')) {
+      if (written && (p.kind === 'person' || p.kind === 'preference' || p.kind === 'address')) {
         try {
           const key = ev?.message_type === 'group' ? `group:${ev.group_id}:${ev.user_id}` : `private:${ev.user_id}`
           this.relations.setImpression(key, { category: p.kind, text })
@@ -6254,6 +6284,13 @@ export class ChatEngine {
       '一条只讲一件事，宁可写得具体一点，也别为凑字数注水。',
       '梗类例外：短句照抄即可（3~40 字），不用写成"他……"的句子。',
       '有具体信息就记，重复的不要；宠物、家人、身体、住处、工作内容这类以后一定会被问到的优先。',
+      /*
+       * 称谓（2026-10-26，主人 m01649）：这类必须显式标出来。
+       * 不标的话，模型写成「他希望你叫他宝宝」也会被 guessKind 判成 person/fact，
+       * 然后跟普通记忆一起被窗口截掉——而那正是"她总忘"的根因。
+       */
+      '称呼类单独标：行首写「称谓：」，例如「称谓：他希望你叫他宝宝」「称谓：他习惯被叫老大」。'
+      + '他自己认下的外号、昵称、自称（不改 QQ 号的前提下）也归这一类。这类不受记忆条数限制，务必写。',
       '一条都不值得记就只输出两个字：无',
     ].join('\n')
 
@@ -6312,6 +6349,12 @@ export class ChatEngine {
        * 没标但看着像梗的，交给 guessKind 兜底。
        */
       let kindHint = ''
+      // 称谓（2026-10-26）：行首「称谓：」显式分类，优先于 guessKind 的字面猜测
+      const mAddr = text.match(/^(称谓|称呼|叫法|address)[:：]\s*/i)
+      if (mAddr) {
+        kindHint = 'address'
+        text = text.slice(mAddr[0].length).trim()
+      }
       const mKind = text.match(/^(梗|热梗|名场面)[:：]\s*/)
       if (mKind) {
         kindHint = 'meme'
@@ -6355,6 +6398,13 @@ export class ChatEngine {
  */
 function guessKind(text) {
   const t = String(text || '')
+  /*
+   * 称谓（2026-10-26，主人 m01649）：先认称呼，再认梗。
+   * 顺序不能反——「他希望你叫他『牢大』」里带梗词，按梗入库就又会沉进池子。
+   */
+  if (/(希望你叫他|希望你叫她|要你叫他|要你叫她|叫他「|叫她「|称呼他|称呼她|外号|昵称|自称叫)/.test(t)) {
+    return 'address'
+  }
   // 2026-10-25（主人第 5 条）：梗类线索。宁可粗分，也别把梗全塞 fact——
   // 塞 fact 之后「说个梗」这类提问按 kind 过滤就召回不到。
   if (/(梗|名场面|口头禅|绷不住|抽象|乐子|整活|典中典|哈基|牢大|小丑|上大分|遥遥领先)/.test(t)) {

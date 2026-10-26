@@ -113,6 +113,11 @@ const FILES = [
   // 回填台账：release-assets 的 --body-only 靠它判断旧 tag 的附件带不带 `#molly`。
   // 只有 tag / 版本号 / sha256 / 时间，没有任何真实号码或凭据。
   ['tools/release-carry.json', 'tools/release-carry.json'],
+  // 2026-10-26：三个自测脚本随发布版一起走——出问题时不用再找原机器上的副本。
+  // 只放自测，不放 memory-address-migrate.mjs（那是一次性迁移脚本，且写死了真实 QQ 号）。
+  ['tools/voice-param-selftest.mjs', 'tools/voice-param-selftest.mjs'],
+  ['tools/voice-live-selftest.mjs', 'tools/voice-live-selftest.mjs'],
+  ['tools/memory-address-selftest.mjs', 'tools/memory-address-selftest.mjs'],
   ['tools/backup-memory.ps1', 'tools/backup-memory.ps1'],
   ['tools/install-memory-backup-task.cmd', 'tools/install-memory-backup-task.cmd'],
   ['tools/uninstall-memory-backup-task.cmd', 'tools/uninstall-memory-backup-task.cmd'],

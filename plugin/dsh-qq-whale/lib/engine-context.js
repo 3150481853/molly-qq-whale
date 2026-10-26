@@ -113,6 +113,27 @@ export function buildSystemPrompt(input, deps) {
   }
     }
 
+    /*
+     * 称谓（2026-10-26，主人 m01649 / m01672）。
+     *
+     * 事故：子房有礼了（888888888）反复说「不是说好叫我宝宝吗」，她照旧不叫——
+     * 那条记忆躺在池子里，等关键词命中才轮到它出场，而日常对话几乎不会聊到
+     * 「宝宝」这个词。
+     *
+     * 主人给的两条硬规矩：① 称谓单独成一类（kind='address'）；② **不受记忆
+     * 权重限制**。所以这里按 QQ 直取、每轮无条件拼进去，不参与上面的窗口裁剪；
+     * 连降智档也照带（称呼只要几个字，省不出什么，忘掉代价最大）。
+     */
+    const addrItems = typeof deps.memory.addressOf === 'function' ? deps.memory.addressOf({ who: userName, qq, limit: 8 }) : []
+    if (addrItems.length) {
+      sp +=
+        '\n\n# 怎么称呼\n' +
+        addrItems.map((e) => `- ${String(e.text || '').trim()}`).join('\n') +
+        '\n上面是称呼上的硬要求。每句话都按这里的叫法开口，**不用等对方再提醒**；' +
+        '和群名片、昵称、你自己临时起的外号冲突时，这里优先。' +
+        '这里没写到的，就用群名片或者「你」，别自己编一个。'
+    }
+
     // 记忆：这个人的 + 跟他相关关键词的
     // limit 走 memoryWindow（24/8，降智档 8/4），别在这里再写死数字——
     // 写死会让 memory.js 里的窗口调优完全失效（P5「记忆查询太短」就是这么来的）。

@@ -98,7 +98,11 @@ if (!MEMORY_WINDOW) {
 
 /**
  * 记忆条目：
- *   { id, kind: 'fact'|'preference'|'promise'|'person'|'event'|'work'|'sticker'|'meme', who, qq, text, weight, at }
+ *   { id, kind: 'fact'|'preference'|'promise'|'person'|'event'|'work'|'sticker'|'meme'|'address', who, qq, text, weight, at }
+ *
+ * address（称谓，2026-10-26 主人 m01649）：这个人希望被怎么称呼。
+ * 它是**唯一不受记忆权重窗口限制**的 kind —— 由 addressOf() 按 QQ 直取、
+ * 每轮必带，不参与 recall 的裁剪预算。原因见 addressOf 的注释。
  * 2026-10-25（主人第 5 条）：新增 'meme'（梗/名场面/口头禅），她闲聊时能直接拿来玩。
  * weight 1..5，越高越不该被压缩掉。
  *
@@ -581,6 +585,8 @@ export class MemoryStore {
       if (id.qqHit || id.sameName) strongHit = true
       s += (e.weight || 3) * 0.3
       if (wantMeme && e.kind === 'meme') s += 3 // 问梗时梗优先
+      // 称谓永远排在同一个人的其他记忆前面：问「你知道我是谁」时先看到称呼
+      if (e.kind === 'address') s += 2
       // 越新越值钱，但只值一点点，避免"全是刚说的废话"
       const ageDays = (Date.now() - e.at) / 86400000
       s += Math.max(0, 2 - ageDays / 30) * 0.3
@@ -639,9 +645,39 @@ export class MemoryStore {
     return pool.slice(0, limit).map((x) => x.e)
   }
 
+  /**
+   * 称谓语直查：这个人希望被怎么称呼。
+   *
+   * 主人 m01649 / m01672 给的两条硬规矩：「称谓类的单独列出」「称谓不受记忆权重限制」。
+   *
+   * 为什么要单独一条通道：
+   *   - recall 是按关键词打分再截断的（窗口 24 条，降智档 8 条），称呼这种短句
+   *     在打分上永远打不过「他上周去杭州出差」这种长条目，被挤出窗口是常态；
+   *   - 可称呼是每句话都要用的东西。真实事故：子房有礼了（888888888）在群里
+   *     反复说「不是说好叫我宝宝吗」，她照旧一次都没叫——那条记忆存在库里，
+   *     只是从来没排进上下文。
+   *
+   * 所以这里绕开打分与预算：按 QQ（唯一身份）直取，按时间新→旧，全量返回，
+   * 由 engine-context 每轮拼进 system prompt。limit 只是防脏数据的兜底上限。
+   */
+  addressOf({ who = '', qq = '', limit = 8 } = {}) {
+    const q = normalizeQq(qq)
+    const name = String(who || '').trim()
+    const items = this.entries.filter((e) => {
+      if (e.kind !== 'address') return false
+      if (q && normalizeQq(e.qq) === q) return true
+      // 老条目可能没有 QQ（早期明文时期），名字对得上也算
+      return !q && !!name && e.who === name
+    })
+    items.sort((a, b) => (b.at || 0) - (a.at || 0))
+    return items.slice(0, Math.max(1, limit))
+  }
+
   /** 给模型看的记忆段落 */
   contextFor({ who = '', qq = '', query = '', limit = MEMORY_WINDOW.contextLimit } = {}) {
-    const items = this.recall({ who, qq, query, limit })
+    // 称谓由 engine-context 单独成段注入（每轮必带、绕开窗口），这里剔掉避免同一句
+    // 称呼在 system prompt 里出现两遍——模型会以为是两个人有两种叫法。
+    const items = this.recall({ who, qq, query, limit }).filter((e) => e.kind !== 'address')
     if (items.length === 0) return ''
     // 单条过长时截断（见 MEMORY_WINDOW.entryChars 的说明），避免一条长记忆挤掉别人
     const clip = (t) => {
@@ -687,9 +723,16 @@ export class MemoryStore {
  * 存在的理由：关键词召回对「我喜欢什么」这种问题天然失效——记忆条目里
  * 压根没有"喜欢"两个字。可这类问题恰恰是用户检验"你到底记不记得我"的首选。
  */
-function intentKinds(q) {
+export function intentKinds(q) {
   const s = String(q || '')
   // 先摘掉问句外壳，只看实义部分
+  /*
+   * 称谓（2026-10-26，主人 m01649）：问「你该叫我什么」「知道我是谁吗」时，
+   * 先信 address，再信 person。放在 person 前面，否则「我叫什么」永远只召回自称类。
+   */
+  if (/(叫我什么|叫我啥|怎么叫我|称呼我什么|你该叫我|我该叫你|该叫你什么|该叫你啥|叫错|忘了我叫)/.test(s)) {
+    return ['address', 'person']
+  }
   if (/(喜欢|爱吃|爱喝|爱好|口味|讨厌|受不了|雷点|忌口)/.test(s)) {
     return ['preference', 'fact']
   }

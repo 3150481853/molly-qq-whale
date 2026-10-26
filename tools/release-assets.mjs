@@ -55,6 +55,8 @@ const RELEASE_FEATURES = {
     '控制台路径不再写死作者机：`tools/console-server.mjs` 的 `ROOT` 改为按脚本位置推导、`DATA` 按「`MOLLY_DATA_DIR` > 插件配置里的 `dataDir` > `~/.dsh/qq-whale`」解析；`panel-data.mjs` 同规则，端口可用 `MOLLY_SIDECAR_PORT` 覆盖',
     '`tools/start-molly.ps1` 启动 19391 时不再写死 node 绝对路径（`MOLLY_NODE` > PATH 里的 node > 历史路径兜底）',
     '同批合入另一条工作线的改动：群抽奖支持「小时」单位（最长 1 小时）、引用回复策略（人多时才引用）、开奖回调 `onDraw`',
+    '插件本体路径可移植（之前只有工具链可移植）：`lib/main.js` 的 `memoryKeyFile` / `workSandboxDir` / `voiceRefAudio` / 三个 Python 解释器默认值全部改为「留空再按 `dataDir` 推导」，`lib/boot.js` 的健康文件、`lib/commands.js` 的沙箱与受保护路径、`lib/work-guard.js` 的护栏前缀、`lib/local-asr.js` / `lib/gif-frames.js` / `lib/singing.js` 的解释器路径也不再写死作者机的 `G:` 盘 —— 换机器不会再「插件像加载成功、其实 OneBot 从不连接」；没配 Python 时本地 ASR / 拆 GIF 帧 / 唱歌只是静默跳过，不影响聊天',
+    '语音「英文腔」修复回到本版：合成前先把数字/单位念成中文（`2K 60Hz` → 两K 六十赫兹、`1080P` → 一零八零P、`16GB` → 十六个G、`40%` → 百分之四十、`28℃` → 二十八摄氏度、`5km` → 五公里、`12ms` → 十二毫秒），不再把阿拉伯数字和英文单位直接念成英文腔',
     '本版**不含语音包**：音色包与上一版相同，单独下 Releases 里的 `voice-pack-v1.2`（301 MB）',
     '升级：直接覆盖旧的插件包；控制台首次使用前先 `node tools/panel-data.mjs`（或由 `start-molly.ps1` 拉起），19391 没起来时页面会提示「数据服务不可达」，QQ 本体不受影响',
   ],

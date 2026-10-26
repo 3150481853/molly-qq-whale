@@ -32,6 +32,11 @@
 
 **同批合入（另一条工作线，主人拍板「一起发」）**：群抽奖时长支持「小时」单位（最长 1 小时）、引用回复策略（人多时才引用，不是每条都带）、开奖回调 `onDraw`。
 
+**补发（2026-10-26 10:5x，同版本重切）**：首次发布只带上了工具链的可移植性，插件本体与语音规范化漏了。这次补齐两项，版本号不变（同一天、同版本、无人下载过旧包）：
+- **插件本体路径可移植**：`lib/main.js` 的 `memoryKeyFile` / `workSandboxDir` / `voiceRefAudio` / `voiceAsrPython` / `gifFramesPython` / `singingPython` 默认值全部改为空串，运行期按 `dataDir` 推导（`<dataDir 父目录>/qq-whale-keys/memory.key`、`<dataDir 父目录>/sandbox/qq-work`、`<dataDir>/voice-ref/molly-ref.wav`、`<dataDir>/asr/models`）；`lib/boot.js` 的健康文件回退目录改为 `MOLLY_DATA_DIR` / 包根同级 / cwd 三级；`lib/commands.js` 的沙箱路径与受保护路径改由 `PROTECTED_PREFIXES` 与 `config.workSandboxDir` 生成；`lib/work-guard.js` 的护栏前缀改为「插件包根 + `~/.dsh/profiles` + 存在的宿主工作区」；三个用 Python 的模块（`local-asr.js` / `gif-frames.js` / `singing.js`）解释器默认留空 = 没配就静默跳过；`lib/engine.js` 的兜底目录、`lib/main.js` 的 `main-apply-beat.txt` 诊断落点同样不再写死盘符。整份 `lib` 现在只剩 `memcrypt.js` 的 `DEFAULT_KEY_FILE` 一处字面量（legacy 只读兜底，`resolveKeyFile` 绝不拿它新建）。
+- **语音「英文腔」修复回到本版**：`lib/voice.js` 从 v1.1.5 搬回「念稿中文规范化」（`chineseNumber` / `readDigits` / `SPEAK_RULES` / `normalizeSpeakText`），合成前把 `2K 60Hz`、`1080P`、`16GB`、`40%`、`28℃`、`5km`、`12ms` 这类写法念成中文；`cleanVoiceText` 之后接 `normalizeSpeakText` 再截断。
+- 验证：`node --check` 全 49 个 js 通过；称谓解析 15/15、`#` 命令 39/0、密钥定位 10/0、抽奖开奖 8/0、群趣兜底 15/0、引用精确 11/0；新写 `${MOLLY_ROOT}\out\_portability_check.mjs` 9/0（换到没有 G 盘的假数据目录时不选 G 盘、受保护前缀跟着包根走）；真机热重载 `gen-mvp538ln-ks4bre` 后 `link=online`、`memory=1313`、`broken=false`、`keySource=file`、`voice=sovits`、`plugins` 9 个全加载、`groupfun.lastTick` 在跳。
+
 **版本**：`1.1.5-Hotfix.3`（不含语音包；语音包仍用 `voice-pack-v1.2`）。
 
 **发布**：GitHub Release [v1.1.5-Hotfix.3](https://github.com/222222222/molly-qq-whale/releases/tag/v1.1.5-Hotfix.3)（#424127469，2026-10-26T10:45:58Z），附件 `molly-qq-whale-v1.1.5-Hotfix.3.zip` 1,300,624 B / 177 文件，sha256 `<REDACTED>`；tag → `b7dab06`。

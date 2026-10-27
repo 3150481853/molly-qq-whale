@@ -227,6 +227,19 @@ export const WEIGHT_FLOOR = Object.freeze({
 })
 
 /**
+ * 归档门槛（P1-3，学白守的「归档而不是只靠淘汰」）：
+ * 有效权重掉到该类下限、并且晾够 90 个**活跃天**的 event/meme，
+ * 从热池挪进 `<shardDir>/_archive.json`——不物理删除，人工可复原。
+ *
+ * 为什么是 90：event/meme 的下限只有 1，掉到底本身已经说明「很久没用了」；
+ * 再加 90 个活跃天（不是日历天，理由见下面衰减那段）是第二道保险，
+ * 免得一段刚聊过、只是权重低的经历被立刻归档。
+ * 为什么只归档 event/meme：事实/偏好/约定/人物/称谓掉到下限更应该留在池子里
+ * 等下一次命中（命中会把权重拉回去），它们不该因为「暂时没被问」就被挪走。
+ */
+export const ARCHIVE_IDLE_DAYS = 90
+
+/**
  * 衰减参数（2026-10-27 主人 m01812：「建议不要完全按照艾宾浩斯的天数曲线」）。
  *
  * 改成**活跃天 + 阶梯**，不再用「日历天 × 指数」：
@@ -370,6 +383,16 @@ export class MemoryStore {
     this.account = normalizeQq(account) || 'default'
     this.shardDir = path.join(dir, this.account)
     this.indexFile = path.join(this.shardDir, 'index.json')
+    /*
+     * P1-3 归档簿：prune 挤出去的、以及烂到底的老 event/meme 都写这里，
+     * **不物理删除**（出事要能人工复原）。它跟分片放同一个账号目录下，
+     * 这样换号也不会串库；加密开着就跟分片一样走密文信封。
+     */
+    this.archiveFile = path.join(this.shardDir, '_archive.json')
+    this.archiveCount = 0
+    this._archiveList = []
+    this._archiveIds = new Set()
+    this._archiveOk = true
     // 老的单文件布局：只在「首次迁移」和「迁移后存档」时用到，正常读写全在分片里
     this.file = path.join(dir, 'memory.json')
     this.legacyFile = path.join(dir, '_legacy-memory.json')
@@ -381,6 +404,14 @@ export class MemoryStore {
     this.activeDays = 0
     this.activeDayKey = ''
     this._hitSaveAt = 0
+    // 上一次召回的排序对账数据（P0-2 RRF：状态接口/日志里能看到两路名次与融合分）
+    this.lastRecall = null
+    /*
+     * P2-5：最近一次压缩（周聚合）的时间戳，落在 index.json 里。
+     * 0 表示「这个库还没压过」——老 index.json 没有这个键时读出来就是 0，
+     * 不因为缺字段去改写老账本。
+     */
+    this.lastCompactionAt = 0
     this.limit = this.readGrownLimit() || this.baseLimit
     if (this.crypt) {
       /*
@@ -465,6 +496,8 @@ export class MemoryStore {
           total: Object.values(counts).reduce((a, b) => a + b, 0),
           activeDays: this.activeDays,
           activeDayKey: this.activeDayKey,
+          // P2-5：最近一次压缩（周聚合）的时间戳；0 = 还没压过（老库首次写入就是这个值）
+          lastCompactionAt: Math.max(0, Number(this.lastCompactionAt) || 0),
           savedAt: new Date().toISOString(),
         },
         null,
@@ -504,11 +537,15 @@ export class MemoryStore {
    * 再把老文件改名存档。这样升级是一次性的、可回滚的，不需要手工迁移脚本。
    */
   load() {
+    // 归档簿先读进缓存：后面 save()/prune() 要往里追加，别把已有归档当成不存在
+    this.refreshArchive()
     const index = this.readIndex()
     if (index) {
       // 活跃天是衰减的分母，必须跟着账本一起回来，否则重启就等于「记忆忽然变新」
       this.activeDays = Math.max(0, Math.round(Number(index.activeDays) || 0))
       this.activeDayKey = String(index.activeDayKey || '')
+      // P2-5：老账本没有 lastCompactionAt → 0（「没压过」），不报错、不回写老文件
+      this.lastCompactionAt = Math.max(0, Number(index.lastCompactionAt) || 0)
       this.loadShards()
       return
     }
@@ -743,6 +780,9 @@ export class MemoryStore {
     weight = WEIGHT_DEFAULT,
     source = 'user',
     level = 0,
+    // P2-5：可选的来源消息 id。只有调用方给的时候才落到条目上，
+    // 周聚合时用它填 coveredUntil（「这条记忆覆盖到哪条消息」）。
+    messageId = '',
   } = {}) {
     const t = String(text || '').trim()
     if (!t) return null
@@ -818,6 +858,8 @@ export class MemoryStore {
       hits: 0,
       lastActiveDay: this.activeDays,
       at: Date.now(),
+      // P2-5：只有调用方真的给了消息 id 才写这个字段（老条目没有它 → 老数据零改动）
+      ...(String(messageId ?? '').trim() ? { messageId: String(messageId).trim() } : {}),
     }
     this.entries.push(entry)
     if (conflicting && conflictEntry) {
@@ -976,6 +1018,13 @@ export class MemoryStore {
       shards: this.countByKind(),
       activeDays: this.activeDays,
       activeDayKey: this.activeDayKey,
+      // P1-3：归档条数（已经挪进 _archive.json 的那些，不进召回、不计入 count/shardes）
+      archiveCount: this.archiveCount,
+      archived: this.archiveCount,
+      // P2-5：最近一次压缩（周聚合）时间戳；0 = 还没压过
+      lastCompactionAt: this.lastCompactionAt,
+      // 上一次召回的 RRF 对账（两路名次 + 融合分 + 老的原始合成分），只在内存里
+      lastRecall: this.lastRecall,
     }
   }
 
@@ -1085,6 +1134,12 @@ export class MemoryStore {
    * 换句话说：正常态是 2000，真记满了才升到 10000，升完之后才按老规则淘汰。
    */
   prune() {
+    /*
+     * P1-3：先归档「烂到底且晾够 90 活跃天」的 event/meme。
+     * 归档不是淘汰，但同样要从热池里挪走，所以放在超量判断**之前**——
+     * 没满也可以归档（烂掉的经历不该一直占着窗口）。
+     */
+    this.archiveStale()
     if (this.entries.length <= this.limit) return
     if (this.maxLimit > this.limit) {
       const before = this.limit
@@ -1102,7 +1157,359 @@ export class MemoryStore {
     this.entries.sort(
       (a, b) => effectiveWeight(b, days) - effectiveWeight(a, days) || b.weight - a.weight || b.at - a.at,
     )
+    // P1-3：挤出去的条目写进归档簿，不再静默丢掉。
+    // 容量语义不变：热池还是切成 limit 条，归档只是「淘汰前先留个底」。
+    const evicted = this.entries.slice(this.limit)
     this.entries = this.entries.slice(0, this.limit)
+    if (evicted.length) {
+      const n = this.appendArchive(evicted, 'over-limit')
+      if (n < evicted.length) {
+        this.logger('warn', `记忆池超限：挤出去 ${evicted.length} 条，其中 ${evicted.length - n} 条没能写进归档簿`)
+      }
+    }
+  }
+
+  /**
+   * P1-3 归档：有效权重掉到该类下限、且晾够 ARCHIVE_IDLE_DAYS 个活跃天的
+   * event/meme 挪出热池（不删，写进归档簿）。
+   *
+   * 只在 prune() 里调用，所以天然幂等：归档过的条目已经不在 this.entries 里，
+   * 再跑一次也找不到它；就算有一条 id 已经在归档簿里，appendArchive 也会跳过。
+   *
+   * 关键取舍：**归档写不进去就不挪走**。宁可下次 prune 再试，也不静默丢数据——
+   * 归档簿损坏时（readArchive 返回 ok:false）这一轮什么都不归档，只 warn。
+   *
+   * @returns {number} 这一轮真正挪进归档簿的条数
+   */
+  archiveStale() {
+    const days = this.activeDays
+    const keep = []
+    const stale = []
+    for (const e of this.entries) {
+      const kind = normalizeKind(e.kind)
+      if (kind !== 'event' && kind !== 'meme') {
+        keep.push(e)
+        continue
+      }
+      const idle = Math.max(0, days - Math.max(0, Math.round(Number(e.lastActiveDay) || 0)))
+      if (idle >= ARCHIVE_IDLE_DAYS && effectiveWeight(e, days) <= (WEIGHT_FLOOR[kind] ?? WEIGHT_MIN)) {
+        stale.push(e)
+      } else {
+        keep.push(e)
+      }
+    }
+    if (!stale.length) return 0
+    this.appendArchive(stale, 'stale')
+    // 只挪走「确认已经进归档簿」的那些；写失败的留在池子里等下一轮
+    const moved = new Set(
+      stale.filter((e) => this._archiveIds.has(String(e.id || ''))).map((e) => String(e.id || '')),
+    )
+    if (!moved.size) return 0
+    this.entries = keep.filter((e) => !moved.has(String(e.id || '')))
+    return moved.size
+  }
+
+  /**
+   * 往归档簿里追加（幂等：同一个 id 只归档一次）。
+   *
+   * 条目保留**全部原字段**，再补四个复原用的快照字段：
+   *   archivedAt（淘汰时间，ISO）、archivedDay（淘汰时的活跃天）、
+   *   archivedReason（stale=烂到底 / over-limit=超量挤出）、archivedWeight（淘汰时的有效权重）。
+   * 原文就是 e.text，kind/who/qq/at/weight 也都在，人工复原一条记忆不需要别的信息。
+   *
+   * @param {object[]} items
+   * @param {'stale'|'over-limit'} [reason]
+   * @returns {number} 新增条数
+   */
+  appendArchive(items, reason = 'stale') {
+    const list = Array.isArray(items) ? items.filter((e) => e && typeof e === 'object') : []
+    if (!list.length) return 0
+    if (!this._archiveOk) {
+      this.logger('warn', `归档簿不可用（损坏/读不出来），本轮 ${list.length} 条不归档，原样留在热池`)
+      return 0
+    }
+    const at = new Date().toISOString()
+    const days = this.activeDays
+    const fresh = []
+    for (const e of list) {
+      const id = String(e.id || '')
+      if (id && this._archiveIds.has(id)) continue
+      fresh.push({
+        ...e,
+        archivedAt: at,
+        archivedDay: days,
+        archivedReason: reason,
+        archivedWeight: effectiveWeight(e, days),
+      })
+      if (id) this._archiveIds.add(id)
+    }
+    if (!fresh.length) return 0
+    const next = this._archiveList.concat(fresh)
+    if (!this.writeArchive(next)) {
+      // 写失败就把刚占上的 id 撤回去：没进盘就不算归档（下一轮还能重试）
+      for (const e of fresh) if (e.id) this._archiveIds.delete(String(e.id))
+      return 0
+    }
+    this._archiveList = next
+    this.archiveCount = next.length
+    this.logger('debug', `记忆归档 ${fresh.length} 条（${reason}），归档簿共 ${next.length} 条`)
+    return fresh.length
+  }
+
+  /**
+   * 归档簿落盘：**整份重写**（先 .tmp 再 rename），加密开着就走密文信封。
+   * 不做行式追加——JSON 不是行格式，追加半截就是坏文件。
+   */
+  writeArchive(list) {
+    const body = JSON.stringify({ version: 1, account: this.account, archived: list }, null, 2)
+    try {
+      fs.mkdirSync(this.shardDir, { recursive: true })
+      if (this.crypt) {
+        writeEncryptedFile(this.archiveFile, body, this.key)
+      } else {
+        const tmp = `${this.archiveFile}.tmp`
+        fs.writeFileSync(tmp, `${body}\n`, 'utf8')
+        fs.renameSync(tmp, this.archiveFile)
+      }
+      return true
+    } catch (err) {
+      this.logger('warn', `归档簿写入失败（条目留在热池里，下次再试）: ${err.message}`)
+      return false
+    }
+  }
+
+  /**
+   * 读归档簿。**容错优先**：缺失当空、损坏就返回 ok:false。
+   *
+   * 调用方看到 ok:false 只读不改——宁可这一轮不归档，
+   * 也绝不能用一份空数据把盘上已有的归档覆盖掉（那才是真丢）。
+   */
+  readArchive() {
+    let raw
+    try {
+      raw = fs.readFileSync(this.archiveFile, 'utf8')
+    } catch (err) {
+      if (err.code === 'ENOENT') return { list: [], ids: new Set(), ok: true }
+      this.logger('warn', `归档簿读取失败（保留原文件，本轮不归档）: ${err.message}`)
+      return { list: [], ids: new Set(), ok: false }
+    }
+    let text = raw
+    if (this.crypt) {
+      let outer = null
+      try {
+        outer = JSON.parse(raw)
+      } catch {
+        outer = null
+      }
+      if (outer && isEnvelope(outer)) {
+        try {
+          text = decryptText(outer, this.key)
+        } catch (err) {
+          this.logger('warn', `归档簿解密失败（保留原文件，本轮不归档）: ${err.message}`)
+          return { list: [], ids: new Set(), ok: false }
+        }
+      }
+    }
+    try {
+      const parsed = JSON.parse(text)
+      const list = Array.isArray(parsed?.archived) ? parsed.archived.filter((e) => e && typeof e === 'object') : null
+      if (!list) throw new Error('缺少 archived 数组')
+      const ids = new Set()
+      for (const e of list) if (e.id) ids.add(String(e.id))
+      return { list, ids, ok: true }
+    } catch (err) {
+      this.logger('warn', `归档簿内容不可用（保留原文件，本轮不归档）: ${err.message}`)
+      return { list: [], ids: new Set(), ok: false }
+    }
+  }
+
+  /** 把归档簿读进内存缓存（load() 开头走一次，之后只读缓存） */
+  refreshArchive() {
+    const arc = this.readArchive()
+    this._archiveList = arc.list
+    this._archiveIds = arc.ids
+    this._archiveOk = arc.ok
+    this.archiveCount = arc.list.length
+  }
+
+  /**
+   * 某周的**原始** event，按「群」分桶（P1-4 周聚合的第一步）。
+   *
+   * 桶键：有 qq 就按 qq（唯一身份），否则按 who，都没有算 global。
+   * 带 `weekSummaryFor` 的摘要条**一律不算原始数据**——否则下一轮会把周摘要
+   * 再当成一条 event 聚合进去，越聚越假。
+   *
+   * @param {string} weekKey 周一那天，'YYYY-MM-DD'
+   * @returns {Map<string, {groupKey: string, who: string, qq: string, items: object[]}>}
+   */
+  eventBuckets(weekKey) {
+    const buckets = new Map()
+    for (const e of this.entries) {
+      if (normalizeKind(e.kind) !== 'event') continue
+      if (e.weekSummaryFor) continue
+      if (weekKeyOf(e.at) !== weekKey) continue
+      const q = normalizeQq(e.qq)
+      const who = String(e.who || '').trim()
+      const groupKey = q ? `qq:${q}` : who ? `who:${who}` : 'global'
+      let b = buckets.get(groupKey)
+      if (!b) {
+        b = { groupKey, who, qq: q, items: [] }
+        buckets.set(groupKey, b)
+      }
+      b.items.push(e)
+    }
+    return buckets
+  }
+
+  /**
+   * P1-4 周聚合：把某一周的 event 碎片按群压成一条摘要记忆。
+   *
+   * 语义照 docs/memory-upgrade-from-baishou.md 第 69-73 行（不自己发明）：
+   *   1. 同周同群有原始 event → 生成一条 `kind='event'`、`level=2`、`weight=8` 的摘要，
+   *      正文形如「10-20~10-26：109 群聊了 X 件事，主要是 …」；
+   *   2. **原条目降级不删除**：`level` +1（封顶 3），`lastActiveDay` 不动，让它继续自然衰减；
+   *   3. 摘要条带 `weekSummaryFor` / `groupKey` 标记，天然幂等——同一个周同一个群只生成一次。
+   *
+   * 保守边角（文档没写清，选了最小动作）：
+   *   - 摘要直接 push 进 entries，**不走 add()**：add() 会 touchActivity()，等于
+   *     「没人聊天也算一个活跃天」，和衰减的设计前提冲突；也免得摘要被当成
+   *     「用户说过的话」参与去重/冲突判定。
+   *   - 摘要 source 记 `system`：它是机器压出来的，不是谁说的话。
+   *   - 「主要是」取有效权重最高的 3 条，每条截 20 字，超出加省略号——摘要不该比原文长。
+   *
+   * @param {string|number|Date} weekKey 周键（周一那天）；也接受时间戳/Date
+   * @returns {object[]} 这次新建的摘要条目（已总结过的不重复建，返回空数组）
+   */
+  summarizeWeek(weekKey) {
+    const raw = String(weekKey ?? '')
+    const key = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : weekKeyOf(weekKey)
+    if (!key) return []
+    const buckets = this.eventBuckets(key)
+    if (!buckets.size) return []
+    // 已经总结过的群（同一个周键）不再总结：这就是「再跑一次不重复生成」的根据
+    const done = new Set()
+    for (const e of this.entries) {
+      if (e.weekSummaryFor === key) done.add(String(e.groupKey || ''))
+    }
+    const label = weekLabelOf(key)
+    const created = []
+    let demoted = 0
+    for (const [groupKey, b] of buckets) {
+      if (done.has(groupKey)) continue
+      const n = b.items.length
+      const top = b.items
+        .slice()
+        .sort((x, y) => effectiveWeight(y, this.activeDays) - effectiveWeight(x, this.activeDays) || y.at - x.at)
+        .slice(0, 3)
+        .map((x) =>
+          String(x.text || '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 20),
+        )
+        .filter(Boolean)
+      const head = b.who || b.qq || '群里'
+      const more = n > top.length ? ' …' : ''
+      const text = `${label}：${head}聊了 ${n} 件事，主要是 ${top.join('、')}${more}`
+      /*
+       * P2-5 压缩标记：这一条摘要覆盖到哪条消息。
+       * 优先用条目自己带的 messageId（数字按数值比大小，否则按字符串比）；
+       * 一条消息 id 都没有时退回「最后被覆盖的那条记忆的 id」——至少是个可回溯的锚点，
+       * 不硬编一个假消息号。文档只要求这个字段存在且能读回，语义边角已回报 lead。
+       */
+      const mids = b.items
+        .map((x) => String(x.messageId ?? '').trim())
+        .filter(Boolean)
+        .sort((x, y) => {
+          const nx = Number(x)
+          const ny = Number(y)
+          if (Number.isFinite(nx) && Number.isFinite(ny)) return nx - ny
+          return x < y ? -1 : x > y ? 1 : 0
+        })
+      const lastAt = b.items.slice().sort((x, y) => y.at - x.at)[0]
+      const coveredUntil = mids.length ? mids[mids.length - 1] : String(lastAt?.id || '')
+      const entry = {
+        id: `m${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+        kind: 'event',
+        who: b.who,
+        qq: b.qq,
+        text: text.trim(),
+        weight: 8,
+        source: 'system',
+        level: 2,
+        hits: 0,
+        lastActiveDay: this.activeDays,
+        at: Date.now(),
+        // P2-5：摘要覆盖到的最后一条消息
+        coveredUntil,
+        // 周摘要的两个标记：哪个周、哪个群（幂等与「别再聚合自己」都靠它）
+        weekSummaryFor: key,
+        groupKey,
+      }
+      this.entries.push(entry)
+      created.push(entry)
+      // 原条目降级不删除：level +1 封顶 3，lastActiveDay 不动（等自然衰减）
+      for (const x of b.items) {
+        x.level = Math.min(3, Math.max(0, Math.round(Number(x.level) || 0)) + 1)
+        // P2-5：被这次压缩覆盖过的原始 event 也记下「覆盖到哪」
+        x.coveredUntil = coveredUntil
+        demoted += 1
+      }
+    }
+    if (!created.length) return []
+    // P2-5：本库最近一次压缩时间（落 index.json，重启后能知道压到哪了）
+    this.lastCompactionAt = Date.now()
+    this.prune()
+    this.save()
+    this.logger('info', `周聚合 ${key}（${label}）：生成 ${created.length} 条摘要，${demoted} 条原始 event 已降级`)
+    return created
+  }
+
+  /**
+   * P1-4 补漏（对应白守的 detectMissingSummaries，即 mode="missing"）：
+   * 找出「有原始 event 但没有周摘要」的周，补最近的 2 周。
+   *
+   * 三个刻意的保守（文档只写了「补最近 2 周」，这些边角由我定，已回报 lead）：
+   *   ① **不碰正在进行的这一周**：周中生成的摘要没法再更新（幂等），会变成半周快照
+   *      一直挂着；等这周过完，下次启动自然补上。
+   *   ② 只补最近 2 周：首次接入老数据时不给远古数据批量造摘要（那会一次写出几百条）。
+   *   ③ 按「周 + 群」判定缺漏：某周只总结了 A 群、B 群还缺，也算缺——补的时候
+   *      summarizeWeek 只会补 B 群，A 群不会重复。
+   *
+   * 天然幂等：补过的周已经有摘要，再跑就找不到「缺」的了。
+   *
+   * @param {{lookback?: number}} [options] lookback：最多补几周（默认 2，文档口径）
+   * @returns {{weeks: string[], created: number}}
+   */
+  missingWeeks({ lookback = 2 } = {}) {
+    const thisWeek = weekKeyOf(new Date())
+    const covered = new Set()
+    const rawWeeks = new Set()
+    for (const e of this.entries) {
+      if (normalizeKind(e.kind) !== 'event') continue
+      if (e.weekSummaryFor) {
+        covered.add(`${e.weekSummaryFor}|${String(e.groupKey || '')}`)
+        continue
+      }
+      const k = weekKeyOf(e.at)
+      if (k) rawWeeks.add(k)
+    }
+    const missing = []
+    for (const k of rawWeeks) {
+      if (!thisWeek || k >= thisWeek) continue // 当前周不补，见上面 ①
+      for (const groupKey of this.eventBuckets(k).keys()) {
+        if (!covered.has(`${k}|${groupKey}`)) {
+          missing.push(k)
+          break
+        }
+      }
+    }
+    missing.sort().reverse() // 最近的周优先
+    const limit = Math.max(0, Math.round(Number(lookback) || 0))
+    const weeks = missing.slice(0, limit)
+    let created = 0
+    for (const k of weeks) created += this.summarizeWeek(k).length
+    return { weeks, created }
   }
 
   /**
@@ -1181,12 +1588,39 @@ export class MemoryStore {
 
     const scored = this.entries.map((e) => {
       const id = identity(e)
-      let s = 0
-      if (id.qqHit) s += 4 // 硬身份，比名字更值钱
-      else if (id.sameName) s += 2 // 熟人优先，但不再压过相关性
-      else if (id.nameContains) s += 1
+      /*
+       * 2026-10-27 P0-2（对齐白守 hybrid-search.ts 的 RRF 思路）：两路信号**分开存**。
+       *
+       *   kw = 相关性（身份 + 关键词命中 × IDF + 梗加成 + 新鲜度）
+       *   w  = 有效权重（衰减之后的重要程度）
+       *
+       * 以前是 `kw + w*0.15` 直接相加。两路尺度根本不可比：一条权重 10 的条目
+       * 白送 1.5 分，比「两个 2 字词全中」的 1 分还高，于是「权重高但不相关」
+       * 稳稳压过「强命中但权重低」。白守的做法是**按名次融合**，不拿原始分相加。
+       * 老公式的合成分仍算一份存在 `raw` 里，只用于调试对账，不再决定顺序。
+       */
+      let kw = 0
+      if (id.qqHit) kw += 4 // 硬身份，比名字更值钱
+      else if (id.sameName) kw += 2 // 熟人优先，但不再压过相关性
+      else if (id.nameContains) kw += 1
       let hit = false
       let strongHit = false
+      /*
+       * kwStrong（2026-10-27 P0-2 收尾）：**只**由「≥2 字词命中」置位，
+       * 跟下面会被身份命中也点亮的 strongHit 区分开。
+       *
+       * 为什么要拆：候选池原先只按 strongHit 筛，而 strongHit 会被 qqHit/sameName
+       * 点亮，于是「问我家猫叫啥」时，同一个人名下所有条目都进了池子——包括跟猫
+       * 毫无关系的「主人叫小李，ERP 后端」。这些无关条目 kw 只有 2.6（sameName 2 +
+       * 新鲜度 0.6），却因为有效权重 w=5 在权重路拿到 rankWeight=1，RRF 直接反超
+       * 真正命中「猫叫锅贴」的那条（kw=10.04 / w=3 / rankWeight=5）。老代码用裸分
+       * 相加（10.492 vs 6.633）时尺度差异没暴露这个问题。
+       *
+       * 修法：池子先过一道「强关键词闸」——只要全池存在真关键词命中，就只留这些；
+       * 一条都没有时才退回身份兜底（「我喜欢什么」这类问句里没有能命中文本的词，
+       * 此时同一个人在名下的条目就是合理答案）。
+       */
+      let kwStrong = false
       if (words.length) {
         const t = e.text.toLowerCase()
         for (const w of words) {
@@ -1194,8 +1628,11 @@ export class MemoryStore {
           hit = true
           const base = w.length >= 3 ? 3 : w.length === 2 ? 2 : 1
           // 两字以上的词才算"真的命中了这个话题"，单字只做加成
-          if (w.length >= 2) strongHit = true
-          s += base * Math.max(0.15, idf(w))
+          if (w.length >= 2) {
+            strongHit = true
+            kwStrong = true
+          }
+          kw += base * Math.max(0.15, idf(w))
         }
       }
       /*
@@ -1205,30 +1642,46 @@ export class MemoryStore {
        * 一个都对不上而被下面那层过滤整片丢掉——人明明有记忆，却被判成"想不起来"。
        */
       if (id.qqHit || id.sameName) strongHit = true
-      // 权重加分用**有效权重**（衰减 + 命中之后的值），系数 0.15
-      // 与改刻度前的 `w(1..5) * 0.3` 完全等价；换成有效权重是为了让「久不联系」真的变淡
-      s += effectiveWeight(e, this.activeDays) * 0.15
-      if (wantMeme && e.kind === 'meme') s += 3 // 问梗时梗优先
+      if (wantMeme && e.kind === 'meme') kw += 3 // 问梗时梗优先
       // 越新越值钱，但只值一点点，避免"全是刚说的废话"
       const ageDays = (Date.now() - e.at) / 86400000
-      s += Math.max(0, 2 - ageDays / 30) * 0.3
+      kw += Math.max(0, 2 - ageDays / 30) * 0.3
+      // 权重一路用**有效权重**（衰减 + 命中之后的值），让「久不联系」真的变淡
+      let w = effectiveWeight(e, this.activeDays)
+      const raw = kw + w * 0.15 // 老公式，仅留作对账
       /*
        * 被更正过的条目（supersededBy，2026-10-27 三级去重引入）：
        * 「他喜欢猫」后来被「他其实不喜欢猫」纠正，正文还留着备查，
        * 但不能再跟新结论平起平坐地挤进提示词——否则模型看到两句相反的，
-       * 只能靠语气猜哪句算数。这里只降权不删除。
+       * 只能靠语气猜哪句算数。这里只降权不删除，两路都降。
        */
-      if (e.supersededBy) s *= SUPERSEDED_PENALTY
-      return { e, s, hit, strongHit, id }
+      if (e.supersededBy) {
+        kw *= SUPERSEDED_PENALTY
+        w *= SUPERSEDED_PENALTY
+      }
+      return { e, kw, w, raw, hit, strongHit, kwStrong, id }
     })
 
-    // query 非空时的取舍顺序：
-    //   有"两字以上词"命中的条目 → 只要它们（相关性够硬）
-    //   否则退一步，接受只有单字命中的 → 但此时必须是短 query（"猫"）
-    //   都没有 → 空数组，宁可说想不起来，也不拿不相干的记忆凑数
+    /*
+     * query 非空时的取舍顺序（2026-10-27 P0-2 收尾重排）：
+     *   有"两字以上词"真命中的条目 → 只要它们（相关性够硬，身份命中不得扩大池子）
+     *   都没有 → 退回身份兜底（qqHit/sameName），「我喜欢什么」这种泛问靠它
+     *   再没有 → 接受只有单字命中的 → 但此时必须是短 query（"猫"）
+     *   还是没有 → 空数组，宁可说想不起来，也不拿不相干的记忆凑数
+     * 泛问兜底（intentKinds）在池子仍为空时于下面接上。
+     */
     let pool
     if (!words.length) {
       pool = scored
+    } else if (scored.some((x) => x.kwStrong)) {
+      /*
+       * 闸门只对「软身份」生效：
+       *   - sameName（同名，可能同名不同号）不再自动进入候选池；
+       *   - qqHit（唯一 QQ 号完全匹配）保留，因为那是「确实是这个人」的硬证据，
+       *     而且 rrf_check 的 [1-2] 用例明确要求这种条目留在候选里让两路打架
+       *     （「高权重但只沾一个单字」仍进池，只是不能被 RRF 顶到第一）。
+       */
+      pool = scored.filter((x) => x.kwStrong || x.id.qqHit)
     } else if (scored.some((x) => x.strongHit)) {
       pool = scored.filter((x) => x.strongHit)
     } else if (q.length <= 2) {
@@ -1277,7 +1730,54 @@ export class MemoryStore {
       }
     }
 
-    pool.sort((a, b) => b.s - a.s)
+    /*
+     * RRF 融合排序（P0-2，2026-10-27）。
+     *
+     * 两路各排一次序，再按**名次**加分：`0.6/(名次+60) + 0.4/(名次+60)`。
+     * 常数 60 和 0.6/0.4 都直接照白云的 hybrid-search.ts（RRF_K / 关键词 0.3 / 向量 0.7
+     * 里的关键词那一路；我们没有向量，所以第二路换成「有效权重」）。
+     * 为什么不按原始分相加：见上面 scored 里的注释——尺度不可比。
+     *
+     * 同分时「最近被提起过」的优先（lastActiveDay 大者在前），再不稳就按记录时间。
+     * 名次与两路分数都留在 this.lastRecall 里，`/state` 的 memory.status() 能对账。
+     */
+    const byKeyword = [...pool].sort(compareKeywordArm)
+    const byWeight = [...pool].sort(compareWeightArm)
+    const rankKeyword = new Map()
+    const rankWeight = new Map()
+    byKeyword.forEach((x, i) => rankKeyword.set(x, i))
+    byWeight.forEach((x, i) => rankWeight.set(x, i))
+    for (const x of pool) {
+      const rk = rankKeyword.get(x)
+      const rw = rankWeight.get(x)
+      x.rank = { keyword: rk + 1, weight: rw + 1 }
+      x.rrf = RRF_KEYWORD_WEIGHT / (rk + RRF_K) + RRF_WEIGHT_ARM_WEIGHT / (rw + RRF_K)
+    }
+    pool.sort((a, b) => b.rrf - a.rrf || compareRecency(a, b))
+    this.lastRecall = {
+      query: q,
+      candidates: pool.length,
+      words,
+      at: Date.now(),
+      top: pool.slice(0, 5).map((x) => ({
+        id: x.e.id,
+        kind: x.e.kind,
+        rrf: Number(x.rrf.toFixed(6)),
+        rankKeyword: x.rank.keyword,
+        rankWeight: x.rank.weight,
+        kw: Number(x.kw.toFixed(3)),
+        w: Number(x.w.toFixed(2)),
+        raw: Number(x.raw.toFixed(3)),
+      })),
+    }
+    if (pool.length) {
+      this.logger?.(
+        'debug',
+        `召回(RRF) ${q || '(空查询)'} → ${pool.length} 候选，头部：${this.lastRecall.top
+          .map((t) => `${t.id}(rrf=${t.rrf} kw=${t.kw} w=${t.w} raw=${t.raw})`)
+          .join(' > ')}`,
+      )
+    }
     const picked = this.applyCharBudget(pool.slice(0, limit).map((x) => x.e), charBudget)
     this.markHits(picked)
     return picked
@@ -1401,6 +1901,33 @@ export class MemoryStore {
  * 存在的理由：关键词召回对「我喜欢什么」这种问题天然失效——记忆条目里
  * 压根没有"喜欢"两个字。可这类问题恰恰是用户检验"你到底记不记得我"的首选。
  */
+/**
+ * 周键（P1-4 周聚合用）：一周从**周一**开始，键就是周一那天的 'YYYY-MM-DD'。
+ *
+ * 为什么用周一：文档里周摘要正文写的是「10-20~10-26」，那是周一到周日。
+ * 为什么键用日期而不是 W43：日期跨年不会出错，也不用记 ISO 周序号的规则。
+ *
+ * @param {string|number|Date} [input]
+ * @returns {string} 空串表示输入不是合法时间
+ */
+export function weekKeyOf(input = new Date()) {
+  const d = input instanceof Date ? new Date(input.getTime()) : new Date(input)
+  if (Number.isNaN(d.getTime())) return ''
+  const diff = (d.getDay() + 6) % 7 // 周一=0，周日=6
+  return localDateKey(new Date(d.getFullYear(), d.getMonth(), d.getDate() - diff))
+}
+
+/** 周键 → 正文里的「10-20~10-26」（周一到周日） */
+export function weekLabelOf(weekKey) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(weekKey || ''))
+  if (!m) return ''
+  const mon = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+  if (Number.isNaN(mon.getTime())) return ''
+  const sun = new Date(mon.getFullYear(), mon.getMonth(), mon.getDate() + 6)
+  const md = (x) => `${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`
+  return `${md(mon)}~${md(sun)}`
+}
+
 function intentKinds(q) {
   const s = String(q || '')
   // 先摘掉问句外壳，只看实义部分
@@ -1561,6 +2088,40 @@ const DUP_SKIP_SIMILARITY = 0.92
 const DUP_MERGE_SIMILARITY = 0.7
 /** 被更正过的条目在召回时的降权系数（只降权，不删除） */
 const SUPERSEDED_PENALTY = 0.4
+
+/**
+ * RRF（Reciprocal Rank Fusion）融合排序的三个旋钮（P0-2，2026-10-27）。
+ *
+ * 来源是白守 `hybrid-search.ts`：`RRF_K = 60`、`score = w / (rank + 60)`，
+ * 按**名次**融合而不是原始分相加——两路分数尺度不可比。
+ * 他们两路是关键词 0.3 / 向量 0.7；我们没有 embedding，第二路换成「有效权重」，
+ * 所以给 0.6 / 0.4（关键词是相关性主线，权重只做重要度校正）。
+ */
+const RRF_K = 60
+const RRF_KEYWORD_WEIGHT = 0.6
+const RRF_WEIGHT_ARM_WEIGHT = 0.4
+
+/**
+ * RRF 两路的排序器（入参是 recall() 里 score 出来的 `{ e, kw, w }`）。
+ *
+ * 关键词路主看 kw（相关性），权重路主看 w（有效权重）；各自辅以另一路和
+ * 「最近被提起」做稳定次序——否则同分条目的顺序取决于数组插入顺序，
+ * 一天里反复调用会看到召回结果在抖。
+ */
+function compareKeywordArm(a, b) {
+  return b.kw - a.kw || b.w - a.w || compareRecency(a, b)
+}
+
+function compareWeightArm(a, b) {
+  return b.w - a.w || b.kw - a.kw || compareRecency(a, b)
+}
+
+/** 同分时「最近被提起过」的排前面（lastActiveDay 大者在前），再按记录时间 */
+function compareRecency(a, b) {
+  const la = Number(a?.e?.lastActiveDay ?? -1)
+  const lb = Number(b?.e?.lastActiveDay ?? -1)
+  return lb - la || (b?.e?.at || 0) - (a?.e?.at || 0)
+}
 
 /**
  * 这句话是不是否定表述。

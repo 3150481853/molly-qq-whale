@@ -911,6 +911,13 @@ export class ChatEngine {
     this.startGroupfunHeartbeat()
     // 抽奖房间恢复（2026-10-26：热重载会清空内存房间，A 群那场因此没开奖）
     await this.restoreGroupfunRooms()
+    // P1-4 周聚合补漏：只补最近 2 周「有 event 没摘要」的周，天然幂等
+    try {
+      const r = this.memory.missingWeeks()
+      if (r.created) this.logger('info', `周聚合补漏：${r.weeks.length} 周，生成 ${r.created} 条摘要`)
+    } catch (err) {
+      this.logger('warn', `周聚合补漏失败（不影响启动）：${err?.message || err}`)
+    }
   }
 
   /**
@@ -4437,7 +4444,14 @@ export class ChatEngine {
       groupName,
       mood,
       conv,
-      degraded: budgetOut,
+      /*
+       * 2026-10-27（主人 m01170「molly切换到智降级后报错」）：
+       * 这里原来写的是 `degraded: budgetOut` —— 主脑积分一超限，连人设提示词
+       * 都切到「说短点」的降智版。超预算只该说明"换个钱包"，不该说明
+       * "脑子不好使"。降智提示只留给 trae 那条真正 512 token 的车道
+       * （callWithFallback / callDegraded 内部各自用 withDegradedNote 补）。
+       */
+      degraded: false,
       research: research?.ok ? research.summary : '',
       // 2026-10-24 需求①：对方明确要求/坚持发群里 → 提示词里就别再教她推私聊
       groupEcho: Boolean(groupEcho?.active),
@@ -4445,7 +4459,8 @@ export class ChatEngine {
       groupCrowd,
     })
     if (stall.hardStop) system += `\n\n${this.stallStopSection(stall.misses)}`
-    const messages = await this.buildMessages(conv, norm, userName, { degraded: budgetOut })
+    // 超预算不等于降智：上下文照给全量，只是换车道（见上面的注释）。
+    const messages = await this.buildMessages(conv, norm, userName, { degraded: false })
 
     /*
      * 带图的轮次把输出预算抬高（2026-10-26，主人 m04893「看懂 GIF」连带发现）。
@@ -4464,17 +4479,44 @@ export class ChatEngine {
     // 带图轮次的思考强度：minimal 把 900~4000 的思考压到 ~900，正文不再被吃光。
     const imageEffort = hasImages ? (this.config.imageReasoningEffort || 'minimal') : undefined
 
-    // 超预算 + trae 可用 → 走降智接盘；否则走正常的免费额度链路。
+    // 超预算 ≠ 降智。2026-10-27（主人 m01170「molly切换到智降级后报错」）之前的
+    // 写法是 `budgetOut && this.trae ? callSpare() || callDegraded() : callWithFallback()`：
+    // 主脑积分一超限，整条分层链被短路，每一轮直接吃备用脑，连历史都被砍成 12 条
+    // —— 主人看到的就是"切到降智档之后她坏了"。
     //
-    // 注意：这里的 budgetOut 是**旧口径**（主脑积分日限），在 wb-proxy 分层下
-    // 它通常一直是 false（因为主脑走 intl 免费 flash，credit=0）。真正的分层
-    // 在 callWithFallback 里面：主脑 → 备用脑(cn flash，日限 500 分) → trae。
-    // 保留 budgetOut 是为了兼容 wbai 直连后端（那里 credit 真的会烧）。
-    const res =
-      budgetOut && this.trae
-        ? (await this.callSpare({ system, messages, signal })) ||
-          (await this.callDegraded({ system, messages, signal }))
-        : await this.callWithFallback({ system, messages, signal, maxTokens: imageBudget, reasoningEffort: imageEffort })
+    // 现在的口径（方案 2）：
+    //   ① 超预算 → 先备用脑（同款 cn flash，全量上下文），只是换个钱包；
+    //   ② 备用脑烧满 → trae 接盘，这一层才真正降智（512 token + 12 条 + 说短点）；
+    //   ③ 两条都没接住 → 仍回落正常的免费额度链，别把"没钱"演成"没脑子"。
+    // 预算闸依然有效：超限期间不会再往主脑积分池里砸钱。
+    let res
+    if (budgetOut) {
+      res = await this.callSpare({ system, messages, signal })
+      if (!res) {
+        res = await this.callDegraded({
+          system: this.withDegradedNote(system),
+          messages,
+          signal,
+        })
+      }
+      if (!res) {
+        res = await this.callWithFallback({
+          system,
+          messages,
+          signal,
+          maxTokens: imageBudget,
+          reasoningEffort: imageEffort,
+        })
+      }
+    } else {
+      res = await this.callWithFallback({
+        system,
+        messages,
+        signal,
+        maxTokens: imageBudget,
+        reasoningEffort: imageEffort,
+      })
+    }
     if (!res) {
       // 整条模型链都没接住（含非限流错误直接放弃），记一笔方便对账
       this.traceReply(conv?.key, 'model-null', { degraded: Boolean(budgetOut) })
@@ -4631,24 +4673,43 @@ export class ChatEngine {
    * 用户明确说过（m02427-2）：「它模型量和速度都很小，你需要在使用 trae 的
    * 时候降智」。降智在这里是三件具体的事，不是形容词：
    *   ① maxTokens 砍到 512（调用器构造时就定死，见 this.trae）
-   *   ② 历史只喂最近 12 条（buildMessages 的 degraded 分支）
-   *   ③ 系统提示里明确写"你现在脑子不太够用，说短点"（buildSystemPrompt）
+   *   ② 历史只喂最近 12 条 —— 2026-10-27 起在这里**就地裁剪**，不再依赖
+   *      generate() 传 degraded（那样连备用脑的上下文也会被一起砍掉，见 m01170）
+   *   ③ 系统提示里明确写"你现在脑子不太够用，说短点"（buildSystemPrompt / withDegradedNote）
    * 另外 trae 的用量不记账——用户说无需担心，所以这里不碰 budget。
    */
   async callDegraded({ system, messages, signal, noBackflow = false }) {
     if (!this.trae) return null
-    const res = await this.trae.chat({ system, messages, signal })
+    // ② 历史裁剪：trae 的上下文很小，这里只喂最近 degradedContextLimit 条。
+    const limit = Number(this.degradedContextLimit) || 12
+    const trimmed =
+      Array.isArray(messages) && messages.length > limit ? messages.slice(-limit) : messages
+    /*
+     * trae 适配器要"抛异常"还是"返回 {ok:false}"，取决于它当时是网络错、
+     * 鉴权过期还是上游 5xx。2026-10-27（主人 m01170「molly切换到智降级后报错」）：
+     * 原来这里是裸调用，一旦抛异常就直接穿到 generate() 外层 catch，整轮变成
+     * modelDownReply 的那句兜底 —— 主人看到的就是"报错"。这里归一成失败结果，
+     * 让它继续走下面既有的回落逻辑（回流免费额度 / 沉默）。
+     */
+    let res
+    try {
+      res = await this.trae.chat({ system, messages: trimmed, signal })
+    } catch (err) {
+      const msg = err?.message || String(err)
+      this.logger('warn', `trae 接盘抛异常: ${msg}`)
+      res = { ok: false, error: msg, thrown: true }
+    }
     /*
      * 记账（task-54）：以前这里写着「trae 用量不记账」，于是降档/接盘整条路径
      * 在账本里完全隐身。现在统一走 recordUsage —— 拿不到 usage 也至少 calls+1，
      * credit 拿不到就不加（绝不编造）。
      */
     this.recordUsage({ channel: 'degraded', usage: res?.usage, provider: 'trae' })
-    if (res.ok) {
+    if (res?.ok) {
       this.noteModelOk()
       return { ...res, degraded: true, backend: 'trae' }
     }
-    this.logger('warn', `trae 接盘失败: ${res.error}`)
+    this.logger('warn', `trae 接盘失败: ${res?.error || '（适配器没返回结果）'}`)
     /*
      * 回流的递归护栏，别删。
      *

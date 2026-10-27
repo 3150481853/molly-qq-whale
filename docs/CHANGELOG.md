@@ -7,6 +7,62 @@
 
 ---
 
+## 2026-10-27 · v1.1.6-preview.3（预览版，已推送 GitHub）
+
+> 主人（2026-10-27 23:2x，本会话）：「推送一下Molly现在的版本，作为1.1.6的下一个预览版」，确认版本号：「预览3」
+
+**基线**：上一个发行版是 `v1.1.6-preview.2`（Release #425068427、tag 提交 `ec12b3d`、2026-10-27T05:34Z、附件 1,373,023 B / 180 文件 / 3.13 MB）。
+本预览版 = preview.2 构建之后到今晚的全部改动：**第二批记忆改造第一次真正进包** + 超预算不再降智 + 远程指令信箱。
+
+**本版特性（按影响面排）**
+
+1. **第二批记忆改造随包发出**（`lib/memory.js` / `lib/engine.js`）
+   - preview.2 那次构建早于这批改动落地，GitHub 上的 `v1.1.6-preview.2` **不含**这批代码；本版是第一次真正打包发出，细节见下面「第二批记忆改造续记」。
+   - **P0-2 召回改 RRF 名次融合**：`RRF_K=60`、关键词臂 0.6 / 权重臂 0.4，两路各自排序再融合；`status().lastRecall` 能看到候选数、分词与前 5 条的两路名次+融合分。
+   - **P1-3 归档**：`ARCHIVE_IDLE_DAYS=90`，`event`/`meme` 到该类下限且闲置够久 → 移进 `_archive.json`，**不物理删除**；归档簿坏了只 warn、条目留在热池。
+   - **P1-4 周聚合 + missing 补漏**：`summarizeWeek()` 生成 `kind=event / level=2 / weight=8` 的周摘要，原始事件 `level+1` 自然衰减；启动时 `missingWeeks({lookback:2})` 只补最近两周、**当前周不补**、天然幂等。
+   - **P2-5 压缩标记**：`coveredUntil` 写到被覆盖的原始 event 与摘要条；`index.json.lastCompactionAt` 只有周聚合会推进；老 index 缺字段当 0 且**不回写**（老文件字节不变）。
+2. **超预算不再降智**（主人 m01170「molly切换到智降级后报错」）
+   - 根因：`generate()` 把「主脑积分超限」直接传成 `degraded` —— 人设提示词被切成"说短点"、历史只喂 12 条；`budgetOut && trae` 还整条短路掉分层链。
+   - 现在：① 超预算 → 备用脑（同款 cn flash、**全量上下文**），只是换个钱包；② 备用脑烧满 → trae 接盘，这一层才真降智（512 token + 最近 12 条，裁剪挪进 `callDegraded()` 自己算）；③ 两条都没接住 → 回落正常免费额度链。预算闸照旧（超限期间不往主脑积分池砸钱）。
+   - `callDegraded()` 另外把 trae 适配器抛的异常归一成 `{ok:false}`（原来会穿到外层 catch，整轮变成"走神"兜底 —— 主人看到的"报错"就是它）。
+3. **远程指令信箱（新增）** —— 服务器存指令、家里轮询执行并回写，全程出站，不需要端口映射
+   - `tools/cmd-agent.mjs`：`--once` 跑一轮 / `--loop` 常驻（默认 30 秒）/ `--issue-otp` 生成一次性口令 / `--dry-run` 只打印。
+   - `tools/qq-say.mjs`：零依赖 OneBot v11 WS 发消息（`--group` / `--user` / `--login`），cmd-agent 的嘴。
+   - `tools/run-hidden.vbs` + `tools/cmd-agent-once.cmd`：无黑框每分钟一轮，计划任务 `MollyCmdAgent`（已装、状态 Ready）。
+   - 动作白名单：`ping` / `status` / `logs` / `budget` 只读；`reload-watchdog` / `say` 属破坏性动作，必须带一次性口令（6 位、5 分钟、用一次即废，**口令只私信主人**、不写进公开 result）。每轮落 `out/cmd-agent.log`，执行细节落 `out/cmd-audit.log`。
+4. **版本号**：`plugin/dsh-qq-whale/package.json` → `1.1.6-preview.3`；控制台 `tools/console-server.mjs` 的 `FALLBACK_VERSION` 与 `console/index.html` 页脚同步（唯一真源仍是 package.json）。
+5. **脱敏补漏（发布流程本身）**：本版发布前用 `tools/release-assets.mjs` 的口径对 tag 树做了一次兜底复扫，抓到 3 个真实群成员号（已换成 `888888888` / `999999999` / `987654321`）散在 `lib` 注释、CHANGELOG 与地址解析自测夹具里 —— `tools/build-publish.mjs` 的 `REPLACEMENTS` / `REAL_NUMBERS` 之前没登记。已补规则并重建（0 命中），本版提交是修正后的树。
+
+**验证（发版前实测，2026-10-27 23:3x）**
+
+- `lib/` **49 个 js** 全部 `node --check` 通过；`tools/{cmd-agent,qq-say,build-publish,release-assets}.mjs` 同样 exit 0。
+- 六个记忆门禁全绿：`_memory_rrf_check` 25/25、`_memory_dedup_check` 27/27、`_memory_v2_check` 25/25、`_memory_archive_check` 20/20、`_memory_week_check` 17/17、`_memory_compact_check` 18/18。
+- 线上 `GET http://127.0.0.1:4739/dsh-qq-whale/state` 200：`memory.name="茉莉花"`、`count=1786`、`limit=baseLimit=maxLimit=50000`、`archiveCount=0`、`lastCompactionAt` 已推进；`memory.lastRecall.top[]` 带 `rrf/rankKeyword/rankWeight` —— 召回确实在走 RRF。
+- 部署副本与源目录**逐字节一致**（`memory.js`、`engine.js` 的 SHA-256 相同），插件已重载、`/state` 正常。
+- `tools/build-publish.mjs` 重建：**命中 0**、无丢弃；文件数与体积见发布副本 `PUBLISH-MANIFEST.md`。
+
+**已知限制**
+
+- **归档还没在真机触发**：`archiveCount=0`（阈值 90 活跃天，库才有 1 个活跃天），行为现阶段靠门禁脚本保证。
+- **不做同义词扩展**：`memory-test3.mjs` 的「咖啡→美式」仍失败（老基线就如此），不是本版回归。
+- **不含语音包**：音色包仍单独下 Releases 里的 `voice-pack-v1.2`；唱歌保持关闭（`singingEnabled=false`）。
+- **旧提交里仍有这 3 个真实群成员号**：本版只把**当前树**修干净（本版提交已改写并强推）；`ec12b3d` 及更早的旧提交、旧 tag 仍能按 SHA 下载到它们。彻底清要走 2026-10-23 那次的全历史重写 + GitHub Support「Clear Cached Views」同款流程，**等主人定**，别自己动手重写全史。
+- **cmd-agent 是自有服务器配套件**：发布副本里 relayBase 会被脱敏成 `example.asia`，部署者要自己填；`MollyCmdAgent` 计划任务也要自己建（本版没有一键安装脚本）。
+
+**退回**
+
+```bash
+git checkout -- plugin/dsh-qq-whale/lib/memory.js plugin/dsh-qq-whale/lib/engine.js \
+               plugin/dsh-qq-whale/package.json console/index.html tools/console-server.mjs
+rm -f tools/cmd-agent.mjs tools/qq-say.mjs tools/run-hidden.vbs tools/cmd-agent-once.cmd
+```
+
+数据侧：`_archive.json` 不需要时直接删（缺失当空）；`index.json` 的 `lastCompactionAt` 缺失当 0，删了不影响加载。
+部署侧：把旧 `memory.js` / `engine.js` 拷回 `…\node_modules\dsh-qq-whale\lib\` → `plugin_manager` 关开一次。
+
+---
+
 ## 2026-10-27 · v1.1.6-preview.2（预览版，已推送 GitHub）
 
 > 主人 m02546：「读一下 state 和 changelog 这些文件，分析从上一个 github 发行版后 molly 升级改动了什么，整理成 v1.1.6 第一个预览版，刷一下 molly 版本号但是不要推送 github」
@@ -72,6 +128,96 @@ git checkout -- plugin/dsh-qq-whale/lib/{memory,engine,engine-text,engine-contex
 
 数据侧：把 `data/qq-whale/memory/_legacy-memory.json` 改回 `memory.json`、删掉 `<账号>/` 分片目录即可回到单文件记忆
 （权重已 ×2，回旧刻度需要手动 ÷2，没有自动反算脚本）。
+
+### 第二批记忆改造续记（原记在 v1.1.6-preview.2 名下；实际随 v1.1.6-preview.3 发出，2026-10-27）
+
+> **补记（2026-10-27 23:4x）**：这批改动当时**没有**进 `v1.1.6-preview.2` 的发布包（那次构建早于改动落地），
+> 从 `v1.1.6-preview.3` 起正式随包发出。本小节末尾「不升版本号、不提交发布仓」的说法按此更正。
+
+> 板子第 7 条：把 `docs/memory-upgrade-from-baishou.md` 的第二批 P0-2 / P1-3 / P1-4 / P2-5 做完记账。
+> P0-2 / P1-3 / P1-4 / P2-5 四项改造 + `engine.js` 里的挂载改动**全部已实现、已部署、已上线验收**。代码 `lib/memory.js`（2172 行）与 `lib/engine.js`（6714 行），
+> 括号里的行号都是本次改动后的实测行号（行号会随下次改动漂移，认符号名）。
+
+**1. P0-2：召回从「单一加权分」改成 RRF 名次融合**（`memory.js` `recall()` @1533）
+
+- 两路各自排序再融合：关键词路（身份加成 qqHit +4 / sameName +2 / nameContains +1、2-gram IDF、meme 意图 +3、
+  新鲜度 +0.3 上限）与权重路（`effectiveWeight(e, activeDays)`）；`RRF_K = 60`（@2100）、
+  关键词臂 0.6 / 权重臂 0.4（@2101-2102），按融合分排序，同分比 `lastActiveDay` / `at` 兜底。
+- 被 `supersededBy` 标记的条目两路都 ×0.4（`SUPERSEDED_PENALTY` @2090；**只降权，正文不删**）。
+- 新增 `kwStrong` 字段（@1609-1633）：**只**由「≥2 字词命中」置位，和会被身份命中置位的 `strongHit` 拆开
+  （否则「叫了声名字」就会把候选池闸门打开）。闸门规则：有强关键词命中 → 只留 `kwStrong ∪ 同 qq 硬身份命中`；
+  否则退回身份命中；短 query 再退到单字命中（@1676-1684）。
+- `status()` 新增 `lastRecall` 对账字段（最近一次召回的候选数、分词、前 5 条两路名次与融合分，@1742-1776），
+  召回为什么没出来可以直接看 `/state.memory.lastRecall`。
+
+**2. P1-3：归档而不是只靠淘汰**（`memory.js`）
+
+- 新增 `ARCHIVE_IDLE_DAYS = 90`（@240）：`event` / `meme` 两类里 `effectiveWeight() <= WEIGHT_FLOOR[kind]`
+  且闲置 ≥90 **活跃天**的条目移入 `<shardDir>/_archive.json`（@1195）——不物理删除、不进召回、不参与统计。
+- `prune()`（@1136）改成「先归档 → 再走原扩容/淘汰逻辑 → 被挤出上限的条目也进归档簿（reason=over-limit）」；
+  归档簿走加密信封 + `.tmp` 原子 rename，和分片同一套落盘纪律。
+- 归档簿坏掉**只 warn**、不修改原文件、条目留在热池（宁可不归档，不能丢数据）；
+  `status()` 加 `archiveCount` / `archived`（@1022-1023）。
+
+**3. P1-4：周聚合 + missing 补漏**
+
+- 新增 `weekKeyOf`（周键 = 那周周一日期，@1913）、`weekLabelOf`（@1921）、
+  `eventBuckets`（桶键优先级 `qq:<号>` > `who:<名>` > `global`，@1345）、
+  `summarizeWeek(weekKey)`（@1383）、`missingWeeks({lookback:2})`（@1484）。
+- 摘要条：`kind=event`、`level=2`、`weight=8`、`source=system`，带 `weekSummaryFor` + `groupKey`，
+  正文形如「10-12~10-18：某群聊了 18 件事，主要是 …」；被覆盖的原始事件 `level = min(3, level+1)`。
+- 四条例外口径：**当前周不补**（没结束的周补了就是错账）；摘要**不走 `add()`**（不污染活跃天、不参与去重/冲突判定）；
+  补漏失败只 warn、不阻断启动；按「周 + 群」判缺（同一个周不同群各自一张摘要）。
+- 挂载：`lib/engine.js` `init()` 里 `await this.restoreGroupfunRooms()` 之后**只加 7 行** try/catch
+  调 `this.memory.missingWeeks()`（@914-920）。
+
+**4. P2-5：压缩标记（向后兼容硬要求）**
+
+- `add()` 新增可选 `messageId`（@785）：**给了才写** `entry.messageId`（@862），老条目零改动。
+- `summarizeWeek()` 把 `coveredUntil` 同时写到被覆盖的原始 event 和新摘要条（@1430-1455）：
+  优先用真消息号按数值比大小，没有消息号则退回最后条目 id 兜底。
+- `index.json` 新增 `lastCompactionAt`，构造（@414）/ `load()`（@547-548）/ `writeIndex()`（@500）/
+  `status()`（@1025）全链路透传，**只有周聚合会推进它**（@1461）。
+- 兼容：老 index 缺字段当 0 且 `load()` **不回写**（老文件字节一致）；老 event **不凭空补** `coveredUntil`；
+  压缩写回时保留 `version / account / kinds / total / activeDays / activeDayKey / savedAt`。
+
+**5. 新增工程资产**
+
+- `docs/AI-CODE.md`：给接手的 AI 看的规则 SSOT（10 节），每条规则带 `[版本或日期｜出处行号]` 锚点。
+- 六个门禁脚本（`${MOLLY_ROOT}\out\`）：既有 `_memory_{rrf,dedup,v2}_check.mjs`，本批新增
+  `_memory_{archive,week,compact}_check.mjs`。
+
+**验证（全量重跑，均 exit=0）**
+
+- 六测全绿：`_memory_rrf_check.mjs` 25/25、`_memory_dedup_check.mjs` 27/27、`_memory_v2_check.mjs` 25/25、
+  `_memory_archive_check.mjs` 20/20、`_memory_week_check.mjs` 17/17、`_memory_compact_check.mjs` 18/18。
+- `tools/memory-test3.mjs` **13/14**（老基线 12/14）。唯一失败是「咖啡」→「美式」纯词面不可达，
+  **已知限制＝不做同义词扩展**，不是本批引入的回归。
+- 线上 HTTP 契约 `out/_memory_api_probe.mjs` **16/16 ALL PASS**；`lib/` 下 49 个 js 全部 `node --check` 通过。
+
+**部署（只同步两个真有差异的文件，不升版本号）**
+
+- 目标 `${HOME}\.dsh\profiles\desktop\node_modules\dsh-qq-whale\lib\`，部署后 SHA-256 与源目录逐字节相同：
+  `memory.js` `<REDACTED>`（95771 B）、
+  `engine.js` `<REDACTED>`（311978 B）。
+- 被替换的旧文件备份在 `out/_deploy_backup_20261027_1302/`（memory.js 70188 B / engine.js 311591 B）。
+- `plugin_manager` 关开 `include:dsh-qq-whale`：**发现上一轮会话死在关开中间，插件一直处于 disabled**（这就是当时
+  「改了没生效」的原因），关开一次即恢复。
+
+**线上验收（`GET http://127.0.0.1:4739/dsh-qq-whale/state` 返回 200，实测）**
+
+- `memory.name="茉莉花"`、`count=1535`、`limit=baseLimit=maxLimit=50000`、`encrypted=true`、`keySource=file`、
+  **`broken:false`**、`archiveCount=0`、`lastCompactionAt` 已推进。
+- `shards={person:134, address:7, promise:114, fact:641, preference:35, event:97, meme:507}`，合计 **1535 = count**。
+- `index.json`（339 B）七类与 `total` 对得上，`version/account/kinds/total/activeDays/activeDayKey/savedAt` 老键全保留。
+- 首启周聚合**真的跑了**：`event` 94 → 97（+3 条摘要）；`/memory/list` 里 92 条带 `coveredUntil`、3 条带 `weekSummaryFor`。
+
+**退回**
+
+- 部署侧：把 `out/_deploy_backup_20261027_1302/` 里两个文件拷回部署目录 → `plugin_manager` 关开一次。
+- 数据侧：`_archive.json` 不需要时可直接删（缺失当空，归档条目不会回到热池）；`index.json` 的
+  `lastCompactionAt` 缺失当 0，删了不影响加载。
+- 源码侧没有自动反算：本批改动**不升版本号、不提交发布仓**，回滚由发布流程负责人处理（改前两个文件即上面那份备份）。
 
 ---
 

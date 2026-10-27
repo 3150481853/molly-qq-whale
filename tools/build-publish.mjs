@@ -136,6 +136,17 @@ const FILES = [
   ['tools/backup-memory.ps1', 'tools/backup-memory.ps1'],
   ['tools/install-memory-backup-task.cmd', 'tools/install-memory-backup-task.cmd'],
   ['tools/uninstall-memory-backup-task.cmd', 'tools/uninstall-memory-backup-task.cmd'],
+  // 2026-10-27 v1.1.6-preview.3：远程指令信箱（服务器存指令、家里轮询执行回写）。
+  // 四个文件是一套，缺一个就残废：
+  //   cmd-agent.mjs       执行端（轮询 + 动作白名单 + 一次性口令 + 审计）
+  //   qq-say.mjs          它发消息的嘴（零依赖 OneBot WS）
+  //   run-hidden.vbs      计划任务用的无黑框启动器
+  //   cmd-agent-once.cmd  每分钟跑一轮的入口（自己写日志，stdout 丢掉）
+  // 注意：relayBase / 一次性口令文件都在 out\ 下（不进发布副本），路径里的真值走脱敏。
+  ['tools/cmd-agent.mjs', 'tools/cmd-agent.mjs'],
+  ['tools/qq-say.mjs', 'tools/qq-say.mjs'],
+  ['tools/run-hidden.vbs', 'tools/run-hidden.vbs'],
+  ['tools/cmd-agent-once.cmd', 'tools/cmd-agent-once.cmd'],
   // README 顶部主图：assets/ 走 DIRS 递归也能带走，这里再显式列一次保证主图一定在；
   // copyFile 对同一「源 → 目标」去重，不会重复计数。
   // 2026-10-23 改名 hero.svg → hero-v1.svg → hero-v11.svg：GitHub 的图片代理按 URL 缓存，
@@ -196,6 +207,12 @@ const REPLACEMENTS = [
   // 反查到真实群）。与其它群号一致换 666666666。
   [/666666666/g, '666666666'],
   // 测试夹具里出现过的第三方 QQ 号（真实好友/群成员，不能带出去）
+  // 2026-10-27 v1.1.6-preview.3：发布前对 tag 树做兜底复扫（tools/release-assets 的口径）时发现
+  // 这三个真实群成员号在 lib 注释、CHANGELOG 与地址解析自测夹具里都存在，而本文件的规则没登记
+  // —— 也就是说 preview.2 及更早的公开树里一直带着它们。现在补进规则，之后重建即 0 命中。
+  [/888888888/g, '888888888'],
+  [/999999999/g, '999999999'],
+  [/987654321/g, '987654321'],
   [/888888888/g, '888888888'],
   [/999999999/g, '999999999'],
   [/123123123/g, '123123123'],
@@ -279,7 +296,7 @@ const ALLOW = new Set([
  * 那是 timeout 30000、weight 5 这类正常常量。误报率高的闸门最后一定被人关掉，
  * 所以这里改成：真实账号/群号用字面量列，路径/令牌/IP/昵称用结构规则。
  */
-const REAL_NUMBERS = ['111111111', '222222222', '333333333', '444444444', '555555555', '666666666', '777777777', '666666666', '777777777', '666666666']
+const REAL_NUMBERS = ['111111111', '222222222', '333333333', '444444444', '555555555', '666666666', '777777777', '666666666', '777777777', '666666666', '888888888', '999999999', '987654321']
 
 const CHECKS = [
   { id: 'qq', re: new RegExp(`(?:${REAL_NUMBERS.join('|')})`, 'g'), why: '真实 QQ/群号残留' },

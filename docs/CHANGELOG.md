@@ -7,6 +7,406 @@
 
 ---
 
+## 2026-10-27 · v1.1.6-preview.2（预览版，已推送 GitHub）
+
+> 主人 m02546：「读一下 state 和 changelog 这些文件，分析从上一个 github 发行版后 molly 升级改动了什么，整理成 v1.1.6 第一个预览版，刷一下 molly 版本号但是不要推送 github」
+> 主人 m02812：「做之前先把现在的版本打包上传，命名为v1.1.6-preview.2，并署名记忆库为"茉莉花"记忆系统」
+> 主人 m02845：「发布前请改动：记忆库扩容至5w条」
+
+**基线**：上一个发行版是 `v1.1.5-A-Hotfix.1`（Release #424182053、tag 提交 `75cf38f`、2026-10-26T11:45Z、附件 1,317,133 B / 177 文件）。
+本预览版 = 那个 tag 之后到今天的全部改动，全部已落盘、已部署、已在线上跑过。
+
+**本版特性（按影响面排）**
+
+1. **记忆体系重做**（`lib/memory.js` 为主）
+   - **记忆库署名「茉莉花」**（`MEMORY_SYSTEM_NAME`，`/state.memory.name` 可见）；名字只用于对外说明，不参与检索/去重/衰减。
+   - **容量一次给到 5 万条**：`memoryPoolLimit` / `memoryPoolMax` 都是 50000（`lib/main.js` DEFAULTS +
+     `${HOME}\.dsh\profiles\desktop\cordis.patch.yml`），满了才按有效权重/活跃天淘汰。
+   - 按机器人账号分七类落盘：`<dataDir>/memory/<机器人QQ>/{person,address,promise,fact,preference,event,meme}.json` + `index.json`；
+     老 `memory.json` 首次启动自动迁移并归档成 `_legacy-memory.json`。
+   - 权重刻度 5 → 10（一位小数），老数据 ×2 等比迁移、召回打分系数 0.3 → 0.15、称谓钉满 10。
+   - 阶梯衰减：只在"真聊过天"的日子累加活跃天，人物/约定/事实/偏好宽限 14 活跃天、事件/梗 7 天，
+     之后每 7 个活跃天 −0.5，到下限为止；命中把它拉回当前活跃天。只在读取时算，不改盘。
+   - 命中记账（`hits` / `lastHitAt` / `lastActiveDay`）。
+   - 写入闸门：`source=assistant` 不许写 `fact` / `person`。
+   - 检索预算（字符 800/1200/1600）+ `level` 0–3 压缩等级（只标记不自动改）。
+   - **三级去重 + 冲突不合并**（学自白守 BaiShou-Next 的设计，代码全自写）：
+     `findDuplicate()` 改成返回 `{entry, score}`；≥0.92 跳过（不重写文字、只刷新提起时间）、
+     0.70~0.92 合并（权重取高、hits 相加）、<0.70 新增；`findConflict()` 独立扫「意思相反」的旧条目
+     （不依赖相似度——「他喜欢猫」→「他其实不喜欢猫」字面只有 0.2），命中则两条都留、旧的打
+     `supersededBy`/`supersededAt`、召回 ×0.4 降权；`dedupeAll()` 也不再合并冲突对。
+2. **同群双泳道 + 发送串行 + 模型并发闸门**（`lib/engine.js`）——子房连 @ 三次不回的根因修复。
+3. **取消「回不过来就不回」**：模型链全挂时说一句兜底（90 秒节流 / `silentOnModelFail` 可关回）。
+4. **认人 / 报时 / 夜间语气**三条现场投诉修复（自称判废、名册带称谓、结尾重念称谓与时间、别人报的点数不算数）。
+5. **运维**：开机自启（见下一条）+ 控制台数据服务自愈。
+
+**状态核对（2026-10-27 10:40 本地，`/state` 实测）**
+
+- 插件：`missing=[] failed=[]`、`link={"ready":true,"state":"online"}`、`bot=Molly(111111111)`、`model.ok=true`（`deepseek-v4.1-flash`，网关 `127.0.0.1:8788`）
+- 记忆：`count=1478`、`account=111111111`、`activeDays=1`、`shards={person:130, address:7, promise:105, fact:622, preference:33, event:94, meme:487}`
+- 并行：`parallel={"jobs":1,"lanes":["group:666666666|ambient"],"model":{"limit":3,"active":0,"waiting":0}}`
+- 累计：`metrics.messages=12540`、`stats.replies=28`、`stats.modelDownLines=4`、语音 `ok=7 fail=0`、抽奖 `restored=0 expired=[]`
+  （`stats.*` 是内存计数，升版本号时又重载过一次会归零；`metrics` / `memory` 落盘，不受影响）
+
+**验证**
+
+- `_memory_v2_check.mjs` 25/25、`_memory_api_probe.mjs` 16/16、`_parallel_lane_check.mjs` 44/44、`_model_down_check.mjs` 24/24、
+  `_memory_dedup_check.mjs` 27/27（三级去重 / 冲突不合并 / hits 相加 / 降权 / supersededBy 落盘）；
+  线上迁移 1462 条 → 七分片，`index.json` 与 `/state.memory` 对得上。
+- 观察哨 `_memory_watch.mjs` 十分钟 30 次采样：记忆 1463 → 1467、分片 542 → 550 KB、消息 12336 → 12396，报警 0 条。
+
+**已知限制**
+
+- **仍然不含唱歌**（`singingEnabled` 保持 `false`，音色未达标）。
+- 预览版：双泳道的真机效果还在观察（看 `/state.parallel` 的 `lanes` 与 `model.waiting`），
+  文档里承诺的"方案 B 真并发"没做，也不建议在免费 flash 上做。
+- 本版**已**跑 `tools/build-publish.mjs` 并推送 GitHub（tag `v1.1.6-preview.2`；tag 带 `-preview` 会自动标 prerelease），
+  附件由 `tools/release-assets.mjs` 从 tag 树重打包（含隐私扫描与 `#molly` 回填）。
+
+**退回**
+
+```bash
+git checkout -- plugin/dsh-qq-whale/lib/{memory,engine,engine-text,engine-context,clock,web,main}.js \
+               plugin/dsh-qq-whale/package.json console/index.html console/console.js tools/release-assets.mjs
+```
+
+数据侧：把 `data/qq-whale/memory/_legacy-memory.json` 改回 `memory.json`、删掉 `<账号>/` 分片目录即可回到单文件记忆
+（权重已 ×2，回旧刻度需要手动 ÷2，没有自动反算脚本）。
+
+---
+
+## 2026-10-27 · 运维补丁：DSH 开机自启 + 控制台数据服务自愈（未升版本号）
+
+> 主人 m00682：「检查为什么我电脑重启没有自动拉起Molly，她现在没法说话」
+
+**根因（两条）**
+
+1. **没人拉起 DeepSeek Harness 本体**。重启后 22:00 计划任务 `SnowLuma-Boot` 把 QQ/NapCat 拉起来了，
+   22:02 QQ 自动登录，22:08:18 的 DSH 父进程却是 `explorer.exe`——是手动双击开的，不是自启。
+   启动夹、`HKCU/HKLM\...\Run`、`StartupApproved` 全查过，**没有任何一项负责 DSH**；
+   `Molly-Watchdog` 只看 NapCat 的 `phase=online`（QQ 登录了就算"一切正常"），所以整段时间它认为没事。
+   结果：22:00–22:08 她有耳朵没脑子，之后 SnowLuma 的入站推送其实也断了（22:02 那条 `login history sync disabled`
+   之后再无 `[Event]`），群里全是人说话她一条不回。
+2. **控制台的数据服务不会自己起来**。`panel-data.mjs`（19391）没启动时，看板整屏「数据服务 19391 不可达」。
+
+**改动**
+
+- 新增 `tools/start-dsh.ps1`（102 行，UTF-8 BOM）：查 `DeepSeek Harness` 进程，在跑就记一行日志跳过；
+  没跑就 `Start-Process` 拉起，**管理员身份下经 `explorer.exe` 中转以普通权限启动**（否则 DSH 会比手动双击多一层提权，
+  和部署文档不一致）；最多等 30 秒确认进程出现，日志写 `out/start-dsh.log`（超 512 KB 滚动）。
+- 新计划任务 `Molly-DSH`：登录触发、延迟 30 秒、交互式 + 非提权（与已知可用的 `Molly-Console` 同形）、
+  `MultipleInstances=IgnoreNew`、`ExecutionTimeLimit=PT0S`；动作用参数 `-WaitSeconds 30`。
+- `tools/watchdog.mjs` 新增 `ensureDsh()` 兜底：**连续两轮查不到进程**才拉起（3 分钟冷却，防拉起后被重复拉）；
+  进程在就只探 `/dsh-qq-whale/state`，端点不通只记日志**绝不重启活着的 DSH**（缓存的旧端口会误杀）。
+- `tools/build-publish.mjs` 白名单补 `tools/start-dsh.ps1`（否则发布版里 watchdog 会 exec 一个不存在的脚本）。
+- `tools/console-server.mjs` 新增 `ensureSidecar()`：控制台发现 19391 不可达时自己补一个 `panel-data.mjs`，
+  30 秒内最多一次，失败只记日志不影响只读接口。
+
+**验证**
+
+- `start-dsh.ps1` 空跑 exit 0，日志「已在运行（8 个进程：…），跳过」；`Parser::ParseFile` 语法 OK。
+- `Molly-DSH` 实测 `LastTaskResult=0`；`watchdog.mjs --once` exit 0，`watchdog-state.json` 出现
+  `dshFails=0 / dshEndpointFails=0 / lastDshAt`，`Molly-Watchdog` 每分钟照跑 `LastTaskResult=0`，没有多余拉起。
+- 链路恢复：23:38:10 用 `SnowLuma-Relogin`（= `snowluma-start.ps1 -QQOnly`，只温和重启 QQ 不动 SnowLuma 进程，
+  避免设备指纹变化逼人重新扫码）重挂后，23:38:42 起恢复收消息，23:39:37 她在 109 群正常回话。
+
+**退回**
+
+```powershell
+Unregister-ScheduledTask -TaskName Molly-DSH -Confirm:$false   # 去掉自启
+```
+代码侧：`git checkout -- tools/watchdog.mjs tools/console-server.mjs tools/build-publish.mjs` 并删掉 `tools/start-dsh.ps1`。
+
+---
+
+## 2026-10-27 · 同群双泳道 + 发送串行 + 模型并发闸门（方案 A，未升版本号）
+
+> 主人 m02421：「不能多加几条链路能同时处理多条吗」
+> 主人 m02427：「A」
+
+**根因（子房连 @ 三次不回，查日志查出来的）**
+
+09:34–09:42 那八分钟，群 666666666 进站 **91 条**，她只发了 18 条。子房有礼了
+09:35:14「查看一下」、09:37:11「申请查看亲密度」、09:38:22「molly不理我」，
+三次 @ 全被晾着，直到 09:41:43 才回「宝宝我在呢，刚跟一桌人抢锅底躲不开」。
+
+不是模型挂了（那段时间每条都是正常 `delivered`，16–30 秒一条），也不是新加的
+「回不过来就兜底」那条路（`/state.stats.modelDownLines` 当时是 4，但都不在这段）。
+真凶是 `lib/engine.js` 里那句：
+
+```js
+if (existing?.phase === 'thinking') { existing.controller.abort() }
+```
+
+`this.jobs` 的 key 是 `conv.key`，**一个群只有一个 job**。她在思考时来了新消息，
+就把手里这轮「作废重来」、改用最新那条——群里刷起来的时候，谁先 @ 谁被后面
+的人顶掉，@ 得越勤越排不上。
+
+**改动**
+
+1. **同群双泳道**（`lib/engine.js`）：job key 从 `conv.key` 改成
+   `conv.key\u0000lane`，分 `targeted`（@我 / 回我 / 私聊）与 `ambient`（群友闲聊）。
+   ambient 内部照旧「新的顶掉旧的」；targeted 只被更新的 targeted 顶掉，
+   不再被围观消息打断。跨群、群与私聊本来就是并行的（key 里带群号/QQ），没动。
+2. **发送串行**：新方法 `serialSend(convKey, fn)`。两条道可以并行生成，但
+   `deliver` 排队——否则两条回复交叉发出，QQ 的引用框会挂到对方那条上
+   （2026-10-25「回复挂错人」就是这类事故）。锁的粒度按会话，不按全局。
+3. **模型并发闸门**：新方法 `modelSlot(signal)` / `releaseModelSlot()`，
+   `callModel()` 外面包一层，原逻辑改名 `callModelUnlocked()`。上限读新配置
+   `modelConcurrency`（默认 **3**）。理由：免费 intl flash 并发一高就空回，
+   当天已经连吃 4 次；排队中被撤回中止会立刻出队，不占坑。
+4. **配套的小修**：
+   - 群名片「正在想」还原前先看 `otherLaneThinking()`——不然 ambient 先回完就撤，
+     targeted 还在打字，群里看着是「名片没闪却突然冒话」；
+   - 撤回消息时的队列清理从取单个 job 改成 `jobsOf()` 遍历所有泳道
+     （只清一条，另一条还会把被撤回的内容说出来）；
+   - 撤回后的「轻回」让路判断改 `hasJobs()`；
+   - `/state.parallel` 新增实时水位：`{jobs, lanes, model:{limit,active,waiting}}`。
+     **要不要继续上真并发（方案 B）就看这两个数**：lanes 长期是 2 说明同群确实在并行；
+     model.waiting 长期 > 0 说明闸门在排队、免费 flash 已经吃不住，这时候不该再加。
+
+**验证**
+
+- `${MOLLY_ROOT}\out\_parallel_lane_check.mjs` **44/44**：泳道归属（含「群号前缀相同不串味」
+  的 666666666 vs 6666666661）、同一会话串行且不同会话互不阻塞、前一条抛错不卡死
+  后面、并发上限与排队、排队中被 abort 立刻出队不占坑、已 abort 的 signal 不排队，
+  外加 12 条源码接线断言（防止只改一半）。
+- `node --check` engine.js / web.js / main.js 全 exit 0。
+- 部署 SHA256 一致（engine `598D5466`、web `96BC4FDE`、main `0A200B05`），
+  `plugin_manager set_plugin include:dsh-qq-whale` 关→开重载一次。
+- 重载后 `/state`：`link=online`、`model.ok=true`、`missing/failed` 空、
+  `parallel={"jobs":1,"lanes":["group:666666666|ambient"],"model":{"limit":3,"active":1,"waiting":0}}`。
+
+**退回**
+
+```bash
+git checkout -- plugin/dsh-qq-whale/lib/engine.js plugin/dsh-qq-whale/lib/web.js plugin/dsh-qq-whale/lib/main.js
+```
+
+只想关掉双泳道、保留其余修复：把 `engine.js` 里的 `lane`/`jobId` 两行改回
+`const existing = this.jobs.get(key)` 与 `this.jobs.set(key, job)` 即可——
+但那样会丢掉「同群并行」，子房那种连续 @ 被顶掉的老毛病会回来。
+只想压并发不拆泳道：配 `modelConcurrency: 1`（等于完全串行）。
+
+---
+
+## 2026-10-27 · 取消「回不过来就不回」：模型链全挂时说一句兜底（未升版本号）
+
+> 主人 m02307：「还是取消回不过来就不回的机制吧」
+
+**根因（三条静默路径，都在 `lib/engine.js` 的 `generate()` / `scheduleReply()` 里）**
+
+1. `generate()` 的 `if (!res)`：主脑、备用脑、trae 全没接住（429 重试用尽、网关 5xx、非限流错误直接放弃）→ 直接 `return null`。
+2. `generate()` 的 `if (parts.length === 0)`：模型回了空正文（带图轮次里思考 token 把输出预算吃光是典型，日志原文「模型返回空内容，沉默」）→ `return null`。
+3. `scheduleReply()` 的 `catch (err)`：整条流程抛错（模型客户端炸了、解析炸了）→ 只写日志，什么都不发。
+
+三条的共同后果：调用方把 `null` 当成「这轮没话可说」，用户看到的是**已读不回 / 像掉线**。
+
+**改动**
+
+- `lib/engine-text.js` 新增 `modelDownLine(rand)`：四句符合人设的短台词（「等等，我刚刚走神了，你再说一遍？」「脑子卡了一下——刚那句我没接住」等），**不解释技术原因**。
+- `lib/engine.js` 新增 `modelDownReply(convKey, { reason })`：把台词包成正常回复对象（`parts/raw/degraded/backend:'model-down-line'/fallbackLine:true`），走原有 `deliver()`，所以历史、节流、打字延迟全部照旧。
+  - 两个刹车：`silentOnModelFail: true` 退回旧的沉默行为；`modelDownNoticeGapMs`（默认 **90000** 毫秒）保证同一个会话 90 秒内只提醒一次——否则模型挂掉的十分钟会把群里刷满「我卡了一下」。
+- 三条静默路径全部改掉：`model-null` / `empty-parts` / `threw`。`stats.modelDownLines` 计数，`/state.stats` 直接能看。
+
+**验证**
+
+- `${MOLLY_ROOT}\out\_model_down_check.mjs` **24/24**：台词池、出话、90 秒节流、跨会话不干扰、`silentOnModelFail` 总开关、`gap=0` 不节流、`splitReply` 空时返回 null 不抛，以及源码里三条路径都已替换、旧文案已删。
+- `node --check` 两个文件 exit 0；部署到 `${HOME}\.dsh\profiles\desktop\node_modules\dsh-qq-whale\lib\`（engine `A07FF4C4`、engine-text `C4C07487`）后关开重载，新快照 `gen-mvq1g81y-tbwrkb` 里能 grep 到 `export function modelDownLine`，`/state.stats.modelDownLines=0`。
+
+**退回**
+
+```powershell
+cd ${MOLLY_ROOT}\qq-whale
+git checkout -- plugin/dsh-qq-whale/lib/engine.js plugin/dsh-qq-whale/lib/engine-text.js
+```
+或临时把配置改成 `silentOnModelFail: true`（不改代码就退回沉默，但保留计数）。
+
+---
+
+## 2026-10-27 · 记忆体系改造：分账号七类 + 阶梯衰减 + 命中记账 + 写入闸门 + 检索预算（未升版本号）
+
+> 主人 m01748：「可以，我还有几个想法你考虑一下：1.模拟艾宾浩斯来逐渐降低权重，按照小数点级下降，但是有下限 2.记忆分账号再分七类储存」
+> 主人 m01812：「建议不要完全按照艾宾浩斯的天数曲线」→ 最终选「每 7 个活跃天掉 0.5」的阶梯，不是日历天指数曲线。
+
+**为什么改（四个根因）**：
+
+1. 一个 `memory.json` 混着 8 种 kind，但尺子只有一把：表情包和「他住广州」抢同一个上下文窗口，
+   还共用同一套权重下限——「梗」本该烂得比「事实」快。
+2. 只有 base weight，没有时间维度：三个月没人问过的 `w10` 和今早刚记的 `w10` 一样重，等于「记了就不会忘」。
+3. 没有命中计数：靠印象判断「这条常不常用」必然系统性偏向遗忘（第 2 篇文章原话：「命中必须有账」）。
+4. 助手自己接话编出来的事能写成事实；检索也没有字数上限，长条目能把窗口吃光。
+
+**改动**：
+
+- **分账号 + 七类分片**：落 `<memoryDir>/<机器人QQ>/<kind>.json`，另有 `index.json` 记条数与活跃天。
+  七类是 `person`（人物）/`address`（称谓）/`promise`（约定）/`fact`（事实）/`preference`（偏好）/`event`（事件）/`meme`（梗与表情）；
+  老 kind 走别名表 `KIND_ALIASES`：`work → event`、`sticker → meme`，读取时自动折算，不丢数据。
+- **老数据自动迁移**：启动时没有 `index.json` 就按老布局读 `memory.json`（明文或整池密文都行），
+  读完立刻按七类写分片，再把老文件改名成 `_legacy-memory.json` 留底（不删）。
+- **阶梯衰减（活跃天制）**：只有「这一天真的聊过天」才 `activeDays + 1`（`touchActivity()`），
+  关机/停机不算时间。有效权重 = `base − floor((闲置活跃天 − 宽限) / 7) × 0.5`，夹在每类下限
+  （约定 5 / 人物 4 / 事实·偏好 3 / 事件·梗 1），称谓恒 10。
+  **只在读取时算、永不写回盘**——盘上只有事实（base、hits、lastActiveDay），衰减是看法，所以没有复利 bug、不需要定时任务。
+- **命中记账**：`recall()` 真正返回给模型的那几条才 `hits+1`、刷新 `lastHitAt`/`lastActiveDay`（相当于复习一次，重新计时）；
+  称谓不记账（每轮无条件注入，记了必然刷满）。一轮对话里多次召回，5 秒内只落一次盘。
+- **写入闸门**：条目带 `source`（`user`/`assistant`/`system`），**助手自述不许写成 `fact`/`person`**，
+  只许 `preference`/`event`/`meme`——挡住「她自己编的经历三天后变成事实」这种污染。
+- **检索预算 + 压缩等级**：`charBudget` 三档 800/1200/1600（small/balanced/large），只决定收哪几条、不改写正文，至少留一条；
+  条目新增 `level`（0 原句 / 1 半句 / 2 一句 / 3 关键词），add/update 都收，检索与 markdown 里会显示 `l0..l3`——
+  **只标记不自动压缩**，压正文必须是显式动作，不能悄悄发生在检索里。
+- **对外契约**：`/memory/add`、`/memory/update` 的 `kind` 认七类和两个老别名；`weight` 仍是 1–10 一位小数；
+  被闸门拒收时返回 400 并说明原因（不是含糊的 500）。
+
+**验证**：
+
+- `${MOLLY_ROOT}\out\_memory_v2_check.mjs` **24/24**：别名归一、宽限 14 天内不掉 / 每 7 天 −0.5 / 掉到下限停、称谓恒 10、
+  命中拉回、七类密文分片落盘与读回、老明文（含 work/sticker）自动迁移并归档、老密文路径、活跃天同日只加一次且重启能回来、
+  `markHits` 跳过称谓、`applyCharBudget` 边界、`recall` 记账、`prune` 按有效权重淘汰。
+- `${MOLLY_ROOT}\out\_memory_api_probe.mjs` **14/14**：`kind=sticker` 折 meme、`kind=work` 折 event、非法 kind 400、`weight=11` 400、
+  `weight=6.5` 可写、`assistant + fact` 被闸门 400、`assistant + meme` 允许、`/memory/list` 字段齐、`/state.memory` 的 `shards` 合计等于 `count`。
+- **线上迁移实测**：1462 条 → `${MOLLY_ROOT}\data\qq-whale\memory\111111111\` 七片
+  （person 127 / address 7 / promise 104 / fact 616 / preference 33 / event 94 / meme 481），`index.json` 与 `/state.memory` 自洽，`broken=false`。
+
+**退回**：
+
+- 代码：`git checkout -- plugin/dsh-qq-whale/lib/memory.js plugin/dsh-qq-whale/lib/engine.js plugin/dsh-qq-whale/lib/web.js console/console.js`，
+  再把部署副本 `${HOME}\.dsh\profiles\desktop\node_modules\dsh-qq-whale\lib\` 三个文件拷回去，禁用/启用插件各一次。
+- 数据：把 `memory\_legacy-memory.json` 改名回 `memory.json`，删掉 `memory\111111111\` 整个目录。
+  **注意**：迁移之后新写的记忆只在分片里，退回会丢这部分（本次迁移到退回之间只有探针写的 1 条，已删）。
+
+---
+
+## 2026-10-27 · 称谓数据两条整改（示例成员F / 甘蓝橘子）
+
+> 主人 m01636：「可以」（同意改这两条）。
+
+**问题**（查「称谓是不是按聊天对象召回」时翻出来的）：
+
+1. `mmvlvdjysnc7f`（qq `987654321` 示例成员F）存的是「他习惯**叫你**「Niki」，要答应」。
+   `addressName` 的 `叫你X` 句式把它抽成了 `Niki`，可 Niki 是**示例成员F对她的称呼**，不是她该叫示例成员F的称呼——
+   方向反了，于是对示例成员F说话她会先叫一声「Niki」。
+2. `mmvlsqejqggf6`（qq `3460113718` 甘蓝橘子）存的是「他**自称**「example-friend」，叫他 example-friend 就行」。
+   2026-10-27 新加的「自称/外号整句判废」把它整条拦掉，结果是**召不回**（本意就想要她叫 example-friend）。
+
+**改动**（只动数据，`POST /memory/update`，代码不变）：
+
+- 示例成员F那条：`kind` 改 `fact`，正文改成「示例成员F习惯喊我「Niki」，那是他对我的叫法；不是我要叫他的称呼。」——不含 `叫你/喊你` 句式，不再被当称谓。
+- 甘蓝橘子那条：正文改成「他希望你叫他「example-friend」。」，仍是 `kind=address`。
+
+**验证**：`out\_address_verify2.mjs` 用真数据重拼 prompt——示例成员F**没有**「# 怎么称呼」段也没有结尾称谓提示；
+甘蓝橘子首行 `- 叫他「example-friend」`、结尾 `这轮开口就要叫对方「example-friend」`；子房有礼了仍是「宝宝」。称谓池从 8 条变 7 条。
+
+**退回**：把这两条按上表原文改回去即可（`kind=address` + 原正文）。
+
+---
+
+## 2026-10-27 · 记忆权重刻度 5 → 10（未升版本号）
+
+> 主人 m01402：「权重等级从 5 改为 10，按比例改动现有记忆权重，运行小数点后一位」；
+> 主人 m01449 补充：「称谓记忆依旧是最高，10」。
+
+### 改动
+
+1. 刻度从 1..5（整数）改成 **1..10（可一位小数）**，老数据整体 **×2**（等比：老默认 3→6、老最高 5→10、老最低 1→2）。
+2. 三处同时等比，保证排序结果与改前完全等价：
+   - **数据** ×2（1439 条全量迁移）；
+   - **代码默认值** ×2（`memory.js` 的 `WEIGHT_DEFAULT = 6`、`web.js` 的 `/memory/add` 默认值、`engine.js` 里 14 处写死的 `weight: 2/3/4` → `4/6/8`）；
+   - **召回打分系数** `0.3 → 0.15`（`memory.js` 里 `s += clampWeight(e.weight) * 0.15`）。
+     只改上限不动系数的话，所有老条目会凭空重一倍；只改数据不动系数的话，分数整体翻倍会盖过关键词命中。
+3. **称谓（kind=address）一律钉死 10**：`add()` / `update()` 里强制 `weight = WEIGHT_MAX`。
+   称谓不参与普通召回、每轮无条件注入，权重只用来决定「同一个人多条称谓谁排第一行」，所以永远给它最高档。
+4. 新增导出 `WEIGHT_MIN / WEIGHT_MAX / WEIGHT_DEFAULT / clampWeight()`，`web.js`、`console.js` 统一走它，
+   校验口径：**1..10 的数字，最多一位小数**（服务端 `parseWeight` 与前端表单提示一致）。
+5. 控制台表单：`权重（1–10，一位小数，越高越常被想起）`，`min=1 max=10 step=0.1`，默认值 6。
+
+### 验证
+
+- `lib/{clock,memory,engine-context,engine,web}.js` 全部 `node --check` 通过。
+- 部署快照 `gen-mvpzlwx3-xyw857` 里 `WEIGHT_MAX`×6、`clampWeight`×8、`1~10`×3 均在位；插件已关→开重载（`reloadAt=1793063325979`）。
+- `out\_scale_weights_verify.mjs` **8/8**：`clampWeight` 边界（0→1、11→10、3.14→3.1、6.04→6、NaN→6）、1439 条权重全在 1..10 且最多一位小数、8 条称谓全部 10。
+- 迁移后分布：`address/w10×8  fact/w6×586  fact/w8×5  fact/w10×3  meme/w6×6  person/w6×111  person/w8×11  person/w10×4  preference/w6×21  preference/w8×12  promise/w6×102  promise/w10×1  sticker/w4×469  work/w6×94`。
+- 迁移脚本自带防呆：`out\_scale_weights_data.done.json` 落了章，再跑 `--apply` 会直接 exit 2（要重来必须 `--force`）。
+
+### 退回
+
+- 代码：`git checkout -- plugin/dsh-qq-whale/lib/{memory,web,engine}.js console/console.js`。
+- 数据：把 1439 条权重 ÷2（称谓回到 5），再把 `memory.js` 的 `WEIGHT_DEFAULT` 改回 3、打分系数改回 `0.3`。
+  没有自动回滚脚本——**回滚前先备份 `data/qq-whale/memory/memory.json`**。
+
+---
+
+## 2026-10-27 · 认人/报时/夜间语气：三条现场投诉的补丁（未升版本号）
+
+> 主人 m01226：「做完的时候，molly 1.不叫 子房有礼了 宝宝，还把 mndnbd 认成茶茶
+> 2.问她时间回答的不是北京时间 3.感觉鱼崽们晚上会一直吵着睡觉很不耐烦」。
+
+三条是三个不同的病，根因分别落在**数据**、**提示词位置**、**提示词措辞**上：
+
+**① 把 333333333（示例管理员）叫成「茶茶」——数据错，不是模型糊涂**
+
+- 现场：`snowluma-2026-10-27.log` 00:35:04 群里问「我是谁」→ 00:35:36 她答
+  「你是茶茶啊，号我记着呢，333333333」；00:38:31 私聊又答「茶茶啊，还能是谁」。
+  而茶茶是群里另一个人（`987654321`）。
+- 根因：`333333333` 名下**两条 kind=address、权重都是 4**：
+  `[10-23 23:46] 他希望你叫他「宝宝」；他喜欢跟你撒娇`
+  `[10-25 18:42] 他自称「茶茶」，可以直接叫他茶茶`
+  `memory.js:744 addressOf()` 先按 weight、同权重按 at 新→旧，10-25 那条排第一，
+  而 `engine-context.js` 的规矩是「同一人多条以第一行为准」。
+  `addressName()` 之所以认下它：句子后半截确实写着「可以直接叫他茶茶」，
+  它只看句式，看不出前半截的「自称」是"他自己这么叫自己"、不是"你要这么叫他"。
+- 改动：
+  - `lib/memory.js addressName()`：整句命中 `自称|自封|外号` 就直接判废，不进称谓。
+  - 现场数据：把那条降级成 `kind=fact`，文字改成「他开玩笑时会自称「茶茶」，
+    那不是要你这样叫他；正经称呼见另一条「宝宝」。」；把「宝宝」那条权重提到 5。
+    （走 `POST /memory/update`，没动 memory.json 的其它 1433 条。）
+
+**② 「子房有礼了」不叫宝宝——数据是对的，位置输了**
+
+- 现场：00:36:52 / 00:40:40 她开口都是「子房……」，而他名下明明有一条
+  `w=5 他希望你叫他「宝宝」，每次开口就要叫，不用等他提醒`。
+- 根因：称谓段在 system prompt 偏前（`engine-context.js:153`），群聊这一轮后面还压着
+  记忆/名册/表情包/活动，模型真正照做的是最靠近结尾的指令。
+- 改动：`engine-context.js` 在 `# 刚刚你在` 之后新增 `# 开口前再确认` 段（只两行、
+  不新增事实），把「这轮要叫对方「X」」和「现在是几点」各念一遍；
+  另外 `lib/engine.js` 新增 `addressLabel(qq, who)`，`memberRoster()` 每行末尾
+  挂 `（你要叫他「宝宝」）`——把「这个人→这么叫」变成查表，不用她回忆。
+
+**③ 说「快三点」而真实是 0 点半——她在附和群友，不是时钟坏了**
+
+- 现场：00:27:27 大肥鱼说「一点半了」→ 00:27:43 她「老大说得对，都快一点半了」；
+  00:29:58 有人喊「快三点了」→ 00:30:21 她「三点就三点」。五分钟里把 0 点报成 3 点。
+- 根因：`clockSection()` 只写了「有人问几点就按这个答」，**没写「别人说的点数不算数」**，
+  群聊里的错误点数直接盖过那一行。
+- 改动：`lib/clock.js clockSection()` 加两条硬规矩——「群里别人说的点数一律不算数」
+  和「有人报错了就直接说「才 HH:mm」，别跟着往上加、别附和对对对」。
+  结尾的「开口前再确认」也重复一次时间。
+
+**④ 半夜被催睡时不耐烦——「简短」被读成了「冲」**
+
+- 改动：`engine-context.js` 睡眠窗提示后补一句：「有人缠着你睡前讲故事、或者一直催睡：
+  可以推掉、可以先溜，但别冲人发火、别甩脸色、别嫌他们烦——困归困，话要软。」
+
+**验证**
+
+- `${MOLLY_ROOT}\out\_molly_fix_check.mjs` 16/16：addressName 新规矩 / addressOf 排序 /
+  clockSection 硬规矩 / 结尾段顺序与内容 / 名册称谓后缀。
+- `${MOLLY_ROOT}\out\_molly_fix_check_deployed.mjs` 5/5：直接 import **gen 快照目录**
+  （`gen-mvpyvhgg-s6pl9u`）里的那份代码跑，证明「加载的不是源码那份副本」也带上了改动。
+- 现场核对：`POST /memory/update` 后 `/memory/list` 里 `333333333` 只剩一条 address
+  （「宝宝」w=5），`222222222` 仍是 `w=5「主人」`，`888888888` 仍是 `w=5「宝宝」`。
+- 生效方式：`plugin_manager set_plugin include:dsh-qq-whale` 关→开（8:48:12 生成新快照），
+  `/state` 复核 `link=online`、`model.ok=true`、`plugins.missing/failed` 均为空。
+
+**退回**
+
+- 代码：`git checkout -- plugin/dsh-qq-whale/lib/{clock,memory,engine-context,engine}.js`
+  （四个文件），再复制到 `${HOME}\.dsh\profiles\desktop\node_modules\dsh-qq-whale\lib\`。
+- 数据：把 `mmvnp8c2da4mw` 改回 `kind=address`、`mmvl56o30joct` 权重改回 4 即可复原
+  （改之前的两条原文见上面「根因」）。
+
+---
+
 ## 2026-10-26 · v1.1.5-A-Hotfix.1：抽奖房间落盘 + 群里 `#molly` 在线状态修复
 
 > 主人 m00343：「把更新的东西推 v1.1.5A 的第一个热修复」。

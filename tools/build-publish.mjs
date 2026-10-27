@@ -50,6 +50,9 @@ const FILES = [
   // 插件自带的挂载补丁：package.json 的 dsh.bundle.patch 指向它，
   // 缺了它「按仓库装插件」只装代码、不挂载（2026-10-21 补进白名单）
   ['plugin/dsh-qq-whale/cordis.patch.yml', 'plugin/dsh-qq-whale/cordis.patch.yml'],
+  // 2026-10-26：插件子目录自己的 README —— npm 包页面和插件商店卡片都读它。
+  // 白名单是显式列举的，不登记的话下一次「白名单复制」会把它当孤儿删掉（同 CONTRIBUTING.md 的教训）。
+  ['plugin/dsh-qq-whale/README.md', 'plugin/dsh-qq-whale/README.md'],
   // pest 独立包的三份清单（lib/ 由 DIRS 递归带走）
   ['plugin/dsh-qq-pest/package.json', 'plugin/dsh-qq-pest/package.json'],
   ['plugin/dsh-qq-pest/cordis.patch.yml', 'plugin/dsh-qq-pest/cordis.patch.yml'],

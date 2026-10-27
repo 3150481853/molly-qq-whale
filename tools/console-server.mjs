@@ -106,13 +106,15 @@ const CONSOLE_DIR = pick(
 );
 const OUT = pick('MOLLY_OUT_DIR', 'outDir', path.join(ROOT, 'out')); // watchdog 日志/状态、二维码
 const TOOLS = path.join(ROOT, 'tools');
+// 看板数据服务（19391）的入口：控制台发现它不可达时会尝试拉起（2026-10-27，重启后常见“数据服务 19391 不可达”）
+const PANEL_DATA_JS = path.join(TOOLS, 'panel-data.mjs');
 // 监听地址：默认只听本机回环（默认值不变）；要对外网卡开放设 MOLLY_CONSOLE_HOST=0.0.0.0
 const HOST = pick('MOLLY_CONSOLE_HOST', 'host', '127.0.0.1');
 const PORT = Number(pick('MOLLY_CONSOLE_PORT', 'port', 19392)) || 19392;
 // 控制台版本：以插件 package.json 为唯一真源，别在这里写死（2026-10-25 主人 m03522：
 // 左下角一直显示 v1.0.0 就是这一行写死的；发布版本与插件版本从此自动同步）。
 // exe 模式读不到 package.json 时退回 FALLBACK_VERSION，保证打包版也有版本号。
-const FALLBACK_VERSION = '1.1.5-A-Hotfix.1';
+const FALLBACK_VERSION = '1.1.6-preview.2';
 const VERSION = (() => {
   try {
     const pkg = JSON.parse(
@@ -135,6 +137,26 @@ const stripSlash = (s) => String(s || '').trim().replace(/\/+$/, '');
 
 // 数据服务（只读，已在跑，别动它）
 const SIDECAR = stripSlash(pick('MOLLY_SIDECAR', 'sidecar', 'http://127.0.0.1:19391'));
+
+// 数据服务自愈（2026-10-27）：重启后没人拉起 panel-data.mjs 时，控制台主动补一个。
+// 30 秒内最多尝试一次；失败只记日志，不影响只读接口。
+let sidecarSpawnAt = 0;
+function ensureSidecar(reason) {
+  if (Date.now() - sidecarSpawnAt < 30000) return;
+  sidecarSpawnAt = Date.now();
+  try {
+    const child = spawn(process.execPath, [PANEL_DATA_JS], {
+      cwd: ROOT,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    child.unref();
+    console.log(`[console] 数据服务不可达（${reason || 'unknown'}），已尝试拉起 panel-data.mjs (pid ${child.pid})`);
+  } catch (e) {
+    console.log('[console] 拉起 panel-data.mjs 失败：' + (e && e.message ? e.message : e));
+  }
+}
 // NapCat WebUI（需 JWT 鉴权，见契约 §6）——2026-10-22 起仅作回滚后端展示
 const NAPCAT = stripSlash(pick('MOLLY_NAPCAT', 'napcat', 'http://127.0.0.1:6099'));
 // SnowLuma OneBot HTTP（P2 迁移后的主后端）。token 与 watchdog-config.json 的 snowluma.token 一致。
@@ -521,8 +543,17 @@ async function buildOverview() {
     }
   }
 
-  // 2) 数据服务（19391，只读，别动它）
-  const sd = await jget(`${SIDECAR}/api/all`, 1500);
+  // 2) 数据服务（19391，只读，别动它）；不可达时顺手拉起一次再重试
+  let sd = await jget(`${SIDECAR}/api/all`, 1500);
+  if (!sd.ok) {
+    ensureSidecar(sd.error);
+    // panel-data 从 spawn 到 listen 通常 1–2 秒，单次 700ms 重试往往抢不到；分三档等
+    for (const wait of [700, 900, 1200]) {
+      await new Promise((r) => setTimeout(r, wait));
+      sd = await jget(`${SIDECAR}/api/all`, 2500);
+      if (sd.ok) break;
+    }
+  }
   if (!sd.ok) {
     out.sidecar = { reachable: false, error: sd.error };
   } else {
@@ -1367,14 +1398,24 @@ async function route(req, res) {
 
   // 记忆（契约 §3.4）—— 透传 sidecar，前端按 {groups:[{name,items:[{date,tag,text}]}]} 渲染
   if (p === '/api/memory') {
-    const r = await jget(SIDECAR + '/api/memory', 5000);
+    let r = await jget(SIDECAR + '/api/memory', 5000);
+    if (!r.ok) {
+      ensureSidecar(r.error);
+      await new Promise((x) => setTimeout(x, 700));
+      r = await jget(SIDECAR + '/api/memory', 5000);
+    }
     if (!r.ok) return sendJson(res, 200, { ok: false, reachable: false, count: 0, groups: [], error: r.error });
     return sendJson(res, 200, Object.assign({ ok: true, reachable: true }, r.data || {}));
   }
 
   // 表情包列表（契约 §3.5）—— 透传 sidecar，前端按 {count,items} 渲染
   if (p === '/api/stickers') {
-    const r = await jget(SIDECAR + '/api/stickers', 5000);
+    let r = await jget(SIDECAR + '/api/stickers', 5000);
+    if (!r.ok) {
+      ensureSidecar(r.error);
+      await new Promise((x) => setTimeout(x, 700));
+      r = await jget(SIDECAR + '/api/stickers', 5000);
+    }
     if (!r.ok) return sendJson(res, 200, { ok: false, reachable: false, count: 0, items: [], error: r.error });
     return sendJson(res, 200, Object.assign({ ok: true, reachable: true }, r.data || {}));
   }

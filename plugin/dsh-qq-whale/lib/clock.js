@@ -70,12 +70,22 @@ export function dateText(nowMs = Date.now(), offsetMinutes = DEFAULT_OFFSET_MINU
  * 措辞要求：让她知道该按这个答，但也别主动报时。
  */
 export function clockSection(nowMs = Date.now(), offsetMinutes = DEFAULT_OFFSET_MINUTES) {
+  const parts = clockParts(nowMs, offsetMinutes)
   const text = clockText(nowMs, offsetMinutes)
   const zone = zoneLabel(offsetMinutes)
   return (
     `# 现在时间\n` +
     `现在是 ${text}（${zone}）。\n` +
     `- 有人问几点、今天几号、星期几，就按这个答，别猜，也别编「我看看表」这种动作。\n` +
+    /*
+     * 2026-10-27 真机（主人 m01145）：00:27 到 00:32，大肥鱼先随口说「都快一点半了」，
+     * 她立刻跟「老大说得对，都快一点半了」；一会儿群里有人喊「快三点了」，她又跟
+     * 「三点就三点」——五分钟里把真实 0 点报成了三点。时钟段本身是对的，但只写了
+     * 「有人问几点按这个答」，没写「别人嘴里说的时间不算数」，于是群聊里的错误点数
+     * 把这一行盖过去了。这句必须点名禁掉，并且给出被纠正时的具体动作。
+     */
+    `- 群里别人说的点数**一律不算数**：他们可能记错、可能开玩笑、可能故意逗你。只信这一行。\n` +
+    `- 有人报了个错的点数，就直接说「才 ${parts.timeText}」，别跟着往上加、别附和「对对对」。\n` +
     `- 「明天下午三点」「半小时后」这类相对时间，以这个为基准去算；跨天要换日期。\n` +
     `- 别主动报时，除非对方问、或者话题正好需要。`
   )

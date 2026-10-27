@@ -125,12 +125,19 @@ export function buildSystemPrompt(input, deps) {
      */
     if (deps.config?.timeContextEnabled !== false) {
       sp += `\n\n${clockSection(deps.now ? deps.now() : Date.now(), deps.config?.timeOffsetMinutes ?? 480)}`
-  if (deps.config?.sleepEnabled !== false) {
-    const sleepParts = clockParts(deps.now ? deps.now() : Date.now(), deps.config?.timeOffsetMinutes ?? 480)
-    if (inClockWindow(sleepParts, deps.config?.sleepStart ?? '23:50', deps.config?.sleepEnd ?? '09:00')) {
-      sp += '\n\n（现在是你的睡觉时间，你正在睡觉：被直接叫到才回一句短的，别主动找话题，也别宣布「我要睡了 / 我去睡了」。）'
     }
-  }
+    if (deps.config?.sleepEnabled !== false) {
+      const sleepParts = clockParts(deps.now ? deps.now() : Date.now(), deps.config?.timeOffsetMinutes ?? 480)
+      if (inClockWindow(sleepParts, deps.config?.sleepStart ?? '23:50', deps.config?.sleepEnd ?? '09:00')) {
+        sp += '\n\n（现在是你的睡觉时间，你正在睡觉：被直接叫到才回一句短的，别主动找话题，也别宣布「我要睡了 / 我去睡了」。）'
+        /*
+         * 2026-10-27 主人 m01226 第三条：「感觉鱼崽们晚上会一直吵着睡觉很不耐烦」。
+         * 原来只写了「回一句短的」，结果短被模型执行成了「冲」——有人缠着要睡前故事，
+         * 她的回话带着明显的不耐烦。困是真的，但语气不能跟着困劲儿走，
+         * 所以把「可以推掉」和「不许发火」分开写，别让「简短」被读成「爱答不理」。
+         */
+        sp += '\n（有人缠着你睡前讲故事、或者一直催「快睡」「几点了还不睡」：可以推掉、可以先溜，但别冲人发火、别甩脸色、别嫌他们烦——困归困，话要软。）'
+      }
     }
 
     /*
@@ -146,8 +153,15 @@ export function buildSystemPrompt(input, deps) {
      * 已经把自称/外号全筛掉了）。没写到的，用群名片或者「你」，不许自己编。
      */
     const addrItems = typeof deps.memory.addressOf === 'function' ? deps.memory.addressOf({ who: userName, qq, limit: 8 }) : []
+    /*
+     * 2026-10-27：称谓抽成数组提到外面，好让结尾的「开口前先确认」再念一遍。
+     * 群聊里她的最近因远大于开头几百字——同一个「宝宝」写在开头她当背景音，
+     * 写在结尾才当命令。这不是玄学，00:37 她回子房有礼了时开场就叫「子房」，
+     * 而提示词开头明明写着「叫他「宝宝」」。
+     */
+    const addrNames = addrItems.map((e) => String(e.name || '').trim()).filter(Boolean)
     if (addrItems.length) {
-      const names = addrItems.map((e) => String(e.name || '').trim()).filter(Boolean)
+      const names = addrNames
       if (names.length) {
         sp +=
           '\n\n# 怎么称呼\n' +
@@ -279,6 +293,30 @@ export function buildSystemPrompt(input, deps) {
 
     // 当前活动（给主动消息和"在干嘛"一个由头）
     sp += `\n\n# 刚刚你在\n${deps.pickActivity()}`
+
+    /*
+     * 开口前再确认（2026-10-27，主人 m01226 三条投诉的收尾补丁）。
+     *
+     * 现象：同一个「宝宝」在提示词开头写了整整一段硬要求，她 00:37 回
+     * 子房有礼了 时还是开口就喊「子房」；时钟段也一样——开头写了「现在是
+     * 0 点 27」，00:27 大肥鱼一喊「都快一点半了」她就跟着说一点半。
+     *
+     * 原因不在内容，在位置：群聊这一轮动辄几万字历史 + 名册 + 记忆，
+     * 开头那几百字被当成背景音，模型真正照做的是**最靠近结尾**的指令。
+     * 所以把这两条最能翻车的东西在结尾再念一遍，短、硬、只念一遍。
+     * 内容与开头并不矛盾（同一个数据源），不额外增加事实，只改位置。
+     */
+    const tailTips = []
+    if (deps.config?.timeContextEnabled !== false) {
+      const tp = clockParts(deps.now ? deps.now() : Date.now(), deps.config?.timeOffsetMinutes ?? 480)
+      tailTips.push(`现在是 ${tp.timeText}（北京时间）。别人说的点数一律不算数，被问就按这个答。`)
+    }
+    if (addrNames.length > 0) {
+      tailTips.push(`这轮开口就要叫${addrNames[0] === userName ? '他' : '对方'}「${addrNames[0]}」，每句都带上，别改用名册上的名字。`)
+    }
+    if (tailTips.length > 0) {
+      sp += `\n\n# 开口前再确认\n${tailTips.map((t) => `- ${t}`).join('\n')}`
+    }
 
     /*
      * 提示词落盘（只在 config.debugSystemPromptPath 配了路径时启用）。

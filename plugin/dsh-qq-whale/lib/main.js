@@ -172,6 +172,15 @@ export const DEFAULTS = {
   // 再往上（2048+）单条回复会明显变长，QQ 里读起来像小作文，成本也翻倍。
   maxTokens: 1536,
   temperature: 0.85,
+  /*
+   * 全局模型并发上限（2026-10-27，主人 m02427 选方案 A 时的配套）。
+   *
+   * 同一个群拆成 targeted / ambient 两条泳道之后，同一时刻可能有 2~3 个请求在飞。
+   * 免费 intl flash 并发一高就空回（当天连吃 4 次「回不过来」），所以设个闸门：
+   * 超出的请求排队，不丢；被撤回中止会立刻出队。
+   * 1 = 退回完全串行（只在模型特别不稳时这么配）。
+   */
+  modelConcurrency: 3,
   reasoningEffort: '',
 
   // —— 网关（wb-proxy 后端）——
@@ -399,13 +408,14 @@ export const DEFAULTS = {
 
   // —— 记忆 ——
   memoryLimit: 800,  // 除了规则匹配（"我叫X""我喜欢Y"），每隔一阵子让模型自己判断该记什么。
-  // 记忆池容量（2026-10-23 主人 m00608：400 条已经满了，要求扩到 2000）。
-  // 跟上面那个「抽取节流」是两回事：这个是 memory.json 里最多存多少条，
-  // 满了才会按 weight/时间剪老记忆。engine 里传给 MemoryStore，不传就退回 400。
-  memoryPoolLimit: 2000,
-  // 记满后自动扩容的上限（2026-10-23 主人 m00709：先扩到 2000，真记满了再扩到 1w）。
-  // 0 = 不自动扩。扩容状态落在 data/memory/memory-pool.json，重启不会缩回。
-  memoryPoolMax: 10000,
+  // 记忆库容量（2026-10-23 主人 m00608：400 条已经满了，要求扩到 2000；
+  // 2026-10-27 主人 m02845：发布前直接给到 5 万条）。
+  // 跟上面那个「抽取节流」是两回事：这个是记忆库里最多存多少条，
+  // 满了才会按有效权重/时间剪老记忆。engine 里传给 MemoryStore。
+  memoryPoolLimit: 50000,
+  // 容量上限（2026-10-23 主人 m00709：原本允许记满后再扩到 1w；m02845 把上限也钉在 5 万）。
+  // 0 = 不自动扩。扩容状态落在记忆库目录下的 memory-pool.json，重启不会缩回。
+  memoryPoolMax: 50000,
   // 记忆池加密（m00709 第 3 条）：整池 AES-256-GCM 落盘，memory.md 也转成 memory.md.enc。
   // 只有排查问题才该关掉——加密是主人明确要求的行为，默认开。
   memoryEncrypt: true,
@@ -811,6 +821,7 @@ function _configShapeReference(Schema) {
     spareLimitEnabled: s.boolean().default(DEFAULTS.spareLimitEnabled).description('备用脑是否受日积分限制'),
     spareDailyCap: s.natural().default(DEFAULTS.spareDailyCap).description('备用脑每日积分上限（默认 500 分，不是次数）'),
     maxTokens: s.natural().default(DEFAULTS.maxTokens),
+    modelConcurrency: s.natural().default(DEFAULTS.modelConcurrency),
     temperature: s.number().default(DEFAULTS.temperature),
     reasoningEffort: s.string().default(DEFAULTS.reasoningEffort),
     fallbackEnabled: s.boolean().default(true).description('【预留·当前未接线】engine.js 只构造了 this.fallback，全文件没有调用点，改了不生效。限流最后一层是「说一句人话」；想接着聊请用备用脑 spareModel 或 traeProvider/traeModel'),

@@ -195,6 +195,14 @@ SnowLuma 的版本、Hook 与 QQ 客户端的匹配关系与 DSH 无关，按它
 
 ### 2 · 把插件挂进 DSH profile
 
+**最快的一条路**：不用 clone 仓库，直接从 GitHub 装源码（DSH 桌面版的 profile 默认叫 `desktop`）：
+
+```powershell
+dsh plugin --profile desktop add "github:222222222/molly-qq-whale#path:/plugin/dsh-qq-whale"
+```
+
+装完仍需写好 `cordis.patch.yml`（见下面第 2 点）。**不想用命令行**的话，照下面的手动做法走。
+
 ```powershell
 # 假设仓库在 D:\molly-qq-whale，profile 名为 desktop（DSH 桌面版默认叫这个）
 $pdir = "$env:USERPROFILE\.dsh\profiles\desktop\node_modules"

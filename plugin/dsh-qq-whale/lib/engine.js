@@ -230,6 +230,8 @@ export class ChatEngine {
      * `memoryLimit: 800` 那个老键根本没人读（死配置）→ 池子永远是 400 条。
      * 现在：初始 2000 条（memoryPoolLimit），记满了自动扩到 10000（memoryPoolMax），
      * 扩容状态写在 memory-pool.json（重启不缩回），真到 10000 才按 weight/时间淘汰。
+     * 2026-10-27 主人 m02845：发布前把两者都钉到 5 万条（memoryPoolLimit/Max: 50000），
+     * 也就是先攒到 5 万，满了才按「有效权重 + 活跃天」淘汰。
      *
      * 加密（m00709 第 3 条）：memoryEncrypt !== false 时整池 AES-256-GCM 落盘，
      * 密钥在 memoryKeyFile（默认 ${MOLLY_ROOT}\keys\memory.key，**不在记忆目录里**，
@@ -241,6 +243,13 @@ export class ChatEngine {
       logger,
       limit: Number(config.memoryPoolLimit) || 2000,
       growTo: Number(config.memoryPoolMax) || 0,
+      /*
+       * 账号维度（2026-10-27 主人 m01748 第 2 条「记忆分账号再分七类储存」）：
+       * 传机器人自己的 QQ，记忆落 `<memoryDir>/<selfId>/<kind>.json`。
+       * 现在只有一个号（111111111），先按账号分好目录，将来一个进程带两个号
+       * 也不会串库。selfId 拿不到（还没登录）时落 memory/default/，等拿到后再迁。
+       */
+      account: this.selfId,
       crypt:
         config.memoryEncrypt === false
           ? null
@@ -361,6 +370,11 @@ export class ChatEngine {
       stickerFallback: 0,
       unmatched: 0,
       sprinkled: 0,
+      /*
+       * 模型没接住、改说兜底台词的次数（2026-10-27，主人 m02307
+       * 「还是取消回不过来就不回的机制吧」）。0 是常态；>0 说明模型链在抖。
+       */
+      modelDownLines: 0,
       // 戳一戳（2026-10-23，主人 m01231）：收到几次、反戳几次、说话几次、气几次
       pokeReceived: 0,
       pokeBack: 0,
@@ -630,8 +644,24 @@ export class ChatEngine {
 
     /** conversationKey -> 会话状态 */
     this.conversations = new Map()
-    /** 每个会话的进行中任务，用于"新消息打断旧回复" */
+    /**
+     * 每个会话的进行中任务，用于「新消息打断旧回复」。
+     *
+     * 2026-10-27（主人 m02427 选方案 A）：key 从 `conv.key` 改成
+     * `conv.key\u0000lane`，同一个群里拆成两条泳道——
+     *   targeted（@我 / 回我 / 私聊）：围观消息顶不掉它；
+     *   ambient （群友之间闲聊）：照旧，后来的顶掉前面的。
+     * 跨群、群与私聊之间本来就是并行的（key 里带群号/QQ），没变。
+     */
     this.jobs = new Map()
+    /** 发送串行化：conv.key -> 队尾 promise，保证同一会话的气泡不交叉 */
+    this.sendChains = new Map()
+    /** 模型并发闸门：全局同时在飞的模型请求上限 */
+    this.modelSlots = {
+      limit: Math.max(1, Number(config.modelConcurrency) || 3),
+      active: 0,
+      waiters: [],
+    }
 
     /**
      * 已撤回消息（message_id -> 撤回时间戳，10 分钟 TTL）。
@@ -1756,16 +1786,19 @@ export class ChatEngine {
 
     let aborted = false
     let dropped = 0
-    const job = key ? this.jobs.get(key) : null
-    if (job) {
-      dropped = recallUtil.filterPending(job, mid)
+    /*
+     * 双泳道（2026-10-27）：一个会话可能同时有 targeted 和 ambient 两个 job，
+     * 撤回必须把两条道都照顾到——只清一条，另一条还会把被撤回的内容说出来。
+     */
+    for (const job of (key ? this.jobsOf(key) : [])) {
+      dropped += recallUtil.filterPending(job, mid)
       if (String(job.triggerMid || '') === mid) {
         if (job.phase === 'thinking') {
           try {
             job.controller?.abort?.()
           } catch {}
           aborted = true
-          this.traceReply(String(key), 'aborted', { where: 'recall' })
+          this.traceReply(String(key), 'aborted', { where: 'recall', lane: job.lane || '' })
         }
         /*
          * phase === 'sending' 时不硬停：第一个气泡已经落地，硬停会留下半截话，
@@ -1828,8 +1861,8 @@ export class ChatEngine {
         const conv = key ? this.conversations.get(key) : null
         // 撤回之后对方又发了新的：以新消息为准，不插嘴
         if ((conv?.lastUserAt || 0) > baselineUserAt) return
-        // 她正在处理这个会话的别的消息：别打断
-        if (key && this.jobs.get(key)) return
+        // 她正在处理这个会话的别的消息：别打断（两条泳道任一在忙都算）
+        if (key && this.hasJobs(key)) return
         // 撤回的那条不是最近说话的人发的（群里别人撤回）：当没看见
         if (author && conv?.lastUserId && author !== String(conv.lastUserId)) return
         const target =
@@ -2595,7 +2628,7 @@ export class ChatEngine {
    *
    * @returns {object|null} 入库的 entry；被拦住返回 null
    */
-  remember({ kind = 'fact', who = '', qq = '', text = '', weight = 3 } = {}) {
+  remember({ kind = 'fact', who = '', qq = '', text = '', weight = 6 } = {}) {
     const t = String(text || '').trim()
     if (!t) return null
     const verdict = judge({ text: t, kind, who, qq, existing: this.memory.entries })
@@ -3230,7 +3263,7 @@ export class ChatEngine {
         kind: 'sticker',
         who: '',
         text: `学到了表情包：${names}`,
-        weight: 2,
+        weight: 4,
       })
       // 学完立刻让模型知道图库变大了——下次生成时会带新的目录
     }
@@ -3925,7 +3958,7 @@ export class ChatEngine {
       who: userName,
       qq: String(ev.user_id || ''),
       text: `我帮他做过：${task.slice(0, 60)}${result.ok ? '' : '（失败）'}`,
-      weight: 3,
+      weight: 6,
     })
 
     return result
@@ -3941,9 +3974,109 @@ export class ChatEngine {
    *     这时新消息只是排到本轮结束后再处理，否则会出现两轮回复交错、同一句话发两遍。
    *   - 旧任务正在收尾（发完最后一个气泡）→ 直接起新任务。
    */
+  /** 同一个会话的所有泳道（jobs 的 key 是 `conv.key\u0000lane`）。 */
+  jobsOf(key) {
+    const k = String(key || '')
+    if (!k) return []
+    const out = []
+    for (const [id, job] of this.jobs) {
+      if (id === k || id.startsWith(k + '\u0000')) out.push(job)
+    }
+    return out
+  }
+
+  /** 这个会话还有活没干完吗（撤回后的轻回用它让路）。 */
+  hasJobs(key) {
+    return this.jobsOf(key).length > 0
+  }
+
+  /**
+   * 除了 selfJob 之外，这个会话还有别的泳道在想吗。
+   *
+   * 群名片「正在想」是布尔量，两条泳道并行时不能一条回完就撤：
+   * 那条还在想，名片一撤，群里看着就是「她没在打字却突然冒话」。
+   */
+  otherLaneThinking(convKey, selfJob) {
+    return this.jobsOf(convKey).some((j) => j !== selfJob && j.phase === 'thinking')
+  }
+
+  /**
+   * 发送串行化：同一个会话的气泡一条一条来。
+   *
+   * 双泳道并行**生成**没问题，但不能并行 **deliver**——两条回复交叉发出，
+   * QQ 的引用框会挂到对方那条上（2026-10-25「回复挂错人」就是这类事故）。
+   * 所以这里只锁「发」这一小段，锁的粒度按会话，不按全局。
+   */
+  serialSend(convKey, fn) {
+    const k = String(convKey || '')
+    const prev = this.sendChains.get(k) || Promise.resolve()
+    const run = prev.then(() => fn())
+    const tail = run.catch(() => {})
+    this.sendChains.set(k, tail)
+    tail.then(() => {
+      if (this.sendChains.get(k) === tail) this.sendChains.delete(k)
+    })
+    return run
+  }
+
+  /**
+   * 模型并发闸门的入场券（2026-10-27，方案 A 配套）。
+   *
+   * 拆了双泳道之后，同一时刻可能有 2~3 个模型请求在飞，而免费 intl flash
+   * 并发一高就空回（当天 09:40 前后连吃 4 次）。闸门只限制「同时在飞」，
+   * 不改单次请求的重试/降级——排队期间被撤回中止也能立刻出队，不占坑。
+   */
+  async modelSlot(signal) {
+    const s = this.modelSlots
+    if (s.active >= s.limit) {
+      await new Promise((resolve, reject) => {
+        const waiter = { resolve: () => {}, onAbort: null }
+        const cleanup = () => {
+          if (signal && waiter.onAbort) signal.removeEventListener('abort', waiter.onAbort)
+        }
+        waiter.resolve = () => {
+          cleanup()
+          resolve()
+        }
+        if (signal) {
+          waiter.onAbort = () => {
+            const i = s.waiters.indexOf(waiter)
+            if (i >= 0) s.waiters.splice(i, 1)
+            cleanup()
+            reject(Object.assign(new Error('模型并发闸门：已中止'), { code: 'ABORT_ERR' }))
+          }
+          if (signal.aborted) {
+            waiter.onAbort()
+            return
+          }
+          signal.addEventListener('abort', waiter.onAbort, { once: true })
+        }
+        s.waiters.push(waiter)
+      })
+    }
+    s.active += 1
+  }
+
+  releaseModelSlot() {
+    const s = this.modelSlots
+    s.active = Math.max(0, s.active - 1)
+    const next = s.waiters.shift()
+    if (next) next.resolve()
+  }
+
   async scheduleReply({ ev, norm, scene, conv, userName, groupName, mood }) {
     const key = conv.key
-    const existing = this.jobs.get(key)
+    /*
+     * 双泳道（2026-10-27，主人 m02427 选方案 A）：
+     *   targeted = 明确在跟她说话（@我 / 回我 / 私聊）——不被围观消息顶掉；
+     *   ambient  = 群友之间的闲聊——照旧，新消息顶掉旧的。
+     * 两条道各自生成、各自排队；发送在 serialSend 里串行，气泡不会交叉。
+     * 起因：09:35–09:38 子房连 @ 她三次都没回——不是模型挂了，是同一群
+     * 只有一个 job，她的每一轮思考都被后面涌入的围观消息「作废重来」了。
+     */
+    const lane = scene === SCENE_MENTION || scene === SCENE_PRIVATE ? 'targeted' : 'ambient'
+    const jobId = `${key}\u0000${lane}`
+    const existing = this.jobs.get(jobId)
 
     if (existing?.phase === 'thinking') {
       // 还在想，没发出去：作废重来
@@ -3971,8 +4104,8 @@ export class ChatEngine {
      * 撤回时靠它判断「在途的到底是撤回那条的回复，还是更新的一条」——
      * 只作废来源被撤回的那个 job，别把别人新消息的回复也一起打断。
      */
-    const job = { phase: 'thinking', controller, pending: [], triggerMid: String(ev?.message_id ?? '') }
-    this.jobs.set(key, job)
+    const job = { phase: 'thinking', controller, pending: [], triggerMid: String(ev?.message_id ?? ''), lane }
+    this.jobs.set(jobId, job)
     // 耗时起点：从"决定开口"算到最后一个气泡落地（含防抖等待与模型生成）。
     // metrics.onReplied 只认毫秒数，别再传时间戳（2026-10-21 修）。
     const t0 = Date.now()
@@ -4091,7 +4224,8 @@ export class ChatEngine {
       await this.maybeVoice({ ev, scene, conv, reply, signal: controller.signal })
 
       job.phase = 'sending'
-      await this.deliver({ ev, scene, conv, reply, signal: controller.signal })
+      // 发送串行：同一会话的另一条泳道可能正在发，气泡不能交叉（引用会挂错）
+      await this.serialSend(conv.key, () => this.deliver({ ev, scene, conv, reply, signal: controller.signal }))
       if (!controller.signal.aborted) {
         this.stats.replies++
         /*
@@ -4127,11 +4261,28 @@ export class ChatEngine {
           stack: String(err?.stack || '').slice(0, 600),
         }
         this.logger('error', `回复流程出错: ${err?.stack || err}`)
+        /*
+         * 2026-10-27（主人 m02307）：流程本身抛错（模型客户端炸了、解析炸了）
+         * 同样是「回不过来」，以前这里什么都不发，用户看到的是已读不回。
+         * 补一句兜底；只在没被撤回/中止时发，且受 modelDownReply 的 90 秒节流约束。
+         */
+        const fallback = this.modelDownReply(key, { reason: 'threw' })
+        if (fallback) {
+          try {
+            await this.serialSend(conv.key, () => this.deliver({ ev, scene, conv, reply: fallback, signal: controller.signal }))
+          } catch (err2) {
+            this.logger('warn', `兜底一句也没发出去：${err2?.message || err2}`)
+          }
+        }
       }
     } finally {
-      // 无论成功失败，都想完了，把群名片还原
-      if (isGroup) this.restoreGroupCard(ev.group_id).catch(() => {})
-      if (this.jobs.get(key) === job) this.jobs.delete(key)
+      /*
+       * 群名片还原：只有「这条会话里没有别的泳道还在想」才撤。
+       * 双泳道并行时，ambient 先想完就撤「正在想」，而 targeted 还在打字——
+       * 群里看到的就是「名片没在闪却突然冒话」。
+       */
+      if (isGroup && !this.otherLaneThinking(key, job)) this.restoreGroupCard(ev.group_id).catch(() => {})
+      if (this.jobs.get(jobId) === job) this.jobs.delete(jobId)
       // 排队期间收到的消息，在这一轮结束后接着处理
       const queued = job.pending?.shift()
       if (queued && !controller.signal.aborted) {
@@ -4332,7 +4483,8 @@ export class ChatEngine {
         degraded: Boolean(budgetOut),
         text: String(norm?.text || '').slice(0, 60),
       }
-      return null
+      // 2026-10-27（主人 m02307）：回不过来也得说一句，不能装死
+      return this.modelDownReply(conv?.key, { reason: 'model-null' })
     }
 
     /*
@@ -4362,8 +4514,9 @@ export class ChatEngine {
     })
     if (parts.length === 0) {
       this.traceReply(conv?.key, 'empty-parts', { raw: String(replyText || '').slice(0, 80) })
-      this.logger('debug', '模型返回空内容，沉默')
-      return null
+      // 2026-10-27（主人 m02307）：空正文不再是沉默的理由，说一句兜底
+      this.logger('warn', '模型返回空内容，改说兜底一句')
+      return this.modelDownReply(conv?.key, { reason: 'empty-parts' })
     }
     return {
       parts,
@@ -4844,7 +4997,24 @@ export class ChatEngine {
   }
 
   /** 两个后端的调用统一走这里，形状对齐成 {ok,text,error,code} */
+  /**
+   * 模型调用入口：先过全局并发闸门，再走原来的单次请求逻辑。
+   *
+   * 2026-10-27（方案 A 配套，主人 m02427）：拆了双泳道之后，同一时刻可能有
+   * 2~3 个模型请求在飞，而免费 intl flash 并发一高就空回（当天连吃 4 次
+   * 「回不过来」）。闸门只限制「同时在飞」，不改单次请求的重试/降级。
+   * 排队中被撤回中止会立刻出队，不占坑。
+   */
   async callModel({ system, messages, signal, maxTokens, model, reasoningEffort }) {
+    await this.modelSlot(signal)
+    try {
+      return await this.callModelUnlocked({ system, messages, signal, maxTokens, model, reasoningEffort })
+    } finally {
+      this.releaseModelSlot()
+    }
+  }
+
+  async callModelUnlocked({ system, messages, signal, maxTokens, model, reasoningEffort }) {
     if (this.gateway) {
       /*
        * 主脑模型的选择（用户 m15210 / m15263 定案）：
@@ -4952,6 +5122,60 @@ export class ChatEngine {
   rateLimitLine() {
     // Stage 3 Step 1：话术池搬到 engine-text.js（随机源保持 Math.random）
     return engineText.rateLimitLine()
+  }
+
+  /** 模型链全挂时的兜底台词 */
+  modelDownLine() {
+    return engineText.modelDownLine()
+  }
+
+  /**
+   * 回不过来的兜底：说一句，别装死（2026-10-27，主人 m02307）。
+   *
+   * 原话：「还是取消回不过来就不回的机制吧」。
+   *
+   * 改之前有两条路会静默：
+   *   ① `generate()` 里 `if (!res)` —— 主脑、备用脑、trae 全没接住；
+   *   ② `generate()` 里 `if (parts.length === 0)` —— 模型回了空正文。
+   * 两条都直接 return null，调用方当「这轮没话可说」→ 用户看到已读不回。
+   * 现在两条都改说一句固定台词：她"卡了一下"，但还在。
+   *
+   * 两个刹车：
+   *   - `silentOnModelFail: true` → 退回旧的沉默行为（留个总开关）。
+   *   - `modelDownNoticeGapMs`（默认 90 秒）→ 同一个会话里连续卡住只提醒一次。
+   *     模型挂掉的十分钟里，没有这个节流会把群里刷满「我卡了一下」。
+   *
+   * @param {string} convKey 会话键（群号或私聊 QQ）
+   * @param {{reason?:string}} [opts]
+   * @returns {{parts:Array, raw:string, usage:null, degraded:true, backend:string, fallbackLine:true} | null}
+   */
+  modelDownReply(convKey, { reason = 'model-null' } = {}) {
+    if (this.config.silentOnModelFail === true) return null
+    const gapMs = Math.max(0, Number(this.config.modelDownNoticeGapMs ?? 90000) || 0)
+    const at = this.now()
+    if (!this.modelDownAt) this.modelDownAt = new Map()
+    const last = Number(this.modelDownAt.get(convKey) || 0)
+    if (gapMs > 0 && last && at - last < gapMs) {
+      this.logger(
+        'debug',
+        `模型没接住（${reason}），但 ${Math.round((at - last) / 1000)} 秒前刚说过一句，这轮不重复`,
+      )
+      return null
+    }
+    const text = this.modelDownLine()
+    const parts = this.persona.splitReply(text, { maxStickersPerReply: 0 })
+    if (!Array.isArray(parts) || parts.length === 0) return null
+    this.modelDownAt.set(convKey, at)
+    this.stats.modelDownLines = (this.stats.modelDownLines || 0) + 1
+    this.logger('warn', `模型没接住（${reason}），改说兜底一句：${text}`)
+    return {
+      parts,
+      raw: text,
+      usage: null,
+      degraded: true,
+      backend: 'model-down-line',
+      fallbackLine: true,
+    }
   }
 
   /**
@@ -5646,6 +5870,27 @@ export class ChatEngine {
     })
   }
 
+  /**
+   * 名册行末尾的称谓后缀（2026-10-27，主人 m01226 第一条）。
+   *
+   * 起因：`888888888`（子房有礼了）的记忆里明明有一条 w=5 的
+   * 「他希望你叫他「宝宝」，每次开口就要叫，不用等他提醒」，提示词开头的
+   * 「# 怎么称呼」段也照写了，可她 00:37 在群里开口还是「子房你说哪个啊」。
+   *
+   * 认人这件事靠一段游离的「怎么称呼」不够——她真正会逐个看的是群名册。
+   * 把称谓挂在名字同一行上，等于把「这个人 → 这么叫」变成查表，不用再回忆。
+   * 没有称谓的人返回空串，名册行保持原样（不占字数）。
+   */
+  addressLabel(qq, who) {
+    try {
+      const hit = this.memory?.addressOf?.({ who: String(who || ''), qq: String(qq || ''), limit: 1 }) || []
+      const name = String(hit[0]?.name || '').trim()
+      return name ? `（你要叫他「${name}」）` : ''
+    } catch {
+      return ''
+    }
+  }
+
   /** 名册渲染成给模型看的一小段。只列最近活跃的，避免长群刷屏。 */
   memberRoster(conv, limit = 12) {
     if (!conv?.members || conv.members.size === 0) return ''
@@ -5655,7 +5900,7 @@ export class ChatEngine {
       .map(([id, m]) => {
         const akas = [...m.aka].filter((n) => n && n !== id)
         const aka = akas.length > 1 ? `（曾用名 ${akas.slice(0, -1).join('、')}）` : ''
-        return `- ${m.name}｜QQ ${id}${aka}`
+        return `- ${m.name}｜QQ ${id}${aka}${this.addressLabel(id, m.name)}`
       })
     return list.join('\n')
   }
@@ -6178,9 +6423,9 @@ export class ChatEngine {
      * 宁可少抓一点也不要抓错——记错的东西比不记更伤。
      */
     const patterns = [
-      { re: /我叫(.{1,12})/, kind: 'person', weight: 4, fmt: (m) => `他自称叫「${m[1]}」` },
-      { re: /我(?:喜欢|爱|爱吃|爱喝|爱玩|超爱|最爱)(.{1,20})/, kind: 'preference', weight: 4, fmt: (m) => `他喜欢${m[1]}` },
-      { re: /我(?:不喜欢|讨厌|受不了|烦)(.{1,20})/, kind: 'preference', weight: 4, fmt: (m) => `他讨厌${m[1]}` },
+      { re: /我叫(.{1,12})/, kind: 'person', weight: 8, fmt: (m) => `他自称叫「${m[1]}」` },
+      { re: /我(?:喜欢|爱|爱吃|爱喝|爱玩|超爱|最爱)(.{1,20})/, kind: 'preference', weight: 8, fmt: (m) => `他喜欢${m[1]}` },
+      { re: /我(?:不喜欢|讨厌|受不了|烦)(.{1,20})/, kind: 'preference', weight: 8, fmt: (m) => `他讨厌${m[1]}` },
       /*
        * 职业：「我是做XX的」「我在做XX」「我做XX工作」。
        *
@@ -6193,7 +6438,7 @@ export class ChatEngine {
       {
         re: /我(?:是|在|现在)?(?:做|干|搞)([\u4e00-\u9fa5A-Za-z]{2,20}?)(?:的)?(?:工作|这行|的)?(?=[，。！？,.\s]|$)/,
         kind: 'person',
-        weight: 3,
+        weight: 6,
         fmt: (m) => {
           const w = String(m[1] || '').replace(/[的的工作这行]+$/, '').trim()
           if (w.length < 2) return null
@@ -6205,18 +6450,18 @@ export class ChatEngine {
           return `他是做${w}的`
         },
       },
-      { re: /(我生日|今天是我生日|明天是我生日|下周是我生日)/, kind: 'event', weight: 4, fmt: () => `${t.slice(0, 30)}` },
-      { re: /答应|说好|一定/, kind: 'promise', weight: 3, fmt: () => `${userName}说：${t.slice(0, 40)}` },
+      { re: /(我生日|今天是我生日|明天是我生日|下周是我生日)/, kind: 'event', weight: 8, fmt: () => `${t.slice(0, 30)}` },
+      { re: /答应|说好|一定/, kind: 'promise', weight: 6, fmt: () => `${userName}说：${t.slice(0, 40)}` },
 
       // —— 2026-10-17 新增 ——
       // 住哪。要排除"我在忙/我在吃饭"这种，"在"+地名才像。
-      { re: /我(?:住在|家在|在)([\u4e00-\u9fa5]{2,8})(?:市|区|县|镇|上班|工作)?/, kind: 'person', weight: 3, fmt: (m) => `他在${m[1]}` },
+      { re: /我(?:住在|家在|在)([\u4e00-\u9fa5]{2,8})(?:市|区|县|镇|上班|工作)?/, kind: 'person', weight: 6, fmt: (m) => `他在${m[1]}` },
       // 养宠物。「我养了只猫叫团子」—— 要把名字带上，只记「猫」没意义。
       // 三种措辞分别处理：有名字 / 有品种 / 都没有。
       {
         re: /我(?:家|养了|养着一只|有只|有一只)[^，。！？]{0,10}?([\u4e00-\u9fa5]{1,10})/,
         kind: 'person',
-        weight: 4,
+        weight: 8,
         fmt: (m) => {
           const nm = t.match(/叫([\u4e00-\u9fa5]{1,6})/)
           if (nm) return `他养的宠物叫「${nm[1]}」`
@@ -6227,13 +6472,13 @@ export class ChatEngine {
         },
       },
       // 年龄
-      { re: /我(?:今年)?(\d{1,2})\s*(?:岁|歲)/, kind: 'person', weight: 3, fmt: (m) => `他今年${m[1]}岁` },
+      { re: /我(?:今年)?(\d{1,2})\s*(?:岁|歲)/, kind: 'person', weight: 6, fmt: (m) => `他今年${m[1]}岁` },
       // 职业/身份。原来限死"师员生手家工"结尾，「游戏策划」这种就没有结尾特征。
       // 改成「我(是|是个|是名|是一名) + 2~8 个汉字」但排除常见的非职业表达。
       {
         re: /我(?:是个|是名|是一名|是)([\u4e00-\u9fa5]{2,8})(?=[，。！？,.\s]|$)/,
         kind: 'person',
-        weight: 3,
+        weight: 6,
         fmt: (m) => {
           const w = m[1]
           // 排除语气词开头（"我是真的""我也是""我是说"）
@@ -6424,7 +6669,7 @@ export class ChatEngine {
         who: userName,
         qq: String(ev?.user_id || ''),
         text,
-        weight: 3,
+        weight: 6,
       })
       // 被闸门拦下的不计数（它没进库），上限按"真写进去的"算
       if (e) kept++

@@ -71,6 +71,7 @@ export const MEMORY_WINDOW_PROFILES = Object.freeze({
     degradedContextLimit: 8,
     degradedQueryLimit: 4,
     entryChars: 200,
+    charBudget: 800,
   }),
   balanced: Object.freeze({
     contextLimit: 32,
@@ -78,6 +79,7 @@ export const MEMORY_WINDOW_PROFILES = Object.freeze({
     degradedContextLimit: 12,
     degradedQueryLimit: 6,
     entryChars: 240,
+    charBudget: 1200,
   }),
   large: Object.freeze({
     contextLimit: 48,
@@ -85,6 +87,7 @@ export const MEMORY_WINDOW_PROFILES = Object.freeze({
     degradedContextLimit: 18,
     degradedQueryLimit: 9,
     entryChars: 320,
+    charBudget: 1600,
   }),
 })
 
@@ -102,7 +105,8 @@ if (!MEMORY_WINDOW) {
  * 2026-10-25（主人第 5 条）：新增 'meme'（梗/名场面/口头禅），她闲聊时能直接拿来玩。
  * 2026-10-26（回退到 preview.3 后的「认人」补丁）：新增 'address'（称谓），
  * 只由 addressOf() 按 QQ 读取、每轮必带，不参与普通召回（contextFor 里被过滤掉）。
- * weight 1..5，越高越不该被压缩掉。
+ * weight 1..10（可一位小数），越高越不该被压缩掉。
+ * 2026-10-27 主人 m01402：刻度从 5 级扩到 10 级，老数据整体 ×2 迁过来。
  *
  * `who` 与 `qq`（2026-10-19 用户需求）：
  *   - who：**名字**，给人看的（群名片/昵称，可带 emoji）
@@ -111,6 +115,172 @@ if (!MEMORY_WINDOW) {
  * 为什么叫 qq 不叫 id：条目本身已经有 `id`（CRUD 的 update/delete 靠它），撞名。
  */
 export const QQ_PATTERN = /^[1-9]\d{4,11}$/
+
+/**
+ * 权重刻度（2026-10-27 主人 m01402：「权重等级从 5 改为 10，按比例改动现有记忆权重，
+ * 允许小数点后一位」；m01449：「称谓记忆依旧是最高，10」）。
+ *
+ * 旧刻度 1..5 → 新刻度 1..10 的等比映射就是 ×2：
+ * 老的默认 3 → 6，老的最高 5 → 10，老的最低 1 → 2。
+ * 现有数据已在 2026-10-27 全量 ×2 迁完（见 docs/CHANGELOG.md「权重刻度 5 → 10」）。
+ *
+ * 为什么要 ×2 而不是只把上限拉大：召回打分的 `weight * 0.3` 是**绝对**加分，
+ * 若只改上限、老数据仍是 1..5，新记的条目凭空比旧的重一倍；
+ * 反过来只改上限加数据 ×2、公式不动，分数又会整体翻倍盖过关键词命中。
+ * 所以三处同时等比：数据 ×2、默认为 2 倍、打分系数减半 —— 排序结果与改动前完全一致。
+ */
+export const WEIGHT_MIN = 1
+export const WEIGHT_MAX = 10
+export const WEIGHT_DEFAULT = 6
+
+/**
+ * 记忆库的名字（2026-10-27 主人 m02812 定的署名）。
+ *
+ * 只用于对外的说明性文案：发布说明、文档、控制台的「记忆库」标题。
+ * **不参与任何检索/去重/衰减逻辑**——名字是给人看的，不是给召回用的。
+ */
+export const MEMORY_SYSTEM_NAME = '茉莉花'
+
+/**
+ * 把任意输入夹进 1..10 并四舍五入到一位小数；非法值退回 fallback。
+ * 路由层（web.js 的 parseWeight）和 store 层共用这一份，避免两处口径不一致。
+ */
+export function clampWeight(value, fallback = WEIGHT_DEFAULT) {
+  const w = Number(value)
+  if (!Number.isFinite(w)) return fallback
+  const one = Math.round(w * 10) / 10
+  return Math.min(WEIGHT_MAX, Math.max(WEIGHT_MIN, one))
+}
+
+/**
+ * 记忆分七类（2026-10-27 主人 m01748 第 2 条：「记忆分账号再分七类储存」）。
+ *
+ * 为什么是这七类：原先 8 个 kind 混在一个 memory.json 里，尺子还不一样
+ * （表情包和「他住广州」在同一个池子里抢窗口，还共用一套权重下限）。
+ * 分七类之后一类一个文件，各有一套下限（见 WEIGHT_FLOOR）：
+ * 「梗」可以烂得比「事实」快，而「约定」不该像闲聊一样掉价。
+ *
+ * 老 kind 一律映射过来，不丢数据：
+ *   work    → event   （工作/项目进展本身就是一段时间里发生的事）
+ *   sticker → meme    （表情包是拿来玩的梗，不是知识）
+ *   其余未知 → fact   （宁可当成普通事实，也不能让它从召回里消失）
+ */
+export const MEMORY_KINDS = Object.freeze([
+  'person',
+  'address',
+  'promise',
+  'fact',
+  'preference',
+  'event',
+  'meme',
+])
+
+/** 老 kind → 新七类的别名表（work→event、sticker→meme），读取/写入口都过一遍 */
+export const KIND_ALIASES = Object.freeze({ work: 'event', sticker: 'meme' })
+
+/** 任意 kind → 七类之一；空/非法一律落 fact */
+export function normalizeKind(kind) {
+  const k = String(kind ?? '').trim().toLowerCase()
+  if (!k) return 'fact'
+  if (MEMORY_KINDS.includes(k)) return k
+  return KIND_ALIASES[k] || 'fact'
+}
+
+/**
+ * 这条记忆是谁说的。
+ *
+ * 引入来源不是为了追责，而是为了**挡住一种最常见的污染**：
+ * 她自己接话时说「我听说他下个月要搬家」，被当成事实记下来，
+ * 三天后就有了「他下个月要搬家」这条"记忆"——可用户从来没说过。
+ * 第 5 篇（木子伟宸）把这条写成硬规矩：「事实必须来自用户陈述或明确认可，
+ * 助手单方面编写的经历不能当作已经发生」。
+ *
+ * 所以：assistant 来源只允许写 preference / event / meme（她的印象、她的梗），
+ * 不许写 fact / person（客观事实与身份）。
+ */
+export const MEMORY_SOURCES = Object.freeze(['user', 'assistant', 'system'])
+
+export function normalizeSource(source) {
+  const s = String(source ?? '').trim().toLowerCase()
+  return MEMORY_SOURCES.includes(s) ? s : 'user'
+}
+
+/**
+ * 每类的权重下限（2026-10-27 主人 m01748 第 1 条：「模拟艾宾浩斯来逐渐降低权重，
+ * 按照小数点级下降，但是有下限」）。
+ *
+ * 为什么下限要分类定，而不是统一 1：
+ *   - 称谓（address）根本不参与召回、每轮无条件注入，衰减没有意义，钉死 10；
+ *   - 约定（promise）掉到 1 就等于「答应过的事也想不起来了」，下限给 5；
+ *   - 人物（person）是「你是谁」这类问题唯一的答案来源，下限 4；
+ *   - 事实/偏好 3，闲聊里的事、玩过的梗 1（这些本来就可以忘）。
+ * 想调大调小，只改这张表——effectiveWeight() 是唯一读它的地方。
+ */
+export const WEIGHT_FLOOR = Object.freeze({
+  address: 10,
+  promise: 5,
+  person: 4,
+  fact: 3,
+  preference: 3,
+  event: 1,
+  meme: 1,
+})
+
+/**
+ * 衰减参数（2026-10-27 主人 m01812：「建议不要完全按照艾宾浩斯的天数曲线」）。
+ *
+ * 改成**活跃天 + 阶梯**，不再用「日历天 × 指数」：
+ *   1. 只在「这一天真的聊过天」时才记 1 个活跃天。关机一周、换机器、停机维护
+ *      都不算时间——记忆不会因为我们没上班而变淡；
+ *   2. 同一天里问多少句都只算 1 天，避免「晚上聊得多，早上全忘了」；
+ *   3. 曲线是阶梯不是断崖：先白给一段宽限期，之后每 7 个活跃天掉 0.5，
+ *      掉到该类下限为止。0.5 的步子比指数曲线好解释，也不会掉到一半突然跳；
+ *   4. 命中会把它拉回当前活跃天（相当于复习一次，重新开始计），
+ *      这就是「记住的东西更牢」的那部分。
+ *
+ * 为什么不做成真·艾宾浩斯（R = e^(−t/S)）：那个曲线的假设是「被动遗忘」，
+ * 而我们这里绝大多数记忆根本没人问、没进过上下文——按日历天算会让全部记忆
+ * 同时掉到下限，等于「所有人一起忘」，反而没有区分度。
+ */
+export const DECAY_STEP_DAYS = 7
+export const DECAY_STEP = 0.5
+
+/** 宽限期（活跃天）：这段时间内一律不掉，之后才开始走阶梯 */
+export const GRACE_ACTIVE_DAYS = Object.freeze({
+  address: Infinity,
+  promise: 14,
+  person: 14,
+  fact: 14,
+  preference: 14,
+  event: 7,
+  meme: 7,
+})
+
+/**
+ * 有效权重：base − ⌊(idle − 宽限) / 7⌋ × 0.5，夹在该类下限与上限之间，一位小数。
+ *
+ * `activeDays` 由 store 维护（今天聊过天才 +1，见 touchActivity()）；
+ * 条目记 `lastActiveDay`，差值就是「它被晾了多少个活跃天」。
+ * 老条目没有这个字段时按 0 处理——也就是从迁移那一刻开始重新计时，不追溯。
+ *
+ * 关键设计：**只在读取时算，永不写回盘**。盘上只有 base + hits + lastActiveDay，
+ * 是事实；衰减是看法，取决于什么时候读。所以没有复利 bug，也不需要定时任务。
+ */
+export function effectiveWeight(entry, activeDays = 0) {
+  const kind = normalizeKind(entry?.kind)
+  if (kind === 'address') return WEIGHT_MAX
+  const base = clampWeight(entry?.weight)
+  const floor = WEIGHT_FLOOR[kind] ?? WEIGHT_MIN
+  if (base <= floor) return base
+  const now = Math.max(0, Math.round(Number(activeDays) || 0))
+  const last = Math.max(0, Math.round(Number(entry?.lastActiveDay) || 0))
+  const idle = Math.max(0, now - last)
+  const grace = GRACE_ACTIVE_DAYS[kind] ?? DECAY_STEP_DAYS
+  if (!Number.isFinite(grace) || idle <= grace) return base
+  const steps = Math.floor((idle - grace) / DECAY_STEP_DAYS)
+  const eff = base - steps * DECAY_STEP
+  return Math.min(WEIGHT_MAX, Math.max(floor, Math.round(eff * 10) / 10))
+}
 
 /** 把任意输入规整成 qq 字段：合法就留字符串，不合法/空就返 ''（唯一身份缺失） */
 export function normalizeQq(value) {
@@ -143,6 +313,18 @@ export function isValidQq(value) {
 export function addressName(text) {
   const t = String(text ?? '').trim()
   if (!t) return ''
+  /*
+   * 2026-10-27 真机（主人 333333333 被叫成「茶茶」）：
+   * 一条 `他自称「茶茶」，可以直接叫他茶茶` 里**确实**有「叫他茶茶」，
+   * 于是 addressName 抽出「茶茶」，权重和时间又刚好压过同一个人真正的
+   * 「他希望你叫他「宝宝」」，结果她在群里连着三句把老板叫成茶茶，
+   * 而茶茶是群里另一个人（987654321）。
+   *
+   * 这条 memory 的句式本身已经在说「自称」——作者的意思是"他自己这么叫自己"，
+   * 只是后半句顺手写成了「叫他茶茶」。所以只要整句里出现自称/外号类字样，
+   * 直接判为不可当称谓。宁可退回群名片，也不要她编一个称呼出来。
+   */
+  if (/自称|自封|外号/.test(t)) return ''
   const hit =
     t.match(/叫他\s*[「『"'“]?([^」』"'”，,。；;\s]{1,12})/) ||
     t.match(/叫你\s*[「『"'“]?([^」』"'”，,。；;\s]{1,12})/) ||
@@ -167,11 +349,14 @@ export class MemoryStore {
    * @param {number} [options.limit] 初始容量（2026-10-23 主人 m00709：默认 2000）
    * @param {number} [options.growTo] 记满后自动扩到的上限（主人要求 10000；0=不自动扩）
    * @param {{keyFile?: string}|null} [options.crypt] 传了就加密落盘（生产用）；null=明文（测试/迁移工具）
-   * @param {string} [options.poolFile] 扩容状态落盘位置，默认 dir/memory-pool.json
+   * @param {string} [options.poolFile] 扩容状态落盘位置，默认 <分片目录>/memory-pool.json
    * @param {string} [options.dataDir] 数据目录（密钥默认放在它的**同级** qq-whale-keys/ 里）；
    *   不传就按 dir 的上一级推断（dir 通常是 <dataDir>/memory）
+   * @param {string} [options.account] 账号维度 = **机器人自己的 QQ**（2026-10-27 主人 m01748
+   *   第 2 条「记忆分账号」）。记忆落 `<dir>/<account>/<kind>.json`，将来一个进程带多个号
+   *   也不会串库。取不到就落 '<dir>/default/'——注意条目里的 `qq` 字段是**对话者**，不是账号。
    */
-  constructor({ dir, logger, limit = 2000, growTo = 0, crypt = null, poolFile = '', dataDir = '' }) {
+  constructor({ dir, logger, limit = 2000, growTo = 0, crypt = null, poolFile = '', dataDir = '', account = '' }) {
     this.dir = dir
     this.dataDir = String(dataDir || '').trim() || path.dirname(path.resolve(dir))
     this.logger = logger || (() => {})
@@ -182,11 +367,20 @@ export class MemoryStore {
     this.mergedCount = 0
     this.baseLimit = Math.max(1, Number(limit) || 2000)
     this.maxLimit = Math.max(this.baseLimit, Number(growTo) || 0)
+    this.account = normalizeQq(account) || 'default'
+    this.shardDir = path.join(dir, this.account)
+    this.indexFile = path.join(this.shardDir, 'index.json')
+    // 老的单文件布局：只在「首次迁移」和「迁移后存档」时用到，正常读写全在分片里
     this.file = path.join(dir, 'memory.json')
-    this.mdFile = path.join(dir, 'memory.md')
-    this.mdEncFile = path.join(dir, 'memory.md.enc')
-    this.poolFile = poolFile || path.join(dir, 'memory-pool.json')
+    this.legacyFile = path.join(dir, '_legacy-memory.json')
+    this.mdFile = path.join(this.shardDir, 'memory.md')
+    this.mdEncFile = path.join(this.shardDir, 'memory.md.enc')
+    this.poolFile = poolFile || path.join(this.shardDir, 'memory-pool.json')
     this.entries = []
+    // 活跃天计数（衰减用）：只在「这天真聊过天」时 +1，见 touchActivity()
+    this.activeDays = 0
+    this.activeDayKey = ''
+    this._hitSaveAt = 0
     this.limit = this.readGrownLimit() || this.baseLimit
     if (this.crypt) {
       /*
@@ -204,7 +398,7 @@ export class MemoryStore {
       })
       this.keyFile = keyFile
       // 已经有密文却找不到钥匙：绝不新建一把新的（那等于默认记忆清空），直接冻住不写
-      if (!fs.existsSync(keyFile) && fs.existsSync(this.file)) {
+      if (!fs.existsSync(keyFile) && this.hasStoredData()) {
         this.broken = true
         this.logger(
           'error',
@@ -228,38 +422,158 @@ export class MemoryStore {
     return Boolean(this.crypt)
   }
 
-  /** 读回「已经自动扩容过」的容量：记满之后重启不该缩回 2000 */
-  readGrownLimit() {
+  /** 某一类的分片文件 */
+  shardFile(kind) {
+    return path.join(this.shardDir, `${normalizeKind(kind)}.json`)
+  }
+
+  /**
+   * 盘上到底有没有记忆数据（分片优先，其次老单文件）。
+   * 只在「有密文但找不到钥匙」时用：找不到数据就不该冻住，否则换台机器一启动就是废的。
+   */
+  hasStoredData() {
     try {
-      const parsed = JSON.parse(fs.readFileSync(this.poolFile, 'utf8'))
-      const n = Math.round(Number(parsed?.limit))
-      if (!Number.isFinite(n) || n <= 0) return 0
-      if (this.maxLimit && n > this.maxLimit) return 0
-      return n >= this.baseLimit ? n : 0
+      if (fs.existsSync(this.indexFile)) return true
+      for (const kind of MEMORY_KINDS) if (fs.existsSync(this.shardFile(kind))) return true
+    } catch {}
+    return fs.existsSync(this.file)
+  }
+
+  /** 读分片索引；不存在或不是本账号的返回 null（按「还没分片」处理，会走老文件迁移） */
+  readIndex() {
+    try {
+      const raw = JSON.parse(fs.readFileSync(this.indexFile, 'utf8'))
+      if (!raw || String(raw.account) !== this.account) return null
+      return raw
     } catch {
-      return 0
+      return null
     }
   }
 
-  /** 扩容状态落盘（只在真正扩容时写一次，不是每条记忆都写） */
-  writeGrownLimit() {
+  /**
+   * 写索引（原子：先 .tmp 再 rename）。
+   * 只放元信息、不放正文，所以不加密也无所谓——它就是个「账本封面」。
+   */
+  writeIndex(counts) {
     try {
-      fs.mkdirSync(this.dir, { recursive: true })
-      fs.writeFileSync(
-        this.poolFile,
-        `${JSON.stringify(
-          { version: 1, base: this.baseLimit, limit: this.limit, grownAt: new Date().toISOString() },
-          null,
-          2,
-        )}\n`,
-        'utf8',
+      fs.mkdirSync(this.shardDir, { recursive: true })
+      const body = JSON.stringify(
+        {
+          version: 1,
+          account: this.account,
+          kinds: counts,
+          total: Object.values(counts).reduce((a, b) => a + b, 0),
+          activeDays: this.activeDays,
+          activeDayKey: this.activeDayKey,
+          savedAt: new Date().toISOString(),
+        },
+        null,
+        2,
       )
+      const tmp = `${this.indexFile}.tmp`
+      fs.writeFileSync(tmp, `${body}\n`, 'utf8')
+      fs.renameSync(tmp, this.indexFile)
     } catch (err) {
-      this.logger('warn', `记忆池扩容状态写入失败（下次重启会退回 ${this.baseLimit} 条）: ${err.message}`)
+      this.logger('warn', `记忆分片索引写入失败（不影响正文）: ${err.message}`)
     }
   }
 
+  /**
+   * 老单文件迁移成功后改名存档，**绝不删**：
+   * 回滚时要拿它、出事时要能对账，多占 500 KB 换一个「能退回去」是值的。
+   */
+  archiveLegacy() {
+    try {
+      if (!fs.existsSync(this.file)) return
+      let target = this.legacyFile
+      if (fs.existsSync(target)) {
+        const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '')
+        target = this.legacyFile.replace(/\.json$/, `-${stamp}.json`)
+      }
+      fs.renameSync(this.file, target)
+      this.logger('info', `老记忆库已按七类拆开，原文件存档到 ${target}`)
+    } catch (err) {
+      this.logger('warn', `老记忆库存档失败（不影响分片读写）: ${err.message}`)
+    }
+  }
+
+  /**
+   * 读盘：**分片优先**。
+   *
+   * 顺序：有 index.json 就当分片库读；没有就按老单文件读，读完立刻拆成七类落盘，
+   * 再把老文件改名存档。这样升级是一次性的、可回滚的，不需要手工迁移脚本。
+   */
   load() {
+    const index = this.readIndex()
+    if (index) {
+      // 活跃天是衰减的分母，必须跟着账本一起回来，否则重启就等于「记忆忽然变新」
+      this.activeDays = Math.max(0, Math.round(Number(index.activeDays) || 0))
+      this.activeDayKey = String(index.activeDayKey || '')
+      this.loadShards()
+      return
+    }
+    this.loadLegacy()
+    if (this.broken) return
+    if (this.entries.length || fs.existsSync(this.file)) {
+      if (this.save()) this.archiveLegacy()
+    }
+  }
+
+  /** 读七类分片（每片可能是密文信封，也可能是明文——迁移中途可能出现） */
+  loadShards() {
+    const all = []
+    let needsResave = false
+    for (const kind of MEMORY_KINDS) {
+      const file = this.shardFile(kind)
+      let raw
+      try {
+        raw = fs.readFileSync(file, 'utf8')
+      } catch (err) {
+        if (err.code !== 'ENOENT') this.logger('warn', `${path.basename(file)} 读取失败: ${err.message}`)
+        continue
+      }
+      let text = raw
+      if (this.crypt) {
+        let outer = null
+        try {
+          outer = JSON.parse(raw)
+        } catch {
+          outer = null
+        }
+        if (outer && isEnvelope(outer)) {
+          try {
+            text = decryptText(outer, this.key)
+          } catch (err) {
+            // 解不开就是解不开：宁可整池停写，也不能覆盖唯一一份密文
+            this.broken = true
+            this.entries = []
+            this.logger('error', `记忆分片 ${path.basename(file)} 解密失败（已停止读写以免覆盖）: ${err.message}`)
+            return
+          }
+        } else {
+          needsResave = true
+        }
+      }
+      try {
+        const parsed = JSON.parse(text)
+        const list = Array.isArray(parsed?.entries) ? parsed.entries : []
+        for (const e of list) {
+          all.push({ ...e, kind: normalizeKind(e.kind), qq: normalizeQq(e.qq) })
+        }
+      } catch (err) {
+        this.broken = true
+        this.entries = []
+        this.logger('error', `记忆分片 ${path.basename(file)} 不是合法 JSON（已停止写回以免覆盖）: ${err.message}`)
+        return
+      }
+    }
+    this.entries = all
+    // 明文分片 + 开了加密 = 迁移到一半，立刻补齐密文
+    if (needsResave && all.length) this.save()
+  }
+
+  /** 老布局：单个 memory.json（可能是明文，也可能是整池密文信封） */
+  loadLegacy() {
     let raw
     try {
       raw = fs.readFileSync(this.file, 'utf8')
@@ -297,7 +611,7 @@ export class MemoryStore {
       // 老条目没有 qq：这里补空串而不是补一个猜出来的号——
       // 猜错等于把两个人的记忆挂到同一个人身上，比"没号"更糟。
       // 只补在内存里，不写盘（下次 save() 自然会带出去）。
-      this.entries = list.map((e) => ({ ...e, qq: normalizeQq(e.qq) }))
+      this.entries = list.map((e) => ({ ...e, kind: normalizeKind(e.kind), qq: normalizeQq(e.qq) }))
     } catch (err) {
       this.broken = true
       this.entries = []
@@ -305,6 +619,37 @@ export class MemoryStore {
       return
     }
     if (this.needsMigration && this.crypt) this.migrate()
+  }
+
+  /** 读回「已经自动扩容过」的容量：记满之后重启不该缩回 2000 */
+  readGrownLimit() {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(this.poolFile, 'utf8'))
+      const n = Math.round(Number(parsed?.limit))
+      if (!Number.isFinite(n) || n <= 0) return 0
+      if (this.maxLimit && n > this.maxLimit) return 0
+      return n >= this.baseLimit ? n : 0
+    } catch {
+      return 0
+    }
+  }
+
+  /** 扩容状态落盘（只在真正扩容时写一次，不是每条记忆都写） */
+  writeGrownLimit() {
+    try {
+      fs.mkdirSync(this.dir, { recursive: true })
+      fs.writeFileSync(
+        this.poolFile,
+        `${JSON.stringify(
+          { version: 1, base: this.baseLimit, limit: this.limit, grownAt: new Date().toISOString() },
+          null,
+          2,
+        )}\n`,
+        'utf8',
+      )
+    } catch (err) {
+      this.logger('warn', `记忆池扩容状态写入失败（下次重启会退回 ${this.baseLimit} 条）: ${err.message}`)
+    }
   }
 
   /**
@@ -329,26 +674,52 @@ export class MemoryStore {
     }
   }
 
-  /** @returns {boolean} 是否真的写成功了（控制台 CRUD 要据此回 500，不能报假成功） */
+  /**
+   * 落盘：**七类各一个文件** + index.json 账本 + 一份人读的 memory.md。
+   *
+   * 为什么按类拆文件，而不是继续一个大 json：
+   *   1. 一类一个有下限（见 WEIGHT_FLOOR），混在一个池子里按同一把尺子淘汰必然出事；
+   *   2. 写「梗」不用重写 500 KB 的「事实」，闪存友好，坏一个文件也不至于全丢；
+   *   3. 出问题能一眼看出是哪一类炸的（看 index.json 的 kinds 计数）。
+   *
+   * @returns {boolean} 是否真的写成功了（控制台 CRUD 要据此回 500，不能报假成功）
+   */
   save() {
     if (this.broken) {
       this.logger('error', '记忆池处于 broken 状态（解密/迁移失败），拒绝写回以免覆盖唯一一份数据')
       return false
     }
     try {
-      fs.mkdirSync(this.dir, { recursive: true })
+      fs.mkdirSync(this.shardDir, { recursive: true })
+      const groups = new Map(MEMORY_KINDS.map((k) => [k, []]))
+      for (const e of this.entries) {
+        const kind = normalizeKind(e.kind)
+        e.kind = kind
+        groups.get(kind).push(e)
+      }
+      const counts = {}
+      for (const kind of MEMORY_KINDS) {
+        const list = groups.get(kind)
+        counts[kind] = list.length
+        const body = JSON.stringify({ version: 2, account: this.account, kind, entries: list }, null, 2)
+        const file = this.shardFile(kind)
+        if (this.crypt) {
+          writeEncryptedFile(file, body, this.key)
+        } else {
+          fs.writeFileSync(file, body, 'utf8')
+        }
+      }
       const md = this.renderMarkdown()
       if (this.crypt) {
-        writeEncryptedFile(this.file, JSON.stringify({ version: 2, entries: this.entries }, null, 2), this.key)
         writeEncryptedFile(this.mdEncFile, md, this.key)
         // 明文 md 已经加密存了，顺手删掉（否则「加密了但旁边还有一份明文」等于没加密）
         try {
           if (fs.existsSync(this.mdFile)) fs.unlinkSync(this.mdFile)
         } catch {}
       } else {
-        fs.writeFileSync(this.file, JSON.stringify({ version: 1, entries: this.entries }, null, 2), 'utf8')
         fs.writeFileSync(this.mdFile, md, 'utf8')
       }
+      this.writeIndex(counts)
       return true
     } catch (err) {
       this.logger('error', `记忆写入失败: ${err.message}`)
@@ -356,47 +727,125 @@ export class MemoryStore {
     }
   }
 
-  add({ kind = 'fact', who = '', qq = '', text = '', weight = 3 } = {}) {
+  /**
+   * 记一条。
+   *
+   * @param {object} [input]
+   * @param {string} [input.kind] 七类之一（老名 work/sticker 会被折成 event/meme）
+   * @param {string} [input.source] 谁说的：`user`（默认，用户本人）/ `assistant`（她自己）/
+   *   `system`。assistant 来源不许写 fact / person，见上方 MEMORY_SOURCES 的说明。
+   */
+  add({
+    kind = 'fact',
+    who = '',
+    qq = '',
+    text = '',
+    weight = WEIGHT_DEFAULT,
+    source = 'user',
+    level = 0,
+  } = {}) {
     const t = String(text || '').trim()
     if (!t) return null
+    const k = normalizeKind(kind)
+    const src = normalizeSource(source)
+    if (src === 'assistant' && (k === 'fact' || k === 'person')) {
+      this.logger('warn', `拒绝写入：助手自述不能写成 ${k}（${t.slice(0, 24)}）`)
+      return null
+    }
     const q = normalizeQq(qq)
     const name = String(who || '').trim()
+    /*
+     * 称谓一律钉死在最高档（2026-10-27 主人 m01449：「称谓记忆依旧是最高，10」）。
+     * 理由：address 不参与普通召回、每轮无条件注入，它的「权重」只用来决定
+     * **同一个人多条称谓时谁排第一行**（engine-context 的规矩是以第一行为准）。
+     * 让别的 kind 跟它比高低没有意义，钉满反而不会因为迁移或手滑把「宝宝」压低。
+     */
+    const w = k === 'address' ? WEIGHT_MAX : clampWeight(weight)
+    this.touchActivity()
     // 去重（2026-10-23 主人 m00709 第 2 条）：
     //   1. 比"人"：优先 qq（唯一身份），老条目没号时才退回比名字；
     //   2. 比"话"：**不再看 kind**——「喜欢猫」记成 fact 还是 preference 都是同一件事；
     //   3. 新的覆盖旧的：文字/时间用新的，权重取高的。
-    const dup = this.findDuplicate({ who: name, qq: q, text: t, kind })
-    if (dup) {
-      dup.text = t
-      dup.at = Date.now()
-      dup.weight = Math.max(dup.weight || 3, Math.max(1, Math.min(5, weight)))
-      if (kind && kind !== dup.kind) dup.kind = kind
+    const dup = this.findDuplicate({ who: name, qq: q, text: t, kind: k })
+    // 冲突优先于「跳过/合并」，而且**必须独立判定**：
+    // 「他喜欢猫」和「他其实不喜欢猫」字面相似度只有 0.2，根本进不了 findDuplicate
+    // 的门槛，靠 dup 命中后再判冲突等于永远判不到（2026-10-27 自测第 4/7 组就是这么挂的）。
+    // 所以这里单独扫一遍：意思相反的修正两条都留，旧的打 supersededBy、召回降权。
+    const conflictEntry = this.findConflict({ who: name, qq: q, text: t })
+    const conflicting = !!conflictEntry
+    if (dup && !conflicting) {
+      const prev = dup.entry
+      if (dup.score >= DUP_SKIP_SIMILARITY) {
+        // 近似重复：文字不用重写，只记「又被提起」（衰减从这里重新算）
+        prev.lastActiveDay = this.activeDays
+        prev.at = Date.now()
+        this.mergedCount += 1
+        this.save()
+        this.logger('debug', `近似重复（${dup.score.toFixed(2)}），未写入：${t.slice(0, 24)}`)
+        return { ...prev, skipped: true }
+      }
+      prev.text = t
+      prev.at = Date.now()
+      prev.weight = Math.max(clampWeight(prev.weight), w)
+      if (k !== prev.kind) prev.kind = k
+      // 被重写等于「最近又被提起」，衰减从这里重新算
+      prev.lastActiveDay = this.activeDays
       // 老条目这次带了号，顺手把身份补上（下次就能按 qq 找到了）
-      if (q && !normalizeQq(dup.qq)) dup.qq = q
-      if (name && !dup.who) dup.who = name
+      if (q && !normalizeQq(prev.qq)) prev.qq = q
+      if (name && !prev.who) prev.who = name
+      // 命中次数跨条目累计（合并时两边的 hits 相加，不能因为覆盖就清零）
+      prev.hits = (Number(prev.hits) || 0)
       this.mergedCount += 1
       this.save()
-      return dup
+      return prev
     }
     const entry = {
       id: `m${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
-      kind,
+      kind: k,
       who: name,
       qq: q,
       text: t,
-      weight: Math.max(1, Math.min(5, weight)),
+      weight: w,
+      source: src,
+      /*
+       * 压缩等级 0..3（2026-10-27 第 2 篇「压缩四级」的落点）：
+       *   0 原句 / 1 半句 / 2 一句 / 3 关键词。
+       * 现在只在**读**的时候用它决定要不要再压（renderMarkdown 会显示 l0..l3），
+       * 不改正文——压缩正文必须是显式动作，不能悄悄发生在检索里。
+       */
+      level: Math.max(0, Math.min(3, Math.round(Number(level) || 0))),
+      // 命中记账（衰减靠它区分「没被问过」和「问过但没记住」）
+      hits: 0,
+      lastActiveDay: this.activeDays,
       at: Date.now(),
     }
     this.entries.push(entry)
+    if (conflicting && conflictEntry) {
+      // 旧的那条是「被更正」的：正文留着备查（不删，防止纠错纠错），
+      // 但打上标记，召回时降权——免得提示词里同时出现
+      // 「他喜欢猫」和「他其实不喜欢猫」，让模型自己猜哪句算数。
+      conflictEntry.supersededBy = entry.id
+      conflictEntry.supersededAt = Date.now()
+      this.logger(
+        'debug',
+        `记忆冲突，两条都留：${String(conflictEntry.text).slice(0, 20)} → ${t.slice(0, 20)}`,
+      )
+    }
     this.prune()
     this.save()
     return entry
   }
 
   /**
-   * 找「同一个人 + 同一件事」的老条目（找到就由调用方用新内容覆盖旧内容）。
-   * @param {{who?: string, qq?: string, text?: string}} probe
-   * @returns {object|null}
+   * 找「同一个人 + 同一件事」的老条目。
+   *
+   * 2026-10-27（对照 BaiShou-Next 的 memory-deduplication.service.ts）改成
+   * **连相似度一起返回**：调用方要靠分数分档——>=0.92 当重复直接跳过，
+   * 0.70~0.92 才合并。以前只返回条目，等于把「几乎一模一样」和「有点沾边」
+   * 当成一回事，一律覆盖，结果每次重复提及都会重写一遍文字。
+   *
+   * @param {{who?: string, qq?: string, text?: string, kind?: string}} probe
+   * @returns {{entry: object, score: number}|null}
    */
   findDuplicate({ who = '', qq = '', text = '', kind = '' } = {}) {
     const q = normalizeQq(qq)
@@ -412,6 +861,38 @@ export class MemoryStore {
       if (score >= dupThreshold(kind, e.kind) && score > bestScore) {
         best = e
         bestScore = score
+      }
+    }
+    return best ? { entry: best, score: bestScore } : null
+  }
+
+  /**
+   * 找「同一个人 + 说的同一件事 + 意思相反」的老条目。
+   *
+   * 和 findDuplicate 分开是有原因的：修正句的**字面相似度往往很低**
+   * （「他喜欢猫」→「他其实不喜欢猫」只有 0.2），如果把它挂在相似度门槛后面，
+   * 这个分支永远不会被触发——被纠正过的旧结论会一直躺在库里，等着和新结论一起
+   * 进提示词。所以这里不看相似度，只看两件事：
+   *   1. 是不是同一个人（qq 优先，老条目没号才比名字）；
+   *   2. `conflicts()`——一边否定一边不否定，且共享至少两个实词。
+   *
+   * @param {{who?: string, qq?: string, text?: string}} probe
+   * @returns {object|null}
+   */
+  findConflict({ who = '', qq = '', text = '' } = {}) {
+    const q = normalizeQq(qq)
+    const name = String(who || '').trim()
+    if (!normalizeForDup(text)) return null
+    let best = null
+    let bestScore = 0
+    for (const e of this.entries) {
+      if (e.supersededBy) continue // 已经被更正的不用再更正一次
+      if (!sameIdentity({ who: name, qq: q }, e)) continue
+      if (!conflicts(e.text, text)) continue
+      const n = sharedKeywordCount(e.text, text)
+      if (n > bestScore) {
+        best = e
+        bestScore = n
       }
     }
     return best
@@ -438,14 +919,18 @@ export class MemoryStore {
         if (!sameIdentity(e, k)) continue
         const exact = normalizeForDup(k.text) === key
         const score = exact ? 1 : similarity(k.text, e.text)
-        const min = k.kind === 'sticker' || e.kind === 'sticker' ? 1 : threshold
+        const min = normalizeKind(k.kind) === 'meme' || normalizeKind(e.kind) === 'meme' ? 1 : threshold
         if (score < min) continue
         // 新的覆盖旧的：at 更大的算新
         const newer = e.at >= k.at ? e : k
         const older = newer === e ? k : e
+        // 意思相反的不能合成一条（「喜欢猫」不能被「不喜欢猫」并掉）
+        if (conflicts(older.text, newer.text)) continue
         older.text = newer.text
         older.at = newer.at
-        older.weight = Math.max(older.weight || 3, newer.weight || 3)
+        older.weight = Math.max(clampWeight(older.weight), clampWeight(newer.weight))
+        // 命中次数是两条之和：合并不能把她「被问过多少次」的记忆清零
+        older.hits = (Number(older.hits) || 0) + (Number(newer.hits) || 0)
         if (newer.kind && newer.kind !== older.kind) older.kind = newer.kind
         if (normalizeQq(newer.qq) && !normalizeQq(older.qq)) older.qq = newer.qq
         if (newer.who && !older.who) older.who = newer.who
@@ -463,8 +948,18 @@ export class MemoryStore {
    * 给 /state 用的容量与加密状态。
    * 主人和挂件都要能一眼看到「现在多大 / 上限多少 / 加密没有 / 钥匙在哪」。
    */
+  /** 七类各多少条（控制台/状态接口用） */
+  countByKind() {
+    const out = {}
+    for (const k of MEMORY_KINDS) out[k] = 0
+    for (const e of this.entries) out[normalizeKind(e.kind)] += 1
+    return out
+  }
+
   status() {
     return {
+      // 记忆库的名字（2026-10-27 主人 m02812 定的）：文档、发布说明、控制台都按这个署名
+      name: MEMORY_SYSTEM_NAME,
       count: this.entries.length,
       limit: this.limit,
       baseLimit: this.baseLimit,
@@ -476,6 +971,11 @@ export class MemoryStore {
       deduped: this.deduped,
       merged: this.mergedCount,
       migrated: this.migrated,
+      // 分账号 + 七类布局（2026-10-27）
+      account: this.account,
+      shards: this.countByKind(),
+      activeDays: this.activeDays,
+      activeDayKey: this.activeDayKey,
     }
   }
 
@@ -498,14 +998,18 @@ export class MemoryStore {
     const target = String(id ?? '')
     const entry = this.entries.find((e) => e.id === target)
     if (!entry) return null
-    if (patch.kind !== undefined) entry.kind = String(patch.kind)
+    if (patch.kind !== undefined) entry.kind = normalizeKind(patch.kind)
     if (patch.who !== undefined) entry.who = String(patch.who ?? '').trim()
     if (patch.qq !== undefined) entry.qq = normalizeQq(patch.qq)
     if (patch.text !== undefined) entry.text = String(patch.text ?? '').trim()
-    if (patch.weight !== undefined) {
-      const w = Math.round(Number(patch.weight))
-      entry.weight = Number.isFinite(w) ? Math.max(1, Math.min(5, w)) : entry.weight
+    if (patch.weight !== undefined) entry.weight = clampWeight(patch.weight, entry.weight)
+    // 压缩等级 0..3（原句/半句/一句/关键词），只改标记不改正文
+    if (patch.level !== undefined) {
+      const lv = Math.round(Number(patch.level))
+      if (Number.isFinite(lv)) entry.level = Math.max(0, Math.min(3, lv))
     }
+    // 称谓恒为最高档（见 add() 里的说明）
+    if (entry.kind === 'address') entry.weight = WEIGHT_MAX
     if (!this.save()) return null
     return entry
   }
@@ -528,6 +1032,52 @@ export class MemoryStore {
   }
 
   /**
+   * 记一个「活跃天」：每个自然日只加一次，而且只有真聊过天才加。
+   *
+   * 这是「不按日历天衰减」的关键——关机三天、插件停一周，记忆既不变好也不变坏；
+   * 只有她真的在说话的那天，才算「过了一天」，才开始逼近遗忘。
+   * 由 recall() / add() 自动调用，引擎不需要额外配合。
+   * @returns {boolean} 今天是不是第一次记
+   */
+  touchActivity() {
+    const key = localDateKey(new Date())
+    if (key === this.activeDayKey) return false
+    this.activeDayKey = key
+    this.activeDays += 1
+    // 一天只写一次账本；不写的话重启会退回旧的活跃天数，衰减就白算了
+    if (!this.broken) this.save()
+    return true
+  }
+
+  /**
+   * 命中记账：只记**真正返回给模型看的那几条**。
+   *
+   * 为什么必须记账（第 2 篇《让鲸鱼娘永生》原话：「命中必须有账，
+   * 靠印象判断一定会偏向遗忘」）：没有 hits，衰减就分不清
+   * 「这条从来没人问」和「天天在问、只是排序靠后」，结果把常用的也一起忘掉——
+   * 那不是遗忘，是丢东西。
+   *
+   * `addressOf()` 不走这里：称谓每轮无条件注入，记了必然刷成满分，没有信息量。
+   */
+  markHits(list) {
+    if (!Array.isArray(list) || !list.length) return
+    const now = Date.now()
+    let changed = 0
+    for (const e of list) {
+      if (!e || normalizeKind(e.kind) === 'address') continue
+      e.hits = Math.max(0, Math.round(Number(e.hits) || 0)) + 1
+      e.lastHitAt = now
+      e.lastActiveDay = this.activeDays
+      changed += 1
+    }
+    if (!changed) return
+    // 一轮对话里 recall 可能被调好几次，5 秒内只落一次盘
+    if (now - this._hitSaveAt < 5000) return
+    this._hitSaveAt = now
+    this.save()
+  }
+
+  /**
    * 超量时才剪：先删低权重 + 旧的，保住高权重。
    *
    * 2026-10-23 主人 m00709 第 1 条：满了**别直接剪**，先自动扩容一次
@@ -543,7 +1093,15 @@ export class MemoryStore {
       this.logger('info', `记忆池已满（${before} 条）→ 自动扩容到 ${this.limit} 条`)
       if (this.entries.length <= this.limit) return
     }
-    this.entries.sort((a, b) => (b.weight - a.weight) || (b.at - a.at))
+    /*
+     * 排序用**有效权重**而不是 base（2026-10-27）：
+     * 淘汰的意义是「谁现在最不重要」，而不是「谁当初分数最低」。
+     * 一条 base=10 但三个月没被问过的事实，应该排在刚记下的 base=8 后面。
+     */
+    const days = this.activeDays
+    this.entries.sort(
+      (a, b) => effectiveWeight(b, days) - effectiveWeight(a, days) || b.weight - a.weight || b.at - a.at,
+    )
     this.entries = this.entries.slice(0, this.limit)
   }
 
@@ -565,7 +1123,8 @@ export class MemoryStore {
    * 最后有相关性阈值：query 非空时，一分没命中的条目直接不返回。
    * 宁可"想不起来"也别答非所问——这正是用户最烦的那种失忆。
    */
-  recall({ who = '', qq = '', query = '', limit = MEMORY_WINDOW.contextLimit } = {}) {
+  recall({ who = '', qq = '', query = '', limit = MEMORY_WINDOW.contextLimit, charBudget = MEMORY_WINDOW.charBudget } = {}) {
+    this.touchActivity()
     const q = String(query || '').toLowerCase().trim()
     const words = tokenize(q)
     const qqStr = normalizeQq(qq)
@@ -646,11 +1205,20 @@ export class MemoryStore {
        * 一个都对不上而被下面那层过滤整片丢掉——人明明有记忆，却被判成"想不起来"。
        */
       if (id.qqHit || id.sameName) strongHit = true
-      s += (e.weight || 3) * 0.3
+      // 权重加分用**有效权重**（衰减 + 命中之后的值），系数 0.15
+      // 与改刻度前的 `w(1..5) * 0.3` 完全等价；换成有效权重是为了让「久不联系」真的变淡
+      s += effectiveWeight(e, this.activeDays) * 0.15
       if (wantMeme && e.kind === 'meme') s += 3 // 问梗时梗优先
       // 越新越值钱，但只值一点点，避免"全是刚说的废话"
       const ageDays = (Date.now() - e.at) / 86400000
       s += Math.max(0, 2 - ageDays / 30) * 0.3
+      /*
+       * 被更正过的条目（supersededBy，2026-10-27 三级去重引入）：
+       * 「他喜欢猫」后来被「他其实不喜欢猫」纠正，正文还留着备查，
+       * 但不能再跟新结论平起平坐地挤进提示词——否则模型看到两句相反的，
+       * 只能靠语气猜哪句算数。这里只降权不删除。
+       */
+      if (e.supersededBy) s *= SUPERSEDED_PENALTY
       return { e, s, hit, strongHit, id }
     })
 
@@ -694,16 +1262,49 @@ export class MemoryStore {
             const id = identity(e)
             return (id.qqHit || id.sameName || !e.who) && kinds.includes(e.kind)
           })
-          .sort((a, b) => kindRank(a) - kindRank(b) || b.weight - a.weight || b.at - a.at)
+          .sort(
+            (a, b) =>
+              kindRank(a) - kindRank(b) ||
+              effectiveWeight(b, this.activeDays) - effectiveWeight(a, this.activeDays) ||
+              b.at - a.at,
+          )
         if (fallback.length) {
           this.logger?.('debug', `泛问兜底召回：${q} → ${fallback.length} 条`)
-          return fallback.slice(0, limit)
+          const picked = this.applyCharBudget(fallback.slice(0, limit), charBudget)
+          this.markHits(picked)
+          return picked
         }
       }
     }
 
     pool.sort((a, b) => b.s - a.s)
-    return pool.slice(0, limit).map((x) => x.e)
+    const picked = this.applyCharBudget(pool.slice(0, limit).map((x) => x.e), charBudget)
+    this.markHits(picked)
+    return picked
+  }
+
+  /**
+   * 检索预算：这一轮真正喂回去的正文合计不超过 `charBudget` 字符（balanced 档 1200）。
+   *
+   * 为什么用字符数而不是条数：一条 240 字的「因果」和一条 8 字的「他住广州」，
+   * 对上下文的占用差 30 倍；只限条数等于没限流。
+   * 只决定「收哪几条」，**不改写正文**——截断由 contextFor() 负责，
+   * 这里动 text 会连带写回盘，等于偷偷改记忆。
+   * 至少保留第一条：宁可让她说一句，也别「什么都想不起来」。
+   */
+  applyCharBudget(list, budget = MEMORY_WINDOW.charBudget) {
+    if (!Array.isArray(list) || !list.length) return []
+    const cap = Math.round(Number(budget))
+    if (!Number.isFinite(cap) || cap <= 0) return list
+    const out = []
+    let used = 0
+    for (const e of list) {
+      const len = String(e?.text ?? '').length
+      if (out.length && used + len > cap) break
+      out.push(e)
+      used += len
+    }
+    return out
   }
 
   /**
@@ -721,16 +1322,16 @@ export class MemoryStore {
     const name = String(who || '').trim()
     /*
      * 排序：**先看权重，再看时间**（2026-10-26 主人 m01431：「恢复称谓的权重，
-     * 但是维持 5 级权重」）。
+     * 但是维持 5 级权重」；2026-10-27 m01449 改成 10 级，称谓一律钉满 10）。
      *
-     * 为什么不能只按时间：同一个人可能同时有「他希望你叫他「宝宝」」(w=4) 和
-     * 「他是主人本人，你叫他「主人」」(w=5)；纯按 at 排，谁后写谁在前，
+     * 为什么不能只按时间：同一个人可能同时有「他希望你叫他「宝宝」」和
+     * 「他是主人本人，你叫他「主人」」；纯按 at 排，谁后写谁在前，
      * 一条新写的闲聊外号就能把人工确认过的正经称谓挤到第二行——而
      * engine-context 的规矩是「同一人多条以第一行为准」。权重是人确认过的
      * 强度，比「谁后说的」更该说了算。权重相同再按时间新→旧。
      */
     const raw = this.entries
-      .filter((e) => e.kind === 'address')
+      .filter((e) => normalizeKind(e.kind) === 'address')
       .filter((e) => (q ? normalizeQq(e.qq) === q : Boolean(name) && e.who === name))
       .sort((a, b) => (b.weight || 0) - (a.weight || 0) || (b.at || 0) - (a.at || 0))
     const out = []
@@ -780,7 +1381,12 @@ export class MemoryStore {
         out.push(multi ? `## ${head}${q ? `（QQ ${q}）` : '（无 QQ）'}` : `## ${head}`)
         for (const e of list.sort((a, b) => b.at - a.at)) {
           const d = localDateKey(new Date(e.at))
-          out.push(`- ${d} [${e.kind}/w${e.weight}] ${e.text}`)
+          // 展示「base → 有效权重」：一眼能看出这条是不是正在变淡
+          const eff = effectiveWeight(e, this.activeDays)
+          const w = eff === e.weight ? `w${e.weight}` : `w${e.weight}→${eff}`
+          const lv = Number.isFinite(Number(e.level)) ? ` l${Math.max(0, Math.min(3, Math.round(Number(e.level))))}` : ''
+          const hits = Number(e.hits) > 0 ? ` h${e.hits}` : ''
+          out.push(`- ${d} [${e.kind}/${w}${lv}${hits}] ${e.text}`)
         }
         out.push('')
       }
@@ -938,5 +1544,68 @@ function sameIdentity(a, b) {
  * 所以 sticker **只认去掉格式后完全一样**；其余语义文本给 0.70 的模糊阈值。
  */
 function dupThreshold(kindA, kindB) {
-  return kindA === 'sticker' || kindB === 'sticker' ? 1 : 0.7
+  return normalizeKind(kindA) === 'meme' || normalizeKind(kindB) === 'meme' ? 1 : DUP_MERGE_SIMILARITY
+}
+
+/**
+ * 三级去重的两条线（对照 BaiShou-Next 的 DUPLICATE_THRESHOLD / MERGE_THRESHOLD）。
+ *
+ *   score >= DUP_SKIP_SIMILARITY  → 当重复，直接跳过（只刷新「又被提起」的时间）
+ *   DUP_MERGE_SIMILARITY ~ 0.92   → 合并：新的覆盖旧的文字，权重取高的
+ *   < DUP_MERGE_SIMILARITY        → 全新信息，直接存
+ *
+ * 为什么不再「沾边就覆盖」：生产里同一件事被反复提起时，每次都会重写一遍正文、
+ * 重新算一次时间，看上去像「今天刚知道的」，实际是三天前的旧结论。
+ */
+const DUP_SKIP_SIMILARITY = 0.92
+const DUP_MERGE_SIMILARITY = 0.7
+/** 被更正过的条目在召回时的降权系数（只降权，不删除） */
+const SUPERSEDED_PENALTY = 0.4
+
+/**
+ * 这句话是不是否定表述。
+ *
+ * 去重最大的事故是「他喜欢猫」被「他其实不喜欢猫」按相似度覆盖掉——字面几乎一样，
+ * 意思正好相反。这里只做粗判，宁可漏判也不乱判：
+ *   - 英文 not / never / don't / can't …
+ *   - 「不喜欢 / 不要 / 不是 / 不会 / 不能」这类否定谓词
+ *   - 句首或标点后的「不」「别」
+ * 刻意避开「不错 / 不过 / 不好意思 / 别人 / 别的」这些含「不」「别」但不是否定的词。
+ */
+function hasNegation(text) {
+  const t = String(text || '')
+  if (!t) return false
+  if (/(?:^|[\s，。；！？,.;!?])?(?:not|never|cannot)\b/i.test(t)) return true
+  if (/\b(?:don't|doesn't|isn't|aren't|won't|can't)\b/i.test(t)) return true
+  if (/不(?:喜欢|想|要|是|会|能|爱|去|来|吃|喝|玩|睡|做|认识|记得|同意|接受|觉得)/.test(t)) return true
+  if (/(?:^|[，。；、！？,.;:：\s])不(?!错|过|好意思|行|用|少|久)/.test(t)) return true
+  if (/(?:^|[，。；、！？,.;:：\s])别(?!人|的|处)/.test(t)) return true
+  if (/没有|没了|不再|从未|从来不/.test(t)) return true
+  return false
+}
+
+/**
+ * 两条文本共享几个实词（长度 >= 2 的切词）。
+ * 只有说的是同一件事才谈得上冲突——同一个人的两条无关记忆不该互相压制。
+ */
+function sharedKeywordCount(a, b) {
+  const A = new Set(tokenize(a).filter((w) => w.length >= 2))
+  if (A.size === 0) return 0
+  let n = 0
+  for (const w of new Set(tokenize(b).filter((x) => x.length >= 2))) {
+    if (A.has(w)) n += 1
+  }
+  return n
+}
+
+/**
+ * 两条记忆是不是「意思相反」。
+ * 判定条件：一边否定、一边不否定，且共享至少两个实词。
+ * 只用于去重时决定「不许合并」，不用来删东西。
+ */
+function conflicts(prevText, nextText) {
+  const a = hasNegation(prevText)
+  const b = hasNegation(nextText)
+  if (a === b) return false
+  return sharedKeywordCount(prevText, nextText) >= 2
 }

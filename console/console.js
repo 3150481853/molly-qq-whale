@@ -18,17 +18,16 @@
     : 120000;
   var PAGES = ['overview', 'chats', 'memory', 'pending', 'stickers', 'switches', 'budget', 'work', 'watchdog', 'ops', 'external', 'qq', 'exec', 'settings'];
 
-  /* 记忆类型：顺序即页面分组顺序。值和插件端 lib/memory.js 的 kind 枚举一一对应，
-     中文标签只在前端出现，不参与任何写请求。 */
+  /* 记忆七类（2026-10-27 主人 m01748）：值和插件端 lib/memory.js 的 MEMORY_KINDS
+     一一对应，顺序即页面分组顺序。老的 work / sticker 已并入 event / meme，
+     后端读旧值时会自动折成新类（KIND_ALIASES），这里不再单列。 */
   var MEM_KINDS = [
     ['fact', '事实'],
     ['preference', '偏好'],
     ['promise', '约定'],
     ['person', '人物'],
     ['event', '事件'],
-    ['work', '干活'],
-    ['sticker', '表情包'],
-    ['meme', '梗'],
+    ['meme', '梗与表情'],
     /* 称谓（2026-10-26）：主人 m01649 要求单独成类。
        memory.js 的 addressOf() 按 QQ 直取、不吃权重窗口，页面放最后是因为它一般条数最少，
        但排序不影响上面的分组顺序（顺序即页面分组顺序，放最后就是最后一组）。 */
@@ -1528,7 +1527,8 @@
       return '<option value="' + k[0] + '"' + (k[0] === kind ? ' selected' : '') + '>' +
         k[1] + '（' + k[0] + '）</option>';
     }).join('');
-    var weight = it.weight === undefined || it.weight === null ? 3 : it.weight;
+    /* 权重刻度 1–10（2026-10-27 主人：5 → 10，老数据 ×2，一位小数）。默认 6 = 旧默认 3 的等比。 */
+    var weight = it.weight === undefined || it.weight === null ? 6 : it.weight;
     return '' +
       '<div class="field"><label class="field-label" for="cmKind">类型</label>' +
       '<select class="input" id="cmKind">' + options + '</select></div>' +
@@ -1541,8 +1541,8 @@
       '<div class="field"><label class="field-label" for="cmText">正文' +
       '<span class="crud-counter mono" id="cmCount">0/200</span></label>' +
       '<textarea class="input textarea" id="cmText" rows="4" placeholder="一句话说清楚，Molly 之后会按权重取用">' + esc(it.text || '') + '</textarea></div>' +
-      '<div class="field"><label class="field-label" for="cmWeight">权重（1–5，越高越常被想起）</label>' +
-      '<input class="input" id="cmWeight" type="number" min="1" max="5" step="1" value="' + esc(String(weight)) + '"></div>';
+      '<div class="field"><label class="field-label" for="cmWeight">权重（1–10，一位小数，越高越常被想起）</label>' +
+      '<input class="input" id="cmWeight" type="number" min="1" max="10" step="0.1" value="' + esc(String(weight)) + '"></div>';
   }
 
   function bindMemoryCounter() {
@@ -1606,9 +1606,11 @@
     var clen = Array.from(text).length;
     if (clen > 200) throw new Error('正文最多 200 字，现在 ' + clen + ' 字');
     if (MEM_KINDS.every(function (k) { return k[0] !== kind; })) throw new Error('类型不合法：' + kind);
-    if (!isFinite(weight) || Math.round(weight) !== weight || weight < 1 || weight > 5) {
-      throw new Error('权重必须是 1–5 的整数');
+    /* 权重：1–10，最多一位小数（与服务端 parseWeight 同一口径） */
+    if (!isFinite(weight) || weight < 1 || weight > 10 || Math.abs(Math.round(weight * 10) - weight * 10) > 1e-9) {
+      throw new Error('权重必须是 1–10 的数字，最多一位小数');
     }
+    weight = Math.round(weight * 10) / 10;
     /* QQ 号可空；非空必须是 5–12 位、不以 0 开头的数字（QQ 号没有前导 0） */
     if (qq && !/^[1-9]\d{4,11}$/.test(qq)) {
       throw new Error('QQ 号要 5–12 位数字且不以 0 开头，现在是「' + qq + '」');

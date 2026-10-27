@@ -694,6 +694,95 @@ async function ensureVoice(cfg) {
   }
 }
 
+// ── 保活：DeepSeek Harness（Molly 的大脑 + 插件宿主）─────────────────────
+// 2026-10-26 重启事故：QQ/NapCat 有自启（SnowLuma-Boot + start-molly.ps1），
+// DSH 一个自启项都没有，于是开机后 QQ 在线、Molly 一句话不说，而 watchdog 也
+// 看不出问题 —— phase=online 只代表 NapCat 里 QQ 登录了。
+// 开机自启交给计划任务 Molly-DSH（登录后 30 秒跑 start-dsh.ps1）；
+// 这里做兜底：进程真没了就补拉。只有「进程不在」才动手，端点不通只记日志，
+// 免得因为缓存端口过期这种小毛病去重启一个活着的 DSH。
+const DSH_SCRIPT = path.join(HERE, 'start-dsh.ps1')
+// 拉起后 DSH 要十几秒才起得来；这期间每轮都「确认没进程」再拉一次会打架，
+// 所以给个冷却窗口（也顺带限制住「exe 坏了、每两分钟拉一次」的刷屏）。
+const DSH_RESTART_COOLDOWN_MS = 3 * 60 * 1000
+
+async function dshProcessCount() {
+  const r = await psOnce("(Get-Process -Name 'DeepSeek Harness' -ErrorAction SilentlyContinue | Measure-Object).Count", 8000)
+  if (!r.ok) return { ok: false, err: r.err }
+  const n = Number(String(r.out).trim().split(/\r?\n/).pop())
+  return { ok: true, count: Number.isFinite(n) ? n : 0 }
+}
+
+// 进程活着不等于大脑活着：插件宿主端口不通，她也收不到消息。
+// 只用心跳脚本缓存下来的 base（out/heartbeat-state.json 的 pluginBase），
+// 不自己扫端口 —— 那是心跳脚本的活，watchdog 每分钟都跑，别太重。
+async function dshEndpoint() {
+  const hb = readJson(path.join(OUT, 'heartbeat-state.json'), {})
+  const base = String(hb?.pluginBase || '').replace(/\/+$/, '')
+  if (!base) return { ok: true, unknown: true, note: '（没有缓存的宿主地址，跳过端点探测）' }
+  try {
+    const r = await fetch(`${base}/dsh-qq-whale/state`, { signal: AbortSignal.timeout(4000) })
+    return { ok: r.ok, note: `${base} HTTP ${r.status}` }
+  } catch (e) {
+    return { ok: false, note: `${base} 连不上：${String(e?.message || e).slice(0, 100)}` }
+  }
+}
+
+async function startDsh() {
+  if (!fs.existsSync(DSH_SCRIPT)) return '（start-dsh.ps1 不存在，无法拉起 DSH）'
+  return await new Promise((resolve) => {
+    execFile('powershell.exe',
+      ['-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', DSH_SCRIPT],
+      { timeout: 120000, windowsHide: true },
+      (err, stdout, stderr) => {
+        const tail = String(stdout || stderr || '').slice(-300)
+        log('start-dsh 退出码', err?.code ?? 0, tail)
+        resolve(err ? `（拉起 DSH 失败：${String(stderr || err.message).slice(0, 120)}）` : '（已拉起 DSH）')
+      })
+  })
+}
+
+async function ensureDsh(cfg = {}, state = {}) {
+  try {
+    const p = await dshProcessCount()
+    if (!p.ok) {
+      log('DSH 保活：查进程失败', String(p.err || '').slice(0, 120))
+      return { ok: true }
+    }
+    if (p.count <= 0) {
+      state.dshFails = Number(state.dshFails || 0) + 1
+      if (state.dshFails < 2) {
+        log(`DSH 保活：没进程（${state.dshFails}/2），下一轮再确认`)
+        return { ok: false }
+      }
+      const lastStart = Number(state.lastDshStartAt || 0)
+      if (lastStart && nowMs() - lastStart < DSH_RESTART_COOLDOWN_MS) {
+        log(`DSH 保活：${Math.round((nowMs() - lastStart) / 1000)} 秒前刚拉过，先等它起来`)
+        return { ok: false }
+      }
+      log('DSH 保活：确认 DSH 没在跑 → 拉起')
+      const note = await startDsh()
+      log('DSH 保活：' + note)
+      state.dshFails = 0
+      state.lastDshStartAt = nowMs()
+      return { ok: false, note }
+    }
+    state.dshFails = 0
+    const ep = await dshEndpoint()
+    if (ep.ok) {
+      state.dshEndpointFails = 0
+    } else {
+      state.dshEndpointFails = Number(state.dshEndpointFails || 0) + 1
+      log(`DSH 保活：进程在，但宿主端点不通（第 ${state.dshEndpointFails} 次）${ep.note}`)
+    }
+    state.lastDshAt = nowMs()
+    return ep
+  } catch (e) {
+    log('DSH 保活异常（忽略）:', String(e?.message || e).slice(0, 160))
+    return { ok: true }
+  }
+}
+
 async function qqProcessList() {
   const cmd = "Get-Process QQ -ErrorAction SilentlyContinue | Select-Object Id,ProcessName," +
     "@{n='memMB';e={[int]($_.WorkingSet64/1MB)}}" +
@@ -805,6 +894,10 @@ export async function checkOnce(cfg, opts = {}) {
 
   const res = await checkStatus(cfg, state)
   state.lastCheckAt = nowMs()
+
+  // 顺手保活 DeepSeek Harness（Molly 的大脑）：进程没了就补拉。
+  // 放在 QQ 检测之前/之后都行，但它绝不能让掉线检测崩掉，所以吞错误。
+  await ensureDsh(cfg, state).catch(() => {})
 
   // 顺手保活语音服务（Dania / GPT-SoVITS 9880）：不在线就拉启动脚本。
   // 语音是加分项，保活异常绝不能影响掉线检测与抢修，所以这里吞掉所有错误。

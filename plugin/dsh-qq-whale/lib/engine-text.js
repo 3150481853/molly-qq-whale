@@ -41,6 +41,27 @@ export function rateLimitLine(rand = Math.random) {
 }
 
 /**
+ * 模型整条链都没接住时，替她说一句（2026-10-27，主人 m02307）。
+ *
+ * 原话：「还是取消回不过来就不回的机制吧」。以前 `generate()` 遇到
+ * ① 模型链全挂（`!res`）② 模型返回空正文（`parts.length === 0`）
+ * 就直接 return null，调用方当成「这轮没话可说」→ 用户看到的是已读不回。
+ *
+ * 现在改成说一句短的：让她"卡了但还在"，而不是"人没了"。
+ * 台词要符合人设——不道歉、不解释技术原因，就像人被打断了一下。
+ * `rand` 可注入，默认 Math.random。
+ */
+export function modelDownLine(rand = Math.random) {
+  const pool = [
+    '等等，我刚刚走神了，你再说一遍？',
+    '脑子卡了一下——刚那句我没接住',
+    '诶？我这边断了一下，你把刚才那句再发我一次',
+    '唔……让我把话咽回去再说一遍，你刚才说什么来着',
+  ]
+  return pool[Math.floor(rand() * pool.length)]
+}
+
+/**
  * 给 system prompt 打「降智」补丁。幂等：已经有就不重复加。
  *
  * 两个入口共用同一段话（预算超限的 buildSystemPrompt、限流转 trae 的

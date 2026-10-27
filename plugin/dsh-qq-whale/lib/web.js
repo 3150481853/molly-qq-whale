@@ -28,7 +28,16 @@ import { addLearnedHash, removeLearnedHash } from './sticker-learn.js'
 import { clockText, parseHHMM } from './clock.js'
 // qq 是记忆的唯一身份（2026-10-19）：校验规则只写在 memory.js 一处，
 // 免得控制台和引擎两边各写一套正则、慢慢就跑偏了。
-import { isValidQq } from './memory.js'
+import {
+  isValidQq,
+  clampWeight,
+  WEIGHT_DEFAULT,
+  WEIGHT_MIN,
+  WEIGHT_MAX,
+  MEMORY_KINDS,
+  KIND_ALIASES,
+  normalizeKind,
+} from './memory.js'
 // 运行时切模型（task-56）：可选清单 + override 读写都在这个小模块里
 import {
   ROLES as MODEL_ROLES,
@@ -80,13 +89,20 @@ function pyHash(obj) {
  *
  * 这些数都来自契约，改之前先看 docs/console-crud-contract.md：
  *   - 记忆正文 1..200 字（超长的该拆成多条，不是塞成一段）
- *   - weight 1..5，越高的越不该被上下文压缩掉
+ *   - weight 1..10（可一位小数），越高的越不该被上下文压缩掉
  *   - kind 是白名单，前端下拉框跟着它走
  *   - 单张表情包 ≤ 8 MB；正文上限按 base64 膨胀（约 4/3）+ JSON 外壳放宽
  */
-const MEMORY_KINDS = ['fact', 'preference', 'promise', 'person', 'event', 'work', 'sticker', 'meme', 'address']
+// 记忆七类（2026-10-27 主人 m01748 第 2 条）：真正落盘的是 memory.js 里的 MEMORY_KINDS；
+// 这里保留老 kind 的别名（work→event、sticker→meme），老控制台/脚本传旧值也能收。
 const MEMORY_TEXT_MAX = 200
 const MEMORY_WHO_MAX = 40
+/** kind 入参校验：七类原名或别名都收，返回归一后的 kind；不认识返回 '' */
+function readMemoryKind(raw) {
+  const value = raw === undefined || raw === null || raw === '' ? 'fact' : String(raw).trim()
+  if (!MEMORY_KINDS.includes(value) && !Object.hasOwn(KIND_ALIASES, value)) return ''
+  return normalizeKind(value)
+}
 const STICKER_MAX_BYTES = 8 * 1024 * 1024
 const UPLOAD_BODY_LIMIT = Math.ceil(STICKER_MAX_BYTES * 1.4) + 8192
 
@@ -386,6 +402,25 @@ export class WebWidget {
             failed: e.stats?.lotterySendFail || 0,
           },
         }
+        /*
+         * 并行水位（2026-10-27，方案 A）：同群双泳道 + 全局模型并发闸门的实时情况。
+         *
+         * 要不要继续上「方案 B（真并发多条）」就看两个数：
+         *   lanes 长期是 2  → 同一个群里确实有 targeted 和 ambient 同时在跑；
+         *   model.waiting 长期 > 0 → 闸门在排队，说明免费 flash 已经吃不住，
+         *   这时候再加并发只会把「回不过来」放大，不该动。
+         */
+        out.parallel = {
+          jobs: e.jobs ? e.jobs.size : 0,
+          lanes: e.jobs ? [...e.jobs.keys()].map((k) => String(k).replace('\u0000', '|')) : [],
+          model: e.modelSlots
+            ? {
+                limit: e.modelSlots.limit,
+                active: e.modelSlots.active,
+                waiting: Array.isArray(e.modelSlots.waiters) ? e.modelSlots.waiters.length : 0,
+              }
+            : null,
+        }
         out.poke = {
           enabled: e.config?.pokeEnabled !== false,
           backChance: Number(e.config?.pokeBackChance ?? 0.7),
@@ -486,7 +521,13 @@ export class WebWidget {
         if (snap) out.learner = { ...(out.learner || {}), ...snap }
       } catch {}
       const mem = e?.memory?.entries
-      const fromMem = Array.isArray(mem) ? mem.filter((x) => x?.kind === 'sticker').length : 0
+      // sticker 已并入 meme（2026-10-27 七类改造）：老条目的 kind 读回来就是 meme，
+      // 所以用正文前缀精确辨认「学来的表情包」这笔账，别把普通梗也算进去。
+      const fromMem = Array.isArray(mem)
+        ? mem.filter(
+            (x) => normalizeKind(x?.kind) === 'meme' && String(x?.text || '').startsWith('学到了表情包'),
+          ).length
+        : 0
       // StickerLibrary 的 items 里，"学来的"子目录下的那部分就是学来的
       const items = e?.stickers?.items
       const fromDir = Array.isArray(items)
@@ -1071,10 +1112,18 @@ export class WebWidget {
       return store
     }
 
-    /** 记忆 weight 校验：必须是 1~5 的整数（契约 §2.1） */
+    /**
+     * 记忆 weight 校验：1~10 的数字，最多一位小数（2026-10-27 主人 m01402：
+     * 刻度 5 → 10，老数据 ×2）。返回 null 表示不合法，由路由层回 400。
+     */
     const parseWeight = (v) => {
+      if (v === null || v === undefined || v === '') return null
       const w = Number(v)
-      return Number.isInteger(w) && w >= 1 && w <= 5 ? w : null
+      if (!Number.isFinite(w) || w < WEIGHT_MIN || w > WEIGHT_MAX) return null
+      // 一位小数：先按一位进位再比，避免 6.0000000001 这种浮点尾巴被判非法
+      const one = Math.round(w * 10) / 10
+      if (Math.abs(one - w) > 1e-9) return null
+      return clampWeight(one)
     }
 
     /*
@@ -1141,7 +1190,7 @@ export class WebWidget {
       }),
     })
 
-    // POST /memory/add —— text 1..200 字，kind 白名单，weight 1..5
+    // POST /memory/add —— text 1..200 字，kind 白名单，weight 1..10（一位小数）
     add({
       kind: 'exact',
       path: `${ROUTE_PREFIX}/memory/add`,
@@ -1154,10 +1203,13 @@ export class WebWidget {
         const text = String(body.text ?? '').trim()
         if (!text) return sendFail(res, 400, 'text 不能为空')
         if (charLen(text) > MEMORY_TEXT_MAX) return sendFail(res, 400, `text 超过 ${MEMORY_TEXT_MAX} 字`)
-        const kind =
-          body.kind === undefined || body.kind === null || body.kind === '' ? 'fact' : String(body.kind)
-        if (!MEMORY_KINDS.includes(kind)) {
-          return sendFail(res, 400, `kind 只能是 ${MEMORY_KINDS.join(' / ')}`)
+        const kind = readMemoryKind(body.kind)
+        if (!kind) {
+          return sendFail(
+            res,
+            400,
+            `kind 只能是 ${MEMORY_KINDS.join(' / ')}（work→event、sticker→meme 这两个老名字也收）`,
+          )
         }
         const who =
           body.who === undefined || body.who === null
@@ -1168,11 +1220,20 @@ export class WebWidget {
         if (!isValidQq(qq)) {
           return sendFail(res, 400, 'qq 必须是 5~12 位数字的 QQ 号（不以 0 开头）')
         }
-        let weight = 3
+        let weight = WEIGHT_DEFAULT
         if (body.weight !== undefined && body.weight !== null) {
           const w = parseWeight(body.weight)
-          if (w === null) return sendFail(res, 400, 'weight 必须是 1~5 的整数')
+          if (w === null) return sendFail(res, 400, 'weight 必须是 1~10 的数字，最多一位小数')
           weight = w
+        }
+        // 压缩等级 0..3，默认 0（原句）。压缩是显式动作，不在这里自动压。
+        let level = 0
+        if (body.level !== undefined && body.level !== null) {
+          const lv = Math.round(Number(body.level))
+          if (!Number.isFinite(lv) || lv < 0 || lv > 3) {
+            return sendFail(res, 400, 'level 必须是 0~3 的整数（0 原句 / 1 半句 / 2 一句 / 3 关键词）')
+          }
+          level = lv
         }
         /*
          * merged 字段（契约 §2.1「真实行为」）：MemoryStore.add() 自带相似度去重，
@@ -1181,8 +1242,15 @@ export class WebWidget {
          * 前端据此提示「内容相近，已合并到已有条目」，否则用户会以为没保存。
          */
         const idsBefore = new Set(store.entries.map((e) => e.id))
-        const entry = store.add({ kind, who, qq, text, weight })
-        if (!entry) return sendFail(res, 500, '写入失败（memory.json 写不进去）')
+        const entry = store.add({ kind, who, qq, text, weight, level, source: body.source })
+        if (!entry) {
+          // add() 只在两种情况下返 null：正文空（上面已拦）和「来源闸门」拒收。
+          return sendFail(
+            res,
+            400,
+            '写入被拒：source=assistant（助手自述）不能写成 fact / person，只许 preference / event / meme',
+          )
+        }
         const merged = idsBefore.has(entry.id)
         this.logger(
           'info',
@@ -1222,8 +1290,14 @@ export class WebWidget {
           patch.text = text
         }
         if (body.kind !== undefined) {
-          const kind = String(body.kind)
-          if (!MEMORY_KINDS.includes(kind)) return sendFail(res, 400, `kind 只能是 ${MEMORY_KINDS.join(' / ')}`)
+          const kind = readMemoryKind(body.kind)
+          if (!kind) {
+            return sendFail(
+              res,
+              400,
+              `kind 只能是 ${MEMORY_KINDS.join(' / ')}（work→event、sticker→meme 这两个老名字也收）`,
+            )
+          }
           patch.kind = kind
         }
         if (body.who !== undefined) patch.who = String(body.who ?? '').trim().slice(0, MEMORY_WHO_MAX)
@@ -1237,8 +1311,16 @@ export class WebWidget {
         }
         if (body.weight !== undefined) {
           const w = parseWeight(body.weight)
-          if (w === null) return sendFail(res, 400, 'weight 必须是 1~5 的整数')
+          if (w === null) return sendFail(res, 400, 'weight 必须是 1~10 的数字，最多一位小数')
           patch.weight = w
+        }
+        // 压缩等级 0..3（0 原句 / 1 半句 / 2 一句 / 3 关键词），只改标记不改正文
+        if (body.level !== undefined) {
+          const lv = Math.round(Number(body.level))
+          if (!Number.isFinite(lv) || lv < 0 || lv > 3) {
+            return sendFail(res, 400, 'level 必须是 0~3 的整数（0 原句 / 1 半句 / 2 一句 / 3 关键词）')
+          }
+          patch.level = lv
         }
         if (Object.keys(patch).length === 0) return sendFail(res, 400, '没有要改的字段')
         const entry = store.update(id, patch)

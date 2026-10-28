@@ -50,7 +50,9 @@ function materialize(rev) {
   fs.mkdirSync(genDir, { recursive: true })
 
   for (const file of fs.readdirSync(LIB_DIR)) {
-    if (!file.endsWith('.js')) continue
+    // .js 是主体；.mjs 也得带上（jasmine-bridge.mjs 这类独立小模块），
+    // 只拷 .js 会让 gen 里的 engine.js 找不到同目录的 .mjs，整包加载失败。
+    if (!/\.(js|mjs)$/i.test(file)) continue
     if (SKIP_FILES.has(file)) continue
     fs.copyFileSync(path.join(LIB_DIR, file), path.join(genDir, file))
   }

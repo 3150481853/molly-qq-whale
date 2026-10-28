@@ -10,6 +10,8 @@ import {
   estimateTokens,
   buildLetter,
   buildLetterPrompt,
+  buildLetterRetryHint,
+  letterQuality,
   cleanModelLetter,
   shouldWriteLetter,
   currentWeekKey,
@@ -171,6 +173,21 @@ test('周信：本周不写（上次写的就是本周）', () => {
   const key = currentWeekKey()
   assert.equal(shouldWriteLetter({ lastLetterWeek: key }), false)
   assert.equal(shouldWriteLetter({ lastLetterWeek: '2000-W01' }), true)
+})
+
+test('周信：流水账判不合格，有感受判合格', () => {
+  const chore = '这周我帮主人查了天气，回复了消息，发了表情包，记了三条记忆，提醒了他开会，处理了两张图。'
+  const feel = '这周有一次，被人叫了名字，我心里忽然一紧，有点高兴又有点不好意思。其实我后来想，我大概是怕被忘掉。那天下午很无聊，我盯着屏幕发呆，好奇他们都在忙什么。'
+  assert.equal(letterQuality(chore).ok, false)
+  const q = letterQuality(feel)
+  assert.equal(q.ok, true)
+  assert.ok(q.feeling >= 3)
+})
+
+test('周信：重写提示要求多写感受、少罗列', () => {
+  const hint = buildLetterRetryHint()
+  assert.match(hint, /感受/)
+  assert.match(hint, /流水账|罗列/)
 })
 
 /* ------------------------------------------------------------ token 账本 */

@@ -7,6 +7,35 @@
 
 ---
 
+## 2026-10-31 · v1.1.6-Hotfix.1：周信改成「有感受」的写法 + 补一个预览接口
+
+> 主人（m02167）：「1.做，2.主要是不要念流水账，要有molly自己的感受」；发版指令（m02479）：「够了，把改动写1.1.6热修复1就行」。
+> 版本口径：Molly `1.1.6-Hotfix.1`，茉莉花 `0.2.0` 不变（只改周信生成与插件接线，不动记忆模块 API）。
+
+**改了什么**
+
+- **周信提示词**（`jasmine/src/letter.mjs` 的 `buildLetterPrompt()`）：明确「不是工作汇报，是你一个人坐下来写给的私房话」；禁止「先…然后…接着」流水账，要求材料只挑 1~2 件展开、至少四处具体感受、写自己的变化/做砸的事/偷偷得意的事、不要只写主人吩咐的活、不编造事实、不出现 QQ 号/群号/时间戳/数字统计、开头别套话结尾别升华。
+- **质量自检 + 一次重写**（新增导出 `letterQuality()` / `buildLetterRetryHint()`）：按感受词（觉得/心里/有点/忽然…）与事务动词（帮/替/完成了/回复了…）粗略打分，`feeling>=3` 且 `chore<=max(2, ceil(feeling*0.8))` 才算过；第一版不过就把「上一版写成了流水账」追加进提示再写一次，`source` 记 `model` / `model-weak`，仍不过就用第二版。
+- **素材抽成方法**（`engine.js` 新增 `collectLetterFacts(weekKey)`）：周聚合摘要 + 原始记忆（event/person/meme/promise/preference）+ 事件桶兜底；`maybeWriteWeeklyLetter()` 与预览共用同一份取样逻辑。
+- **预览接口**（`web.js` 新增 `POST /dsh-qq-whale/letter`，体 `{weekKey?}`）：只生成、不发送、不写记忆，返回 `{ok,weekKey,text,source,quality,facts,chars}`；由 `engine.previewWeeklyLetter()` 实现。控制台/群主想先看一版不用等到周一。
+- 开关不变：`jasmineLetter`（总开关）、`jasmineLetterModel`（false 时退回模板）。
+
+**验证**
+
+- `cd jasmine && node --test` → **47 pass / 0 fail**（新增 2 条：流水账判不合格、有感受判合格；另有重写提示文案断言）。
+- `node --check engine.js` / `web.js` / `letter.mjs` 全过。
+- 真机预览（weekKey `2026-10-19`，519 条素材）：`source=model`、793 字、`feeling=19 chore=1`、`quality.ok=true`；样信存 `out/ja_letter_sample_2026-10-19.md`。
+- 线上插件已热重载（`plugin_manager target=include:dsh-qq-whale` false→true），`/state.jasmine.available=true`。
+
+**怎么退**
+
+- 想回模板版：`config.jasmineLetterModel = false`（模板路径一直保留）。
+- 想回旧提示词：还原 `jasmine/src/letter.mjs` 的 `buildLetterPrompt`（旧版 7 条要求，感受只要求「至少两处」）。
+
+**顺带（不随包）**：3 个真实群成员号的全历史重写 + Release 附件重传已完成，细节见 `docs/STATE.md` §9.6。
+
+---
+
 ## 2026-10-31 · v1.1.6 正式版：1.1.6 收口（预览 1~6 的全部内容 + 周信改成模型写）
 
 > 主人（m02013）：「总结一下如今的升级（包括浏览小黑盒等），准备发1.1.6正式版」。

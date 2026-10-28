@@ -1044,6 +1044,39 @@ export class WebWidget {
       }),
     })
 
+    /*
+     * 周信预览（2026-10-31）：只生成、不发送、不写记忆。主人在控制台点一下就能看
+     * 这周的信长什么样，改完提示词不用等到周一。
+     *   POST /dsh-qq-whale/letter  { weekKey?: 'YYYY-MM-DD' }
+     */
+    add({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/letter`,
+      ...wrap(async (req, res) => {
+        const e = this.engineRef?.()
+        if (!e || typeof e.previewWeeklyLetter !== 'function') {
+          sendJson(res, 503, { ok: false, error: '引擎还没就绪，稍后再试' })
+          return
+        }
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          return
+        }
+        const raw = await readBody(req)
+        let body = {}
+        try {
+          body = JSON.parse(raw || '{}') || {}
+        } catch {
+          sendJson(res, 400, { ok: false, error: '请求体不是合法 JSON' })
+          return
+        }
+        const wantKey = typeof body?.weekKey === 'string' ? body.weekKey.trim() : ''
+        const weekKey = /^\d{4}-\d{2}-\d{2}$/.test(wantKey) ? wantKey : ''
+        const out = await e.previewWeeklyLetter(weekKey ? { weekKey } : {})
+        sendJson(res, out?.ok ? 200 : 500, out)
+      }),
+    })
+
     add({
       kind: 'exact',
       path: `${ROUTE_PREFIX}/toggle`,

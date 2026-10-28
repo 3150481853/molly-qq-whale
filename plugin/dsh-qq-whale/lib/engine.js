@@ -5750,6 +5750,107 @@ export class ChatEngine {
    *   - 信本身也落成一条记忆（letterEntry），以后召回得到；
    *   - 一周只写一次：lastLetterWeek 落在 <dataDir>/jasmine/state.json。
    */
+  /**
+   * 收集某一周的写信素材（原始记忆优先，摘要/事件桶兜底）。
+   * 抽出来是为了线上能「先看一封再发」：previewWeeklyLetter 不写记忆、不改状态。
+   */
+  collectLetterFacts(weekKey) {
+    let facts = []
+    let stats = null
+    // 先把上周的事件压成摘要（幂等、失败不影响写信）
+    let summaries = []
+    try {
+      summaries = this.memory.summarizeWeek(weekKey) || []
+    } catch (err) {
+      this.logger?.('warn', `周信：周聚合失败（继续用原始事件）：${err?.message || err}`)
+    }
+    try {
+      const start = new Date(`${weekKey}T00:00:00`)
+      const startTs = start.getTime()
+      const endTs = startTs + 7 * 86_400_000
+      if (Number.isFinite(startTs)) {
+        const wanted = new Set(['event', 'person', 'meme', 'promise', 'preference'])
+        const windowEntries = (this.memory.entries || []).filter((e) => {
+          const at = Number(e.at) || 0
+          if (at < startTs || at >= endTs) return false
+          if (!wanted.has(String(e.kind || ''))) return false
+          if (e.weekSummaryFor || e.letterFor) return false
+          if (String(e.source || '') === 'system') return false
+          return String(e.text || '').trim().length >= 4
+        })
+        facts = windowEntries
+          .map((e) => ({
+            who: String(e.who || ''),
+            qq: String(e.qq || ''),
+            text: String(e.text || ''),
+            at: Number(e.at) || 0,
+            kind: String(e.kind || ''),
+          }))
+          .sort((a, b) => a.at - b.at)
+        // 粗统计：表情认了几张、答应几件事、替主人办了几件、进过几个群
+        const groups = new Set()
+        let chores = 0
+        let memes = 0
+        let promises = 0
+        for (const e of windowEntries) {
+          const text = String(e.text || '')
+          if (/^我(帮|替)(他|她|主人)/.test(text)) chores += 1
+          if (String(e.kind) === 'meme') memes += 1
+          if (String(e.kind) === 'promise') promises += 1
+          if (e.groupId) groups.add(String(e.groupId))
+          else if (String(e.qq || '').trim().startsWith('g')) groups.add(String(e.qq).trim())
+        }
+        stats = { chores, memes, promises, people: new Set(windowEntries.filter((e) => e.who).map((e) => String(e.who))).size, groups: groups.size }
+      }
+    } catch (err) {
+      this.logger?.('warn', `周信：原始记忆取样失败：${err?.message || err}`)
+    }
+    if (!facts.length && summaries?.length) {
+      facts = summaries
+        .map((e) => ({ who: String(e.who || ''), text: String(e.text || ''), at: Number(e.at) || 0 }))
+        .filter((f) => f.text)
+    }
+    if (!facts.length) {
+      // 没有摘要（例如这周没人说话、或聚合已做过但条目被归档）就退回原始事件采样
+      try {
+        const buckets = this.memory.eventBuckets?.(weekKey)
+        if (buckets && typeof buckets.values === 'function') {
+          const all = []
+          for (const b of buckets.values()) {
+            for (const it of b.items || []) all.push({ who: String(it.who || ''), text: String(it.text || ''), at: Number(it.at) || 0 })
+          }
+          facts = all.sort((a, b) => a.at - b.at).slice(0, 8)
+        }
+      } catch {
+        facts = []
+      }
+    }
+    return { facts, stats }
+  }
+
+  /**
+   * 只生成、不发送、不写记忆——给控制台/主人先看一版（2026-10-31 主人要求
+   * 「不要念流水账，要有 Molly 自己的感受」，改提示词后要能当场看效果）。
+   */
+  async previewWeeklyLetter({ weekKey } = {}) {
+    try {
+      const mod = this._jasmine
+      if (!mod || typeof mod.buildLetterPrompt !== 'function') return { ok: false, error: 'jasmine 还没加载' }
+      const key = String(weekKey || this.previousWeekMonday())
+      const { facts, stats } = this.collectLetterFacts(key)
+      if (!facts.length) return { ok: false, error: `${key} 这一周没有可用素材`, weekKey: key, facts: 0 }
+      let letter = await this.writeLetterWithModel({ mod, weekKey: key, facts, stats })
+      if (!letter) {
+        letter = mod.buildLetter({ weekKey: key, facts, owner: '你', stats, maxChars: 900, maxFacts: 8 })
+        if (letter) letter.source = 'template'
+      }
+      if (!letter?.text) return { ok: false, error: '没有写出信来', weekKey: key, facts: facts.length }
+      return { ok: true, weekKey: key, text: letter.text, source: letter.source, quality: letter.quality || null, facts: facts.length, chars: letter.text.length }
+    } catch (err) {
+      return { ok: false, error: String(err?.message || err) }
+    }
+  }
+
   async maybeWriteWeeklyLetter() {
     try {
       if (this.config?.jasmineLetter === false) return { skipped: 'disabled' }
@@ -5761,82 +5862,7 @@ export class ChatEngine {
       const state = jasmineBridge.readState?.(dir) || {}
       if (String(state.lastLetterWeek || '') === weekKey) return { skipped: 'already-written', weekKey }
 
-      // 先把上周的事件压成摘要（幂等、失败不影响写信）
-      let summaries = []
-      try {
-        summaries = this.memory.summarizeWeek(weekKey) || []
-      } catch (err) {
-        this.logger?.('warn', `周信：周聚合失败（继续用原始事件）：${err?.message || err}`)
-      }
-
-      /*
-       * 写信用的素材不能只有「周聚合摘要」——摘要是「某群聊了 N 件事，主要是 …」，
-       * 读起来像工作汇报（主人 10-31 明确说过：不像日记、没感情、只说主人的事）。
-       * 所以优先取**这周的原始记忆**（人/梗/承诺/偏好/事件都要），摘要在后面兜底。
-       */
-      let facts = []
-      let stats = null
-      try {
-        const start = new Date(`${weekKey}T00:00:00`)
-        const startTs = start.getTime()
-        const endTs = startTs + 7 * 86_400_000
-        if (Number.isFinite(startTs)) {
-          const wanted = new Set(['event', 'person', 'meme', 'promise', 'preference'])
-          const windowEntries = (this.memory.entries || []).filter((e) => {
-            const at = Number(e.at) || 0
-            if (at < startTs || at >= endTs) return false
-            if (!wanted.has(String(e.kind || ''))) return false
-            if (e.weekSummaryFor || e.letterFor) return false
-            if (String(e.source || '') === 'system') return false
-            return String(e.text || '').trim().length >= 4
-          })
-          facts = windowEntries
-            .map((e) => ({
-              who: String(e.who || ''),
-              qq: String(e.qq || ''),
-              text: String(e.text || ''),
-              at: Number(e.at) || 0,
-              kind: String(e.kind || ''),
-            }))
-            .sort((a, b) => a.at - b.at)
-          // 粗统计：表情认了几张、答应几件事、替主人办了几件、进过几个群
-          const groups = new Set()
-          let chores = 0
-          let memes = 0
-          let promises = 0
-          for (const e of windowEntries) {
-            const text = String(e.text || '')
-            if (/^我(帮|替)(他|她|主人)/.test(text)) chores += 1
-            if (String(e.kind) === 'meme') memes += 1
-            if (String(e.kind) === 'promise') promises += 1
-            if (e.groupId) groups.add(String(e.groupId))
-            else if (String(e.qq || '').trim().startsWith('g')) groups.add(String(e.qq).trim())
-          }
-          stats = { chores, memes, promises, people: new Set(windowEntries.filter((e) => e.who).map((e) => String(e.who))).size, groups: groups.size }
-        }
-      } catch (err) {
-        this.logger?.('warn', `周信：原始记忆取样失败：${err?.message || err}`)
-      }
-      if (!facts.length && summaries?.length) {
-        facts = summaries
-          .map((e) => ({ who: String(e.who || ''), text: String(e.text || ''), at: Number(e.at) || 0 }))
-          .filter((f) => f.text)
-      }
-      if (!facts.length) {
-        // 没有摘要（例如这周没人说话、或聚合已做过但条目被归档）就退回原始事件采样
-        try {
-          const buckets = this.memory.eventBuckets?.(weekKey)
-          if (buckets && typeof buckets.values === 'function') {
-            const all = []
-            for (const b of buckets.values()) {
-              for (const it of b.items || []) all.push({ who: String(it.who || ''), text: String(it.text || ''), at: Number(it.at) || 0 })
-            }
-            facts = all.sort((a, b) => a.at - b.at).slice(0, 8)
-          }
-        } catch {
-          facts = []
-        }
-      }
+      const { facts, stats } = this.collectLetterFacts(weekKey)
       if (!facts.length) return { skipped: 'no-facts', weekKey }
 
       /*
@@ -5924,23 +5950,37 @@ export class ChatEngine {
     const ac = new AbortController()
     const timer = setTimeout(() => ac.abort(), 90_000)
     try {
-      const res = await this.callModel({
-        system: prompt.system,
-        messages: [{ role: 'user', content: prompt.user }],
-        signal: ac.signal,
-        maxTokens: 1600,
-        reasoningEffort: 'low',
-      })
-      if (!res?.ok || !res.text) {
-        this.logger?.('warn', `周信：模型没写成（${res?.error || res?.reason || 'empty'}），用模板兜底`)
-        return null
+      // 主人（2026-10-31）：「不要念流水账，要有 Molly 自己的感受」——
+      // 第一版如果粗筛出来像流水账，带着「上一版不行」的提示再写一遍（只重试一次）。
+      let last = null
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const userContent = attempt === 0
+          ? prompt.user
+          : `${prompt.user}\n\n${typeof mod.buildLetterRetryHint === 'function' ? mod.buildLetterRetryHint() : '上一版太像流水账了，重写：多写感受，少罗列做过的事。'}`
+        const res = await this.callModel({
+          system: prompt.system,
+          messages: [{ role: 'user', content: userContent }],
+          signal: ac.signal,
+          maxTokens: 1600,
+          reasoningEffort: 'low',
+        })
+        if (!res?.ok || !res.text) {
+          this.logger?.('warn', `周信：模型没写成（${res?.error || res?.reason || 'empty'}），用模板兜底`)
+          return null
+        }
+        const text = mod.cleanModelLetter(res.text, { maxChars: 1400 })
+        if (!text || text.length < 200) {
+          this.logger?.('warn', `周信：模型输出太短（${text ? text.length : 0} 字），用模板兜底`)
+          return null
+        }
+        const quality = typeof mod.letterQuality === 'function' ? mod.letterQuality(text) : null
+        last = { text, quality }
+        if (!quality || quality.ok) break
+        this.logger?.('info', `周信：第一版像流水账（感受 ${quality.feeling} / 事务 ${quality.chore}），重写一次`)
       }
-      const text = mod.cleanModelLetter(res.text, { maxChars: 1400 })
-      if (!text || text.length < 200) {
-        this.logger?.('warn', `周信：模型输出太短（${text ? text.length : 0} 字），用模板兜底`)
-        return null
-      }
-      return { weekKey, text, used: Math.min(facts.length, 60), source: 'model' }
+      if (!last) return null
+      const source = last.quality && !last.quality.ok ? 'model-weak' : (last.quality ? 'model' : 'model')
+      return { weekKey, text: last.text, used: Math.min(facts.length, 60), source, quality: last.quality || null }
     } catch (err) {
       this.logger?.('warn', `周信：模型调用失败（${err?.message || err}），用模板兜底`)
       return null

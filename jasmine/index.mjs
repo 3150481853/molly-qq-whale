@@ -70,6 +70,8 @@ export {
 export {
   buildLetter,
   buildLetterPrompt,
+  buildLetterRetryHint,
+  letterQuality,
   cleanModelLetter,
   shouldWriteLetter,
   currentWeekKey,

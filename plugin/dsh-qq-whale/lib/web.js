@@ -2486,6 +2486,45 @@ export class WebWidget {
     })
 
     /*
+     * POST /dsh-qq-whale/drift/share-last —— 把最近一轮刷帖结果分享出去（默认发群）。
+     *
+     * body: { to?: 'group' | 'owner' }，默认 group。
+     * 用途：2026-10-28 主人改成「主要做浏览，和群里的鱼朋友分享见闻来讨论」，
+     * 这里给一个不花模型额度就能验证「群分享文案 + 真实发送」的口子。
+     */
+    add({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/drift/share-last`,
+      ...wrap(async (req, res) => {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          return
+        }
+        const e = this.engineRef()
+        if (!e?.drift) {
+          sendJson(res, 503, { ok: false, error: '闲逛没起来（看日志 warn）' })
+          return
+        }
+        const batch = e.drift.batches?.[e.drift.batches.length - 1]
+        if (!batch) {
+          sendJson(res, 404, { ok: false, error: '还没有刷到过东西' })
+          return
+        }
+        let to = 'group'
+        try {
+          const raw = await readBody(req)
+          const body = JSON.parse(raw || '{}')
+          if (body?.to) to = String(body.to)
+        } catch {}
+        const ok =
+          to === 'owner'
+            ? await e.drift.say(e.drift.composeNotice(batch))
+            : await e.drift.sayGroup(e.drift.composeShare(batch))
+        sendJson(res, 200, { ok, to, say: e.drift.lastSay, status: e.drift.status() })
+      }),
+    })
+
+    /*
      * POST /dsh-qq-whale/drift/post —— 用「主人的原话」触发一条评论草稿。
      *
      * body: { n?: number }（默认 1）。走的是和 QQ 私聊里「发 N」完全同一条代码

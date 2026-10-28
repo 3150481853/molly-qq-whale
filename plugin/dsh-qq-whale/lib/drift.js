@@ -29,6 +29,23 @@ const DEFAULTS = {
   endHour: 24,
   minBudgetLeft: 15,
   notify: true,
+  /**
+   * 刷到东西以后发到哪去（2026-10-28 主人转向：「主要还是做浏览吧，
+   * 能和 molly 群里的鱼朋友们分享见闻来讨论」）。
+   * owner = 只私聊主人（旧行为，带「发 N」那套审核话术）
+   * group = 只发群里（像人分享见闻，只留讨论话头，不带命令）
+   * both  = 群里发见闻 + 私聊主人一份带草稿的清单
+   */
+  shareTo: 'owner',
+  groupId: '',
+  /**
+   * 群分享之外，评论草稿还发不发私聊（2026-10-28 主人：「发评论的事儿发我就行」
+   * → 默认开，但只发草稿那几条，不再把整份见闻清单也发一遍）。
+   */
+  draftToOwner: true,
+  // 群里最多列几条；链接默认不贴（QQ 会把链接展开成大卡片，三条就刷屏了）
+  shareMax: 3,
+  shareLinks: false,
   // 一轮闲逛要开浏览器、点几条帖子，180s 的单轮上限不够（实测 36 步被截断），
   // 所以 drift 自己把单轮上限放宽到 8 分钟；executor 侧见 engine.js 的
   // workTurnTimeoutMs 覆盖。
@@ -122,6 +139,7 @@ export class Drift {
     this.count = 0
     this.countDate = ''
     this.lastSay = null
+    this.lastShare = null
     this._timer = null
   }
 
@@ -134,10 +152,17 @@ export class Drift {
    * 日志里连报错都没有，看着像「发了」。所以每次发消息都现取。
    */
   get onebot() {
-    if (this.client?.sendPrivateMsg) return this.client
+    if (this.client?.sendPrivateMsg || this.client?.sendGroupMsg) return this.client
     const c = this.engine?.client
-    if (c?.sendPrivateMsg) return c
+    if (c?.sendPrivateMsg || c?.sendGroupMsg) return c
     return null
+  }
+
+  /** 群分享目标：shareTo 含 group 且配了 groupId 才算就绪。 */
+  get shareGroupId() {
+    const to = String(this.cfg.shareTo || 'owner').toLowerCase()
+    if (to !== 'group' && to !== 'both') return ''
+    return String(this.cfg.groupId || '').trim()
   }
 
   get cfg() {
@@ -248,6 +273,59 @@ export class Drift {
     }
   }
 
+  /** 发到群里（分享见闻用；失败只记日志，不吵人）。 */
+  async sayGroup(text) {
+    const gid = this.shareGroupId
+    if (!gid) {
+      this.lastSay = { at: Date.now(), ok: false, target: 'group', error: '没配 groupId' }
+      this.logger('warn', '闲逛想发群里，但没配 drift.groupId')
+      return false
+    }
+    const ob = this.onebot
+    if (!ob?.sendGroupMsg) {
+      this.lastSay = { at: Date.now(), ok: false, target: 'group', error: 'OneBot 还没连上（client 为空）' }
+      this.logger('warn', '闲逛想发群里，但 OneBot 还没连上')
+      return false
+    }
+    try {
+      const r = await ob.sendGroupMsg(gid, [{ type: 'text', data: { text: String(text) } }])
+      const id = r?.message_id ?? r?.data?.message_id ?? null
+      this.lastSay = { at: Date.now(), ok: true, target: `group:${gid}`, messageId: id }
+      this.logger('info', `闲逛群里分享已发出（${gid}，message_id=${id ?? '?'}）`)
+      return true
+    } catch (err) {
+      const msg = String(err?.message || err).slice(0, 120)
+      this.lastSay = { at: Date.now(), ok: false, target: `group:${gid}`, error: msg }
+      this.logger('warn', `闲逛群里分享失败：${msg}`)
+      return false
+    }
+  }
+
+  /**
+   * 一轮刷完之后的分发：看 shareTo 决定发群、发主人，还是两边都发。
+   * 群消息用 composeShare（像人聊天，只留话头）；私聊用 composeNotice（带「发 N」审核）。
+   */
+  async share(batch) {
+    const out = { group: null, owner: null }
+    const to = String(this.cfg.shareTo || 'owner').toLowerCase()
+    const hasGroup = (to === 'group' || to === 'both') && Boolean(this.shareGroupId)
+    if (!hasGroup) {
+      // 没配群（或就是想只发主人）：发整份清单，带「细节 N / 发 N」。
+      out.owner = await this.say(this.composeNotice(batch))
+      return out
+    }
+    out.group = await this.sayGroup(this.composeShare(batch))
+    /*
+     * 2026-10-28 主人：「群里发见闻就行，鱼友问详情就总结一下发，字可以适当多点，
+     * 发评论的事儿发我就行」——所以群分享之后不再给主人发整份清单，
+     * 只在真有想回的草稿时私聊那几条。
+     */
+    if ((batch?.drafts || []).length && this.cfg.draftToOwner !== false) {
+      out.owner = await this.say(this.composeOwnerDrafts(batch))
+    }
+    return out
+  }
+
   async runTask(task) {
     const res = await withTimeout(this.executor.run(task, {}), Number(this.cfg.timeoutMs) || 300000)
     const text = String(res?.text || '')
@@ -325,7 +403,7 @@ export class Drift {
       this.lastError = ''
       this.logger('info', `闲逛完成（${reason}）：${items.length} 条，想回 ${batch.drafts.length} 条`)
       const shouldNotify = notify == null ? this.cfg.notify !== false : notify
-      if (shouldNotify) await this.say(this.composeNotice(batch))
+      if (shouldNotify) this.lastShare = await this.share(batch)
       return { ok: true, items: items.length, drafts: batch.drafts.length }
     } catch (err) {
       this.lastError = String(err?.message || err).slice(0, 160)
@@ -336,6 +414,43 @@ export class Drift {
     }
   }
 
+  /**
+   * 群分享文案（2026-10-28 主人：主要做浏览，和群里的鱼朋友分享见闻来讨论）。
+   * 和 composeNotice 的区别：这里不提「发 N / 细节 N」那套审核话术，
+   * 就是像人一样随口讲两句 + 留个话头，让群里能接。
+   */
+  composeShare(batch) {
+    const max = Math.max(1, Number(this.cfg.shareMax) || 3)
+    const items = (batch.items || []).slice(0, max)
+    const hooks = [
+      '你们最近刷到啥好玩的？',
+      '这个我是真没想到，你们怎么看？',
+      '有点想听听你们的看法。',
+      '群里有没有懂这块的，讲讲？',
+      '反正我看完是愣了半天。',
+    ]
+    const hook = hooks[Math.floor(Math.random() * hooks.length)]
+    const lines = ['🐟 刚在小黑盒泡了会儿，看到几条挺有意思的：']
+    items.forEach((it, i) => {
+      const by = it.author ? `（${it.author}）` : ''
+      const gist = it.gist ? ` —— ${it.gist}` : ''
+      lines.push(`${i + 1}. ${it.title}${by}${gist}`)
+      if (this.cfg.shareLinks && it.link) lines.push(`   ${it.link}`)
+    })
+    lines.push('', hook)
+    return lines.join('\n')
+  }
+
+  /** 只发主人的草稿清单（群里已经发过见闻了，这里不重复列表）。 */
+  composeOwnerDrafts(batch) {
+    const drafts = batch?.drafts || []
+    const lines = ['🐟 这轮有几条我想去回一句（只发你）：']
+    drafts.forEach((d) => lines.push(`${d.index}. ${d.title}`, `   我想回：${d.draft}`))
+    lines.push('', '回「发 1」我就去发；回「不发 1」就算了。不回我就不动。')
+    return lines.join('\n')
+  }
+
+  /** 只发主人的完整清单（没配群时的旧行为）。 */
   composeNotice(batch) {
     const lines = ['🐟 刷了会儿小黑盒，看到这几条：']
     batch.items.forEach((it, i) => {
@@ -465,11 +580,17 @@ export class Drift {
   }
 
   /** 给聊天用的「最近刷到的」。 */
-  contextText({ hours = 24, limit = 3 } = {}) {
+  contextText({ hours = 24, limit = 5 } = {}) {
     const cutoff = Date.now() - hours * 3600000
     const list = this.topics.filter((t) => t.at > cutoff).slice(-limit)
     if (!list.length) return ''
-    return list.map((t) => `- ${t.title}${t.author ? `（${t.author}）` : ''}：${t.gist || ''}`).join('\n')
+    return list
+      .map((t) => {
+        const by = t.author ? `（${t.author}）` : ''
+        const why = t.why ? `｜我为什么注意：${t.why}` : ''
+        return `- ${t.title}${by}：${t.gist || ''}${why}\n  ${t.link || ''}`
+      })
+      .join('\n')
   }
 
   status() {
@@ -488,6 +609,10 @@ export class Drift {
       budgetLeft: this.budgetLeft(),
       lastSay: this.lastSay,
       sayReady: Boolean(this.onebot),
+      shareTo: String(this.cfg.shareTo || 'owner'),
+      groupId: this.shareGroupId,
+      shareReady: Boolean(this.onebot?.sendGroupMsg && this.shareGroupId),
+      lastShare: this.lastShare,
     }
   }
 }

@@ -50,6 +50,24 @@ const SECRETS_FILE = process.env.MOLLY_RELEASE_SECRETS || path.join(process.cwd(
 
 /* ── 每个版本的「本版特性」：写进 release 正文，让仓库读者一眼看到改了什么 ── */
 const RELEASE_FEATURES = {
+  'v1.1.6': [
+    '**正式版（1.1.6 收口）**：预览 1~6 的东西全部在内，不再带 `preview` 后缀。从 `v1.1.5-A-Hotfix.1` 升上来的，直接覆盖插件包即可；配置不用改',
+    '**记忆底座这一年最大的一次改动**：七类记忆按机器人账号分片落盘（person / address / promise / fact / preference / event / meme，各自带 index）、容量一次给到 **5 万条**、阶梯衰减（活跃天才算，人物/约定/事实白给 14 天、事件/梗 7 天，之后每 7 个活跃天 −0.5 到该类下限）、三级去重（≥0.92 跳过 / 0.70~0.92 合并 / 相反意思两条都留并标 `supersededBy`）、权重刻度 5→10、命中记账（`hits` / `lastHitAt`）',
+    '**召回改成 RRF 名次融合**：关键词与权重两路各自排名再融合（`RRF_K=60`，关键词臂 0.6、权重臂 0.4），`/state.memory.lastRecall` 直接给出分词、候选数、前 5 条的两路名次与融合分——「为什么没召回出来」可以当场对账',
+    '**记忆会「长边」和「抽象」**：`memoryGraph` 同一次召回的前 5 条两两连边、召回时沿边扩 2 跳（每跳 ×0.6）；`memoryAbstract` 同 tag ≥3 条且至少一条被问过时抽象出一条「关于X：…」，原条目降一级不删。两开关默认关，可在 profile 打开',
+    '**周聚合 + 归档 + 压缩标记**：碎片事件按「周 × 群」压成一条摘要（`level=2 / weight=8`），启动只补最近两周、当前周不补；掉到下限且闲置满 90 个活跃天的 event/meme 移进 `_archive.json`（不物理删除，坏档只 warn）；被周摘要覆盖的原始事件带 `coveredUntil`，`index.json` 记 `lastCompactionAt`',
+    '**茉莉花（Jasmine）记忆系统 0.2.0**：仓库根 `jasmine/` 是零依赖纯 Node ESM 的独立包（双卡存储 / RRF 召回 / 活跃天衰减 / 出口核对 / 压缩提醒 / 周信 / token 账本 / 群聊信号），**不依赖 DSH、不依赖 QQ**，可整包挪到别的 Agent 架构；同一份源码也发布在仓库的 `jasmine` 独立分支（tag `jasmine-v0.2.0`），接入见 `jasmine/docs/PORTING.md`。插件侧按 `../jasmine/index.mjs` 动态加载，找不到就降级为「无记忆系统」，不影响主流程',
+    '**发送前出口核对（P0-1）**：回复里引用的记忆编号必须来自本轮召回集合、说了「答应/说好/承诺」要查未闭合清单、复读三线（4-gram ≥0.60 / 句级余弦 ≥0.85 / 前 20 字全同，连续两次才标记）、迎合三条件同时成立才 flag。**只记 trace、不改写、不阻拦**——先看几天日志再决定要不要拦',
+    '**上下文压缩提醒（P0-2）**：三档（可压 ≥5 万且距上次 ≥1 万 / 窗口 75% / 95%），提示只追加在本轮请求末尾、不写进历史，同一回合最多一次；能回收不足 5000 token 不提醒',
+    '**每周一封信（P0-3，本版改成模型来写）**：每周一给主人写一封上周的日记（600~900 字，第一人称，挑 3~5 个人和事具体写，不写工作汇报、不出现 QQ 号/群号），长信自动落 `<dataDir>/jasmine/letters/<周一>.md` 并发**文件**（发不出去退分条文本），一周只写一封；模型不可用/超时/太短自动退回模板版，信一定写得出来。`jasmineLetterModel=false` 可退回纯模板',
+    '**token 账本（P1-5）**：每次模型调用按 `purpose`（chat / proactive / summary / verify / compaction / tool）记一行，控制台新增 `GET /api/jasmine/tokens?days=7`；价格表由宿主提供，项目不内置价格',
+    '**群聊四档信号（P1-6）**：被叫 1.0 / 在说我 0.5 / 接我话 0.2 / 纯闲聊 0.01；当前只做最确定的一档——「这条 @ 的是别人」时一票否决，其余档只进决策日志（`/state.decisions` 新增 `signal` / `signalScore`）',
+    '**稳定性这批**：超预算不再降智（只换钱包：备用脑 → trae → 正常链）；trae 抛异常归一成失败走回落，不再变成「我走神了」；插件热重载把 `gen-<rev>/` 物化副本的 `.mjs` 一起拷（以前漏拷 `jasmine-bridge.mjs` 会让 engine 整包加载失败）；表情包/语音「用文字假装发了图」的改写口径修掉；同群双泳道（围观消息顶不掉 @ 她的那条）；开机自启 `Molly-DSH`；控制台数据服务自愈',
+    '**出问题可以单独关**：`jasmineVerify` / `jasmineCompact` / `jasmineLetter` / `jasmineLetterModel` / `jasmineSignal` 任一设 `false` 即回退单项；`memoryGraph` / `memoryAbstract` 关掉即回旧召回；`silentOnModelFail: true` 恢复「回不过来就不回」',
+    '**数据落点**：记忆在 `<dataDir>/memory/<机器人QQ>/`（七类分片 + `_archive.json` + `index.json`）；茉莉花在 `<dataDir>/jasmine/`（`jasmine.json` / `ledger.jsonl` / `state.json` / `ledger-tokens.json` / `trace.jsonl` / `letters/`）。删掉对应目录等于清零那一套，互不影响',
+    '本版**不含语音包**也不含唱歌：音色包仍单独下 Releases 里的 `voice-pack-v1.2`（301 MB），`singingEnabled` 保持关闭',
+    '升级：直接覆盖旧的插件包，老 `memory.json` 首次启动自动迁移成 `_legacy-memory.json` 归档；想回退见 `docs/CHANGELOG.md` 对应条目的「退回」段',
+  ],
   'v1.1.6-preview.4': [
     '**预览版（1.1.6 第四个）**：新增独立记忆底座「茉莉花（Jasmine）」并把出口核对 / 压缩提醒 / 周信 / token 账本 / 群聊信号接进主链路。预览版可能有毛刺，稳妥请留在 `v1.1.5-A-Hotfix.1`',
     '**茉莉花 0.1.0 第一次随包发布**：仓库根 `jasmine/` 是一个零依赖纯 Node ESM 的独立包（双卡存储、RRF 召回、活跃天衰减、出口核对、压缩提醒、周信模板、token 账本、群聊信号共八个模块）。它**不依赖 DSH、不依赖 QQ**，可以整包挪到别的 Agent 架构里；同时同一份源码也发布在仓库的 `jasmine` 独立分支（tag `jasmine-v0.1.0`），接入说明见 `jasmine/docs/PORTING.md`',

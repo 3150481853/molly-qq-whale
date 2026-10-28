@@ -7,6 +7,48 @@
 
 ---
 
+## 2026-10-31 · v1.1.6 正式版：1.1.6 收口（预览 1~6 的全部内容 + 周信改成模型写）
+
+> 主人（m02013）：「总结一下如今的升级（包括浏览小黑盒等），准备发1.1.6正式版」。
+> 版本口径：Molly `1.1.6`（去掉 preview 后缀），茉莉花 `0.2.0` 随包。这一版**没有引入新代码**，
+> 是把 preview.1~preview.6 已经真机跑过的东西收成一个正式版本，外加预览 6 之后的两处收尾（周信改为模型生成、`client.call` 成败判定修正）。
+
+**相对 `v1.1.6-preview.6` 的实际改动（其余为收口）**
+
+- **周信改由模型写（`jasmineLetterModel`，默认开）**：`engine.js` 新增 `writeLetterWithModel()`，
+  用 `buildLetterPrompt()` 拼「她是住在 QQ 群里的机器人 + 上周事实清单」的系统/用户两段，`callModel()`
+  带 90 秒 `AbortSignal`、`maxTokens: 1600`、`reasoningEffort: 'low'` 要一封 600~900 字的第一人称日记信；
+  出稿先过 `cleanModelLetter()`（去 markdown/序号/QQ 号/群号、补句末标点），再做「像不像工作汇报」自检，
+  不合格判失败。**失败/超时/太短/模型不可用一律回退模板版**，信一定写得出来（线上一卦实测：模型出稿 973 字，
+  另一次模型超时后模板 1,300 字照发）。`jasmineLetterModel=false` 可退回纯模板。
+- **`client.call()` 成败判定修正**：OneBot 的 `call()` 成功即 resolve、失败即 reject，旧代码按
+  `res.status/retcode` 判成败会把**上传成功误判成失败**（表现：文件其实发出去了，日志写「上传失败，改发纯文本」）。
+  `upload_private_file` 与分条发送都改成「不抛异常即成功」。
+- **周信长信走文件**：正文 ≥550 字时落 `<dataDir>/jasmine/letters/<周一>.md` 再 `upload_private_file`
+  私聊主人（附件名 `Molly周信-YYYY-MM-DD.md`），发不出去退回按段落分条发文本。真机验证 `file_id` 已返回。
+- **单测补到 45**：`jasmine/test/features.test.mjs` 加「不像汇报 / 不出现 QQ 号 / 有感受句 / 讲的是她自己的视角」
+  四条断言，`cd jasmine && node --test` = **45 pass / 0 fail**；`node --check` 全过。
+
+**1.1.6 正式版里包着的（预览 1~6 累计，细节见各预览条目）**
+
+- 记忆底座：七类分片 + 5 万池 + 活跃天阶梯衰减 + 三级去重 + 权重 5→10 + 命中记账；
+  RRF 名次融合召回（`RRF_K=60`，关键词 0.6 / 权重 0.4）+ `lastRecall` 对账；识海图 + 记忆抽象两个开关；
+  周聚合（`summarizeWeek`）+ 归档（`_archive.json`，90 个活跃天）+ 压缩标记（`coveredUntil` / `lastCompactionAt`）。
+- 茉莉花 `jasmine/` 0.2.0：`JasmineStore` / `TokenLedger` / `shouldSpeak` / `buildLetter` / `verifyReply` /
+  `evaluateCompaction`，零依赖纯 Node ESM，独立分支 `jasmine` + tag `jasmine-v0.2.0`，接入见 `jasmine/docs/PORTING.md`。
+- 插件接入：出口核对（只记 trace）、压缩三档提醒（追加请求末尾）、周信定时、token 账本（`/api/jasmine/tokens`）、
+  群聊四档信号（只否决「@ 的是别人」）；`boot.js` 物化副本补拷 `.mjs`（预热漏拷 `jasmine-bridge.mjs` 会让 engine 整包加载失败）。
+- 稳定性：超预算不降智（备用脑 → trae → 正常链）、`trae.chat()` 异常归一、表情包/语音「文字冒充图片」口径修掉、
+  同群双泳道、`Molly-DSH` 开机自启、控制台数据服务自愈。
+
+**验证**：`lib/` 全量 `node --check` 通过；六个记忆门禁 + 三个 jasmine 离线门禁 + 桥接自检全绿；
+线上 `/state.jasmine.available=true`，`trace.jsonl` 有真实群回复核对记录；周信真机发过（模型版 973 字 + 模板版 1,300 字文件）。
+
+**退回**：`jasmineVerify` / `jasmineCompact` / `jasmineLetter` / `jasmineLetterModel` / `jasmineSignal` 任一设 `false`
+即回退单项；`memoryGraph` / `memoryAbstract` 关掉即回旧召回；整体回退见 `v1.1.6-preview.6` 条目「退回」段。
+
+---
+
 ## 2026-10-30 · v1.1.6-preview.6：茉莉花记忆系统 0.2.0 整合进包（识海图 + 周信 + 账本 + 出口核对）
 
 > 主人（m02258）：「再验证一遍，可以的话整合成新版的茉莉花记忆系统发GitHub」

@@ -369,7 +369,18 @@ export class MemoryStore {
    *   第 2 条「记忆分账号」）。记忆落 `<dir>/<account>/<kind>.json`，将来一个进程带多个号
    *   也不会串库。取不到就落 '<dir>/default/'——注意条目里的 `qq` 字段是**对话者**，不是账号。
    */
-  constructor({ dir, logger, limit = 2000, growTo = 0, crypt = null, poolFile = '', dataDir = '', account = '' }) {
+  constructor({
+    dir,
+    logger,
+    limit = 2000,
+    growTo = 0,
+    crypt = null,
+    poolFile = '',
+    dataDir = '',
+    account = '',
+    graph = false,
+    abstractTags = false,
+  }) {
     this.dir = dir
     this.dataDir = String(dataDir || '').trim() || path.dirname(path.resolve(dir))
     this.logger = logger || (() => {})
@@ -378,6 +389,17 @@ export class MemoryStore {
     this.migrated = false
     this.deduped = 0
     this.mergedCount = 0
+    /*
+     * 识海图（2026-10-28，对照小黑盒「四层记忆框架」的 L1 edges）：
+     *   graph=true 时，同一次召回命中的条目两两连边（`e.edges = [[id, w, at], ...]`），
+     *   召回打分时沿边扩散两跳（每跳 ×0.6，取最大值）。
+     *   默认关——纯算法增量：关掉时既不连边也不扩散，行为与改动前逐条一致。
+     */
+    this.graphEnabled = Boolean(graph)
+    /** 同 tag ≥3 条且被问过 → 抽象一条「关于X：…」的规律节点（默认关） */
+    this.abstractTagsEnabled = Boolean(abstractTags)
+    this.linksAdded = 0
+    this.abstracted = 0
     this.baseLimit = Math.max(1, Number(limit) || 2000)
     this.maxLimit = Math.max(this.baseLimit, Number(growTo) || 0)
     this.account = normalizeQq(account) || 'default'
@@ -1023,6 +1045,11 @@ export class MemoryStore {
       archived: this.archiveCount,
       // P2-5：最近一次压缩（周聚合）时间戳；0 = 还没压过
       lastCompactionAt: this.lastCompactionAt,
+      // 识海图 / tag 抽象（2026-10-28）：开关状态与本进程内的累计产量，控制台一眼能看出有没有生效
+      graph: this.graphEnabled,
+      abstractTags: this.abstractTagsEnabled,
+      links: this.linksAdded,
+      abstracted: this.abstracted,
       // 上一次召回的 RRF 对账（两路名次 + 融合分 + 老的原始合成分），只在内存里
       lastRecall: this.lastRecall,
     }
@@ -1120,10 +1147,241 @@ export class MemoryStore {
       changed += 1
     }
     if (!changed) return
+    // 连边放在节流之前：边是「长期资产」，不该因为 5 秒节流被丢掉
+    if (this.graphEnabled) this.linkRecall(list)
     // 一轮对话里 recall 可能被调好几次，5 秒内只落一次盘
     if (now - this._hitSaveAt < 5000) return
     this._hitSaveAt = now
     this.save()
+  }
+
+  /**
+   * 把这次**一起被想起来**的条目两两连边（识海图的写入端，2026-10-28）。
+   *
+   * 只连前 `pairLimit` 条：召回的头部才是"这次对话真正用到的那几条"，
+   * 尾巴上本来就沾边的弱命中连起来会迅速把图连成一张网，扩散信号就废了。
+   * 称谓（address）不参与：它每轮无条件注入，连边等于把所有条目都挂到称谓上。
+   *
+   * @returns {number} 参与连边的条目数（<2 时什么都不做）
+   */
+  linkRecall(list, { pairLimit = 5, gain = GRAPH_EDGE_GAIN } = {}) {
+    if (!this.graphEnabled) return 0
+    const head = []
+    for (const e of list) {
+      if (!e || !e.id) continue
+      if (normalizeKind(e.kind) === 'address') continue
+      head.push(e)
+      if (head.length >= pairLimit) break
+    }
+    if (head.length < 2) return 0
+    for (let i = 0; i < head.length; i += 1) {
+      for (let j = i + 1; j < head.length; j += 1) this.addEdge(head[i], head[j], gain)
+    }
+    return head.length
+  }
+
+  /**
+   * 给一条边加权（双向各存一份，召回时从任意一端都能扩散过去）。
+   *
+   * 边存成 `[id, w, at]` 而不是对象：5 万条池子里每条多 8 个对象，
+   * 落盘体积和 JSON.parse 的耗时都会翻倍，数组足够且更好砍。
+   */
+  addEdge(a, b, gain = GRAPH_EDGE_GAIN) {
+    if (!a || !b || !a.id || !b.id || a.id === b.id) return
+    const at = Date.now()
+    const bump = (src, dst) => {
+      if (!Array.isArray(src.edges)) src.edges = []
+      const edge = src.edges.find((x) => Array.isArray(x) && x[0] === dst.id)
+      if (edge) {
+        edge[1] = Math.min(1, Number(edge[1]) + gain)
+        edge[2] = at
+      } else {
+        src.edges.push([dst.id, Math.min(1, Math.max(gain, 0.6)), at])
+      }
+      // 只留最强的 GRAPH_EDGE_MAX 条：弱的先滚，避免一对高频条目把图连成团
+      if (src.edges.length > GRAPH_EDGE_MAX) {
+        src.edges.sort((x, y) => (Number(y[1]) - Number(x[1])) || (Number(y[2]) - Number(x[2])))
+        src.edges.length = GRAPH_EDGE_MAX
+      }
+    }
+    bump(a, b)
+    bump(b, a)
+    this.linksAdded += 1
+  }
+
+  /**
+   * 图扩散：以本轮候选里最强的几条为种子，沿边扩最多两跳，每跳 ×0.6。
+   *
+   * 只在**本轮候选池**里扩散——池外的条目这轮本来就没被关键词命中，
+   * 硬拉进来等于让一条老记忆靠连边越权插队（那是"复读"而不是"联想"）。
+   * 同一个目标被多个种子够到，取最大值而不是累加：累加会让枢纽节点通吃。
+   *
+   * @param {Array<{e: object, rrf: number}>} pool 已算好 rrf 的候选
+   * @returns {Map<string, number>} 条目 id → 该加在 rrf 上的增量
+   */
+  graphBoost(pool, { hops = GRAPH_HOPS, decay = GRAPH_DECAY, seeds = GRAPH_SEED_LIMIT } = {}) {
+    const byId = new Map()
+    for (const x of pool) if (x?.e?.id) byId.set(x.e.id, x)
+    if (byId.size < 2) return new Map()
+    const ranked = [...pool].sort((a, b) => b.rrf - a.rrf)
+    const boost = new Map()
+    for (const seed of ranked.slice(0, seeds)) {
+      if (!seed?.e?.id) continue
+      let frontier = [{ id: seed.e.id, score: seed.rrf, depth: 0 }]
+      const seen = new Set([seed.e.id])
+      while (frontier.length) {
+        const next = []
+        for (const node of frontier) {
+          const cur = byId.get(node.id)
+          if (!cur || node.depth >= hops) continue
+          const edges = Array.isArray(cur.e?.edges) ? cur.e.edges : []
+          for (const edge of edges) {
+            if (!Array.isArray(edge) || !edge[0]) continue
+            if (!byId.has(edge[0])) continue
+            const w = Math.max(0, Math.min(1, Number(edge[1]) || 0))
+            const score = node.score * decay * w
+            if (score <= 0) continue
+            if (score > (boost.get(edge[0]) || 0)) boost.set(edge[0], score)
+            if (!seen.has(edge[0])) {
+              seen.add(edge[0])
+              next.push({ id: edge[0], score, depth: node.depth + 1 })
+            }
+          }
+        }
+        frontier = next
+      }
+    }
+    // 种子也照吃不误：边本来就是双向的，"它俩总一起被想起"对两边都算数；
+    // 唯一要防的是自己给自己加分，而 addEdge 已经拒绝自环。
+    return boost
+  }
+
+  /**
+   * 边老化（识海图的养护端）：指向已删条目的边、晾了 90 天没再被一起想起的边、
+   * 以及权重掉到 0.05 以下的边，一并清掉。
+   *
+   * 90 天用的是**日历天**而不是活跃天：边是"两条记忆的关联"，人不聊天它也在变淡；
+   * 而条目的衰减用活跃天（不聊就不掉），两者口径不同是有意的。
+   *
+   * @returns {number} 清掉的边数
+   */
+  pruneEdges({ idleDays = GRAPH_EDGE_IDLE_DAYS } = {}) {
+    if (!this.graphEnabled) return 0
+    const ids = new Set(this.entries.map((e) => e.id))
+    let dropped = 0
+    for (const e of this.entries) {
+      if (!Array.isArray(e.edges) || !e.edges.length) continue
+      const keep = []
+      for (const edge of e.edges) {
+        if (!Array.isArray(edge)) {
+          dropped += 1
+          continue
+        }
+        const [id, w, at] = edge
+        if (!ids.has(id) || id === e.id) {
+          dropped += 1
+          continue
+        }
+        const ageDays = (Date.now() - (Number(at) || 0)) / 86400000
+        if ((Number(w) || 0) < GRAPH_EDGE_MIN || ageDays > idleDays) {
+          dropped += 1
+          continue
+        }
+        keep.push([id, Number(w), Number(at) || 0])
+      }
+      e.edges = keep
+    }
+    if (dropped) this.logger('debug', `识海图老化：清掉 ${dropped} 条边`)
+    return dropped
+  }
+
+  /**
+   * tag 抽象（2026-10-28）：同一个 tag 下攒够 ABSTRACT_MIN_COUNT 条、
+   * 且至少有一条被真问过（hits>0），压成一条「关于X：…」的规律节点。
+   *
+   * 为什么要求 hits>0：没人问过的三件事未必构成"规律"，
+   * 很可能只是同一批灌进来的记录；被问起过才说明它俩在对话里真的在场。
+   *
+   * 幂等：已经抽象过的 tag 只更新正文与权重，不再长第二条；
+   * 同一个 tag 的原条目只降级一次（`abstractedBy` 记着是谁抽的）。
+   *
+   * @returns {number} 本次新建的抽象节点数
+   */
+  abstractTags() {
+    if (!this.abstractTagsEnabled) return 0
+    const groups = new Map()
+    for (const e of this.entries) {
+      if (!e || e.abstractOf) continue
+      const tags = Array.isArray(e.tags) ? e.tags : []
+      for (const raw of tags) {
+        const tag = String(raw || '').trim()
+        if (!tag) continue
+        const list = groups.get(tag) || []
+        list.push(e)
+        groups.set(tag, list)
+      }
+    }
+    let created = 0
+    for (const [tag, list] of groups) {
+      if (created >= ABSTRACT_MAX_NEW) break
+      if (list.length < ABSTRACT_MIN_COUNT) continue
+      if (!list.some((e) => (Number(e.hits) || 0) > 0)) continue
+      const text = this.buildAbstractText(tag, list)
+      if (!text) continue
+      const maxWeight = clampWeight(Math.max(...list.map((e) => clampWeight(e.weight))))
+      const existing = this.entries.find((e) => e.abstractOf === tag)
+      if (existing) {
+        existing.text = text
+        existing.at = Date.now()
+        existing.weight = Math.max(clampWeight(existing.weight), maxWeight)
+        this.abstracted += 1
+        continue
+      }
+      this.entries.push({
+        // a 前缀：便于一眼认出「这是抽象出来的，不是谁原话」
+        id: `a${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+        kind: 'fact',
+        who: '',
+        qq: '',
+        text,
+        weight: maxWeight,
+        source: 'system',
+        level: 0,
+        hits: 0,
+        lastActiveDay: this.activeDays,
+        at: Date.now(),
+        tags: [tag, 'abstract'],
+        abstractOf: tag,
+      })
+      for (const e of list) {
+        if (e.abstractedBy === tag) continue
+        e.abstractedBy = tag
+        e.level = Math.max(0, Math.min(3, (Number(e.level) || 0) + 1))
+      }
+      created += 1
+      this.abstracted += 1
+      this.logger('debug', `tag 抽象：${tag} ← ${list.length} 条 → ${text.slice(0, 24)}`)
+    }
+    return created
+  }
+
+  /** 把同 tag 的几条拼成一段「关于X：…」（正文封顶 ABSTRACT_TEXT_MAX 字） */
+  buildAbstractText(tag, list) {
+    const sorted = [...list].sort(
+      (a, b) => (Number(b.hits) || 0) - (Number(a.hits) || 0) || clampWeight(b.weight) - clampWeight(a.weight),
+    )
+    const parts = []
+    const seen = new Set()
+    for (const e of sorted) {
+      const t = String(e.text || '').trim()
+      if (!t || seen.has(t)) continue
+      seen.add(t)
+      parts.push(t.length > 40 ? `${t.slice(0, 40)}…` : t)
+      if (parts.length >= 4) break
+    }
+    if (!parts.length) return ''
+    const text = `关于${tag}：${parts.join('；')}`
+    return text.length > ABSTRACT_TEXT_MAX ? `${text.slice(0, ABSTRACT_TEXT_MAX)}…` : text
   }
 
   /**
@@ -1134,6 +1392,12 @@ export class MemoryStore {
    * 换句话说：正常态是 2000，真记满了才升到 10000，升完之后才按老规则淘汰。
    */
   prune() {
+    /*
+     * 识海图的养护放在最前：边老化、tag 抽象都是"没满也要做"的事
+     * （与下面 archiveStale 同理——烂掉/该合并的东西不该一直占着窗口）。
+     */
+    if (this.graphEnabled) this.pruneEdges()
+    if (this.abstractTagsEnabled) this.abstractTags()
     /*
      * P1-3：先归档「烂到底且晾够 90 活跃天」的 event/meme。
      * 归档不是淘汰，但同样要从热池里挪走，所以放在超量判断**之前**——
@@ -1754,6 +2018,23 @@ export class MemoryStore {
       x.rrf = RRF_KEYWORD_WEIGHT / (rk + RRF_K) + RRF_WEIGHT_ARM_WEIGHT / (rw + RRF_K)
     }
     pool.sort((a, b) => b.rrf - a.rrf || compareRecency(a, b))
+    /*
+     * 识海图扩散（2026-10-28，默认关）：以头部几条为种子沿边扩两跳，
+     * 命中的条目在 rrf 上加一个小数增量再重排——只微调名次，不推翻 RRF，
+     * 这样「关键词一个都没对上」的条目仍然进不了池子（池子已经定过了）。
+     */
+    if (this.graphEnabled && pool.length > 1) {
+      const boost = this.graphBoost(pool)
+      if (boost.size) {
+        for (const x of pool) {
+          const b = boost.get(x.e.id)
+          if (!b) continue
+          x.graphBoost = b
+          x.rrf += b
+        }
+        pool.sort((a, b) => b.rrf - a.rrf || compareRecency(a, b))
+      }
+    }
     this.lastRecall = {
       query: q,
       candidates: pool.length,
@@ -1768,6 +2049,8 @@ export class MemoryStore {
         kw: Number(x.kw.toFixed(3)),
         w: Number(x.w.toFixed(2)),
         raw: Number(x.raw.toFixed(3)),
+        // 图扩散加了多少（0 = 没用上图；两开关都关时这里恒为 0）
+        graph: Number((x.graphBoost || 0).toFixed(6)),
       })),
     }
     if (pool.length) {
@@ -2100,6 +2383,33 @@ const SUPERSEDED_PENALTY = 0.4
 const RRF_K = 60
 const RRF_KEYWORD_WEIGHT = 0.6
 const RRF_WEIGHT_ARM_WEIGHT = 0.4
+
+/**
+ * 识海图（L1 的 edges）四个旋钮（2026-10-28）。
+ *
+ * 来源是小黑盒那篇「四层记忆框架」里的做法：沿边扩散两跳、每跳 ×0.6；
+ * 我们没有向量，所以边只存在**同一次召回同时命中**的条目之间
+ * （"这两条总是一起被想起来"本身就是相关性证据）。
+ *
+ * 边权 0..1：每连一次 +0.25，首次 0.6；饱和后不再涨（防止一对高频条目
+ * 把整张图拉成一条直线）。单节点最多存 8 条边，超了先砍最弱的。
+ */
+export const GRAPH_DECAY = 0.6
+export const GRAPH_HOPS = 2
+export const GRAPH_EDGE_MAX = 8
+export const GRAPH_EDGE_GAIN = 0.25
+export const GRAPH_EDGE_MIN = 0.05
+export const GRAPH_EDGE_IDLE_DAYS = 90
+export const GRAPH_SEED_LIMIT = 8
+
+/**
+ * tag 抽象（2026-10-28）：同一个 tag 下攒够 3 条、且至少有一条被人问起过，
+ * 就把它们压成一条「关于X：…」的规律节点。原条目**不删**，只把 level +1
+ * （正文留着备查），与周摘要「压成摘要但不删原句」的口径一致。
+ */
+export const ABSTRACT_MIN_COUNT = 3
+export const ABSTRACT_MAX_NEW = 5
+export const ABSTRACT_TEXT_MAX = 200
 
 /**
  * RRF 两路的排序器（入参是 recall() 里 score 出来的 `{ e, kw, w }`）。

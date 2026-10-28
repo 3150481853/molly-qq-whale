@@ -416,6 +416,11 @@ export const DEFAULTS = {
   // 容量上限（2026-10-23 主人 m00709：原本允许记满后再扩到 1w；m02845 把上限也钉在 5 万）。
   // 0 = 不自动扩。扩容状态落在记忆库目录下的 memory-pool.json，重启不会缩回。
   memoryPoolMax: 50000,
+  // 识海图（2026-10-28）：同一次召回命中的条目两两连边，召回时沿边扩散两跳。
+  // 默认关——纯算法增量，打开前/后可用 tools/test-memory-graph.mjs 对照。
+  memoryGraph: false,
+  // 同 tag ≥3 条且被问过 → 自动抽象一条「关于X：…」的规律节点（默认关）。
+  memoryAbstract: false,
   // 记忆池加密（m00709 第 3 条）：整池 AES-256-GCM 落盘，memory.md 也转成 memory.md.enc。
   // 只有排查问题才该关掉——加密是主人明确要求的行为，默认开。
   memoryEncrypt: true,
@@ -891,6 +896,8 @@ function _configShapeReference(Schema) {
     memoryLimit: s.natural().default(DEFAULTS.memoryLimit),
     memoryPoolLimit: s.natural().default(DEFAULTS.memoryPoolLimit),
     memoryPoolMax: s.natural().default(DEFAULTS.memoryPoolMax),
+    memoryGraph: s.boolean().default(DEFAULTS.memoryGraph).description('识海图：同一次召回命中的记忆两两连边，召回时沿边扩散两跳（关闭时行为与旧版一致）'),
+    memoryAbstract: s.boolean().default(DEFAULTS.memoryAbstract).description('同 tag 攒够 3 条且被问过时，自动抽象一条「关于X：…」的规律节点（原条目不删，只降级）'),
     memoryEncrypt: s.boolean().default(DEFAULTS.memoryEncrypt),
     memoryKeyFile: s.string().default(DEFAULTS.memoryKeyFile),
     blindMode: s.boolean().default(DEFAULTS.blindMode),

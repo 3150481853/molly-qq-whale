@@ -728,6 +728,13 @@ export class WebWidget {
       }
     } catch {}
     /*
+     * 闲逛状态（2026-10-28 主人 m00634）。
+     * 看得到：今天刷了几轮、刷到几条、卡在哪、还有几条在等她点头。
+     */
+    try {
+      out.drift = e?.drift?.status?.() || null
+    } catch {}
+    /*
      * 陌生人审批队列（用户 m16260）。
      *
      * 为什么要暴露：审批提示是私信发给主人的，但主人可能同时在别的设备上，
@@ -2418,6 +2425,100 @@ export class WebWidget {
      * 有了它，「命令 xxx → 生成结果 → 发回 QQ」这条链路可以脱离 QQ 界面
      * 单独验证。之前这条链路哑火，排查全靠猜，就是因为没有这么个口子。
      */
+    /*
+     * POST /dsh-qq-whale/drift/run —— 手动跑一轮闲逛（2026-10-28 主人 m00634）。
+     *
+     * 闲逛本身是按「闲着 25 分钟 + 45 分钟一次 + 8:00–24:00 + 每天 8 轮」自己
+     * 触发的，想验证它能不能跑通总不能等到半夜。body: { notify?: boolean }
+     * notify 默认 false——自测不该往主人私聊里扔东西。
+     */
+    add({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/drift/run`,
+      ...wrap(async (req, res) => {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          return
+        }
+        const e = this.engineRef()
+        if (!e?.drift) {
+          sendJson(res, 503, { ok: false, error: '闲逛没起来（看日志 warn）' })
+          return
+        }
+        let body = {}
+        try {
+          body = JSON.parse((await readBody(req)) || '{}')
+        } catch {}
+        const started = Date.now()
+        const out = await e.drift.runOnce({ reason: 'manual', notify: body?.notify === true })
+        sendJson(res, 200, { ...out, ms: Date.now() - started, status: e.drift.status() })
+      }),
+    })
+
+    /*
+     * POST /dsh-qq-whale/drift/notify-last —— 把最近一轮刷帖结果再发一遍主人私聊。
+     *
+     * 为什么加这个口子：2026-10-28 实测「跑完了、返回 ok:true、主人根本没收到」——
+     * 那轮 runOnce 的 say() 里 client 为空，静默 return，连 warn 都没留。
+     * 有了它至少能补发最近一轮，不用再花 80 秒重新刷一遍。
+     */
+    add({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/drift/notify-last`,
+      ...wrap(async (req, res) => {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          return
+        }
+        const e = this.engineRef()
+        if (!e?.drift) {
+          sendJson(res, 503, { ok: false, error: '闲逛没起来（看日志 warn）' })
+          return
+        }
+        const batch = e.drift.batches?.[e.drift.batches.length - 1]
+        if (!batch) {
+          sendJson(res, 404, { ok: false, error: '还没有刷到过东西' })
+          return
+        }
+        const ok = await e.drift.say(e.drift.composeNotice(batch))
+        sendJson(res, 200, { ok, say: e.drift.lastSay, status: e.drift.status() })
+      }),
+    })
+
+    /*
+     * POST /dsh-qq-whale/drift/post —— 用「主人的原话」触发一条评论草稿。
+     *
+     * body: { n?: number }（默认 1）。走的是和 QQ 私聊里「发 N」完全同一条代码
+     * 路径（handleOwnerReply），只是入口换成 HTTP：主人在电脑前时不用切到 QQ
+     * 打字，也能验证「草稿 → 真浏览器评论 → 回执」这一整条链。
+     */
+    add({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/drift/post`,
+      ...wrap(async (req, res) => {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          return
+        }
+        const e = this.engineRef()
+        if (!e?.drift) {
+          sendJson(res, 503, { ok: false, error: '闲逛没起来（看日志 warn）' })
+          return
+        }
+        let body = {}
+        try {
+          body = JSON.parse((await readBody(req)) || '{}')
+        } catch {}
+        const n = Number(body?.n || 1)
+        const handled = await e.drift.handleOwnerReply({
+          ev: { message_type: 'private', user_id: e.drift.ownerUin },
+          text: `发 ${n}`,
+          isCommander: true,
+        })
+        sendJson(res, 200, { ok: handled, n, status: e.drift.status() })
+      }),
+    })
+
     /*
      * POST /dsh-qq-whale/research/test —— 只跑「判定 + 查 + 收口」这一段。
      *

@@ -67,7 +67,16 @@ export {
   MIN_RECLAIM_TOKENS,
 } from './src/compact.mjs'
 
-export { buildLetter, shouldWriteLetter, currentWeekKey, letterEntry } from './src/letter.mjs'
+export {
+  buildLetter,
+  buildLetterPrompt,
+  cleanModelLetter,
+  shouldWriteLetter,
+  currentWeekKey,
+  letterEntry,
+  pickFacts,
+  weekRangeText,
+} from './src/letter.mjs'
 
 export { TokenLedger, PURPOSES, EMPTY_PRICES } from './src/ledger.mjs'
 

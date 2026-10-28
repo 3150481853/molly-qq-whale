@@ -16,8 +16,16 @@
  * chat 没有任何文件/命令工具，work 没有写工具，code 才有全套（且写盘过 guard）。
  * 所以宁可把一条模糊消息当闲聊，也不要把它送进 code。
  *
+ * 2026-10-28（主人方案 A）加了一条规则层：**浏览意图**。
+ * 「看看这个链接」「去小黑盒瞅瞅有啥」这类句子不带「命令 」，规则层直接判
+ * work 并标 browse:true；但 `explicit` 仍是 false，真正的放行（只对主人的
+ * 私聊）在 engine.routeAndDispatch 里做——这样群里、别人嘴里的一模一样的话
+ * 依旧只是闲聊。
+ *
  * 这个文件不依赖 commands.js / engine.js，方便单测直接 import。
  */
+
+import { detectBrowseIntent } from './browse-intent.js'
 
 export const ROUTES = ['chat', 'work', 'code']
 
@@ -91,6 +99,22 @@ export function ruleRoute({ text, prefixes = [] } = {}) {
   const cmd = matchCommandPrefix(body, prefixes)
   if (cmd !== null) {
     return { route: 'work', by: 'rule', explicit: true, why: `命令前缀（${prefixes.find((p) => p && body.startsWith(p)) || '命令'}）→ 查询会话`, text: cmd }
+  }
+  /*
+   * 浏览意图（2026-10-28，方案 A）：带链接、或「站点 + 看/逛/搜」这类明确的
+   * 看网页请求，直接进 work。explicit=false 是**故意的**：这里只标记意图，
+   * 是否真的执行交给 engine（仅主人私聊放行），别人说同样的话仍然是闲聊。
+   */
+  const browse = detectBrowseIntent(body)
+  if (browse) {
+    return {
+      route: 'work',
+      by: 'rule',
+      explicit: false,
+      browse: true,
+      why: `浏览意图（${browse.why}）→ 查询会话`,
+      text: browse.task,
+    }
   }
   const intent = CODE_INTENT_RE.test(body)
   const context = CODE_CONTEXT_RE.test(body)

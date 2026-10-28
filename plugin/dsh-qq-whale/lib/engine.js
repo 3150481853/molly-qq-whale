@@ -60,6 +60,8 @@ const { RelationStore } = await import(sub('./relations.js'))
 const { CreditBudget, localDateKey } = await import(sub('./budget.js'))
 const { SpareBudget } = await import(sub('./spare-budget.js'))
 const { Researcher, needsResearch } = await import(sub('./research.js'))
+// 闲逛（2026-10-28 主人 m00634）：闲着的时候自己刷小黑盒找话题，想回的帖子先问主人
+const { Drift } = await import(sub('./drift.js'))
 const { Gatekeeper, parseVerdict, personLabel } = await import(sub('./gatekeeper.js'))
 // task-53 收口：pest 实现只在独立包 dsh-qq-pest 里，主包不再 import ./pest.js。
 // 主包拿到 qqPest 服务后由 main.js 把 keeper 注入 this.pest（取不到就是 null = 功能关闭）。
@@ -250,6 +252,12 @@ export class ChatEngine {
       logger,
       limit: Number(config.memoryPoolLimit) || 2000,
       growTo: Number(config.memoryPoolMax) || 0,
+      /*
+       * 识海图 / tag 抽象（2026-10-28）：两个默认关闭的算法增量开关，
+       * 只在这里透传给 MemoryStore —— 关着的时候它俩连边都不连、抽象也不跑。
+       */
+      graph: config.memoryGraph === true,
+      abstractTags: config.memoryAbstract === true,
       /*
        * 账号维度（2026-10-27 主人 m01748 第 2 条「记忆分账号再分七类储存」）：
        * 传机器人自己的 QQ，记忆落 `<memoryDir>/<selfId>/<kind>.json`。
@@ -786,6 +794,43 @@ export class ChatEngine {
      * research 桶——只记一次、桶也对。
      */
     this.wrapResearchAccounting(this.researcher)
+    /*
+     * 闲逛（2026-10-28 主人 m00634）。
+     *
+     * 为什么单独开一个执行器：干活会话的 agent 句柄是懒创建的，工具面在创建
+     * 那一刻就定死了——宿主后来装上的浏览器工具（ego_*）它看不见。所以 drift
+     * 用 workSessionTag:'drift1' 另起一条会话，首建时就把浏览器带进来；也不去
+     * 动主人那条几百轮的干活历史（openWorkSession 明确不 rename/不重建）。
+     */
+    try {
+      const driftExecutor = new CommandExecutor({
+        ctx,
+        logger,
+        /*
+         * 闲逛比「查一句话」重得多：开浏览器、翻首页、点进两三条帖子。
+         * 默认 180s 的单轮上限实测会在「已经看完帖子、正要输出 JSON」时被截断
+         * （2026-10-28 首跑 36 步、180035ms 失败），所以给它单独放宽到 8 分钟。
+         */
+        config: {
+          ...config,
+          workSessionTag: config.driftSessionTag || 'drift1',
+          workTurnTimeoutMs: Number(config.driftTurnTimeoutMs) || Number(config.drift?.turnTimeoutMs) || 480000,
+        },
+        engine: this,
+      })
+      this.drift = new Drift({
+        logger,
+        config,
+        executor: driftExecutor,
+        engine: this,
+        client,
+        dataDir: config.dataDir,
+      })
+      this.drift.start()
+    } catch (err) {
+      this.drift = null
+      logger('warn', `闲逛没起来（不影响聊天）：${err?.message || err}`)
+    }
 
     /**
      * 任务进度播报器。attach() 由 index.js 在宿主就绪后调用。
@@ -2307,6 +2352,8 @@ export class ChatEngine {
     // 自己发的话如果被当成用户输入回灌，会导致「自己跟自己聊」的死循环。
     if (!ev || ev.post_type === 'message_sent') return
     if (String(ev.user_id) === String(this.selfId)) return
+    // 闲逛用它判断「她到底闲不闲」（没有更近的入站消息才去刷帖）
+    this.lastInboundAt = Date.now()
 
     /*
      * 撤回兜底（2026-10-24，主人 m00480 需求②）。
@@ -2350,6 +2397,22 @@ export class ChatEngine {
     }
 
     const norm = normalizeMessage(ev.message, this.selfId)
+    /*
+     * 闲逛回执（2026-10-28 主人 m00634）：主人回「发 1 / 不发 1 / 细节 2」。
+     * 必须拦在进聊天链路之前——这几个词一旦漏进模型，她会当成闲聊接一句
+     * 「什么发 1」，主人以为没生效。
+     */
+    if (ev.message_type === 'private' && this.drift?.available) {
+      const driftHandled = await this.drift.handleOwnerReply({
+        ev,
+        text: String(norm.text || '').trim(),
+        isCommander: Boolean(this.executor?.isCommander?.(ev.user_id, ev)),
+      }).catch((err) => {
+        this.logger('warn', `闲逛回执处理失败：${err?.message || err}`)
+        return false
+      })
+      if (driftHandled) return
+    }
     /*
      * 入站语音转文字（2026-10-25，主人 m04041「Molly好像还是不能读语音」）。
      *
@@ -3557,7 +3620,23 @@ export class ChatEngine {
      * 一条压根没下命令的消息触发了进度行 + 审核话术。
      * 判错一律错向聊天（权限最小）。
      */
-    if (route.explicit !== true) {
+    /*
+     * 2026-10-28（主人方案 A）：自然语言浏览。
+     *
+     * 「看看这个链接」「去小黑盒瞅瞅有啥」这类句子不带「命令 」，路由层已经把
+     * 它判成 work + browse:true。这里决定放不放行，条件卡得很死：
+     *   - 必须是规则层判出来的浏览意图（不是模型兜底）
+     *   - 必须是**私聊**（群里任何人都能说一句「看看这个链接」，不能因此开浏览器）
+     *   - 必须是指挥官（commanderUsers）
+     *   - config.autoBrowseEnabled !== false（留一个开关，出事能一键关掉）
+     */
+    const autoBrowse =
+      route.browse === true &&
+      this.config.autoBrowseEnabled !== false &&
+      ev.message_type === 'private' &&
+      Boolean(this.executor?.isCommander?.(ev.user_id, ev))
+
+    if (route.explicit !== true && !autoBrowse) {
       this.logger('info', `路由=${route.route}（${route.why}）但没有显式指令前缀 → 按聊天处理`)
       if (this.routeState.last) {
         this.routeState.last.downgradedToChat = true
@@ -3566,6 +3645,10 @@ export class ChatEngine {
       this.routeState.counts[route.route] -= 1
       this.routeState.counts.chat += 1
       return { handled: false, route }
+    }
+    if (autoBrowse) {
+      this.logger('info', `浏览意图 → 干活会话（${route.why}）`)
+      if (this.routeState.last) this.routeState.last.autoBrowse = true
     }
     const ex = this.executorFor(route.route)
     if (!ex || !ex.isCommander?.(ev.user_id, ev)) {
@@ -4533,6 +4616,8 @@ export class ChatEngine {
        */
       degraded: false,
       research: research?.ok ? research.summary : '',
+      // 闲逛刷到的帖子（2026-10-28 主人 m00634）：聊天时能自然提起来
+      drift: this.drift?.contextText?.() || '',
       // 2026-10-24 需求①：对方明确要求/坚持发群里 → 提示词里就别再教她推私聊
       groupEcho: Boolean(groupEcho?.active),
       // 2026-10-26：群里人多时，让她只接最近那一条（引用框会锁定它）
@@ -5684,9 +5769,59 @@ export class ChatEngine {
         this.logger?.('warn', `周信：周聚合失败（继续用原始事件）：${err?.message || err}`)
       }
 
-      let facts = summaries
-        .map((e) => ({ who: String(e.who || ''), text: String(e.text || ''), at: Number(e.at) || 0 }))
-        .filter((f) => f.text)
+      /*
+       * 写信用的素材不能只有「周聚合摘要」——摘要是「某群聊了 N 件事，主要是 …」，
+       * 读起来像工作汇报（主人 10-31 明确说过：不像日记、没感情、只说主人的事）。
+       * 所以优先取**这周的原始记忆**（人/梗/承诺/偏好/事件都要），摘要在后面兜底。
+       */
+      let facts = []
+      let stats = null
+      try {
+        const start = new Date(`${weekKey}T00:00:00`)
+        const startTs = start.getTime()
+        const endTs = startTs + 7 * 86_400_000
+        if (Number.isFinite(startTs)) {
+          const wanted = new Set(['event', 'person', 'meme', 'promise', 'preference'])
+          const windowEntries = (this.memory.entries || []).filter((e) => {
+            const at = Number(e.at) || 0
+            if (at < startTs || at >= endTs) return false
+            if (!wanted.has(String(e.kind || ''))) return false
+            if (e.weekSummaryFor || e.letterFor) return false
+            if (String(e.source || '') === 'system') return false
+            return String(e.text || '').trim().length >= 4
+          })
+          facts = windowEntries
+            .map((e) => ({
+              who: String(e.who || ''),
+              qq: String(e.qq || ''),
+              text: String(e.text || ''),
+              at: Number(e.at) || 0,
+              kind: String(e.kind || ''),
+            }))
+            .sort((a, b) => a.at - b.at)
+          // 粗统计：表情认了几张、答应几件事、替主人办了几件、进过几个群
+          const groups = new Set()
+          let chores = 0
+          let memes = 0
+          let promises = 0
+          for (const e of windowEntries) {
+            const text = String(e.text || '')
+            if (/^我(帮|替)(他|她|主人)/.test(text)) chores += 1
+            if (String(e.kind) === 'meme') memes += 1
+            if (String(e.kind) === 'promise') promises += 1
+            if (e.groupId) groups.add(String(e.groupId))
+            else if (String(e.qq || '').trim().startsWith('g')) groups.add(String(e.qq).trim())
+          }
+          stats = { chores, memes, promises, people: new Set(windowEntries.filter((e) => e.who).map((e) => String(e.who))).size, groups: groups.size }
+        }
+      } catch (err) {
+        this.logger?.('warn', `周信：原始记忆取样失败：${err?.message || err}`)
+      }
+      if (!facts.length && summaries?.length) {
+        facts = summaries
+          .map((e) => ({ who: String(e.who || ''), text: String(e.text || ''), at: Number(e.at) || 0 }))
+          .filter((f) => f.text)
+      }
       if (!facts.length) {
         // 没有摘要（例如这周没人说话、或聚合已做过但条目被归档）就退回原始事件采样
         try {
@@ -5704,7 +5839,28 @@ export class ChatEngine {
       }
       if (!facts.length) return { skipped: 'no-facts', weekKey }
 
-      const letter = mod.buildLetter({ weekKey, facts, owner: '你', maxChars: 600, maxFacts: 5 })
+      /*
+       * 信交给模型写（config.jasmineLetterModel=false 可关）：模板版是硬映射，
+       * 主人连看两版都说「水」；模型能换切口、换语气，这里只负责把材料喂满、把约束给死。
+       * 模型不可用/超时/太短 → 退回模板，信一定能写出来。
+       */
+      let letter = null
+      if (this.config?.jasmineLetterModel !== false && typeof mod.buildLetterPrompt === 'function') {
+        letter = await this.writeLetterWithModel({ mod, weekKey, facts, stats })
+      }
+      if (!letter) {
+        letter = mod.buildLetter({
+          weekKey,
+          facts,
+          owner: '你',
+          ownerQq: String(this.config?.ownerUin || ''),
+          stats,
+          maxChars: 900,
+          maxFacts: 8,
+        })
+        if (letter) letter.source = 'template'
+      }
+      if (!letter || !letter.text) return { skipped: 'empty-letter', weekKey }
       try {
         const entry = mod.letterEntry({ weekKey, text: letter.text })
         if (entry) {
@@ -5715,9 +5871,14 @@ export class ChatEngine {
         this.logger?.('warn', `周信：写入记忆失败：${err?.message || err}`)
       }
 
+      let delivered = { via: 'memory-only' }
       const owner = String(this.config?.ownerUin || '').trim()
       if (owner && this.client?.sendPrivateMsg) {
-        await this.client.sendPrivateMsg(owner, [{ type: 'text', data: { text: letter.text } }])
+        try {
+          delivered = await this.sendWeeklyLetterText(owner, letter.text, dir, weekKey)
+        } catch (err) {
+          this.logger?.('warn', `周信：发送失败：${err?.message || err}`)
+        }
       } else {
         this.logger?.('warn', '周信：没有 ownerUin 或客户端，信只写进了记忆')
       }
@@ -5727,16 +5888,113 @@ export class ChatEngine {
         at: Date.now(),
         kind: 'weekly-letter',
         weekKey,
+        source: letter.source || 'template',
         chars: letter.text.length,
         facts: letter.used,
         sent: Boolean(owner),
+        via: delivered.via,
       })
-      this.logger?.('info', `周信已写（${weekKey}，${letter.text.length} 字，${letter.used} 件事）`)
-      return { ok: true, weekKey, chars: letter.text.length, facts: letter.used }
+      this.logger?.('info', `周信已写（${weekKey}，${letter.text.length} 字，${letter.used} 件事，来源=${letter.source || 'template'}，${delivered.via}）`)
+      return { ok: true, weekKey, chars: letter.text.length, facts: letter.used, via: delivered.via, source: letter.source || 'template' }
     } catch (err) {
       this.logger?.('warn', `周信失败：${err?.message || err}`)
       return { skipped: 'error', error: String(err?.message || err) }
     }
+  }
+
+  /**
+   * 让模型写周信。失败返回 null，由调用方退回模板，永不抛。
+   * 超时 90s（周信不是实时对话，多等一会儿没关系）；maxTokens 1600 够 900 字。
+   */
+  async writeLetterWithModel({ mod, weekKey, facts, stats }) {
+    let prompt = null
+    try {
+      prompt = mod.buildLetterPrompt({
+        weekKey,
+        facts,
+        stats,
+        owner: '你',
+        selfName: this.selfNickname?.() || 'Molly',
+      })
+    } catch (err) {
+      this.logger?.('warn', `周信：拼提示词失败：${err?.message || err}`)
+      return null
+    }
+    if (!prompt?.system || !prompt?.user) return null
+    const ac = new AbortController()
+    const timer = setTimeout(() => ac.abort(), 90_000)
+    try {
+      const res = await this.callModel({
+        system: prompt.system,
+        messages: [{ role: 'user', content: prompt.user }],
+        signal: ac.signal,
+        maxTokens: 1600,
+        reasoningEffort: 'low',
+      })
+      if (!res?.ok || !res.text) {
+        this.logger?.('warn', `周信：模型没写成（${res?.error || res?.reason || 'empty'}），用模板兜底`)
+        return null
+      }
+      const text = mod.cleanModelLetter(res.text, { maxChars: 1400 })
+      if (!text || text.length < 200) {
+        this.logger?.('warn', `周信：模型输出太短（${text ? text.length : 0} 字），用模板兜底`)
+        return null
+      }
+      return { weekKey, text, used: Math.min(facts.length, 60), source: 'model' }
+    } catch (err) {
+      this.logger?.('warn', `周信：模型调用失败（${err?.message || err}），用模板兜底`)
+      return null
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  /**
+   * 发周信：长信优先发文件（QQ 里几百字挤成一大坨很难读，主人 10-31 的要求），
+   * 文件发不出去（SnowLuma 没实现 upload_private_file / 权限不够）就按段落分条发文本。
+   * 永不抛：返回 {via}，调用方只用来写 trace。
+   */
+  async sendWeeklyLetterText(owner, text, dir, weekKey) {
+    const body = String(text || '')
+    const file = path.join(dir, 'letters', `${weekKey}.md`)
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true })
+      fs.writeFileSync(file, `# 茉莉花周信 · ${weekKey}\n\n${body}\n`, 'utf8')
+    } catch (err) {
+      this.logger?.('warn', `周信：落文件失败：${err?.message || err}`)
+    }
+    if (body.length > 550) {
+      try {
+        // client.call 成功即 resolve(data)、失败即 reject，别拿 status/retcode 判成败
+        await this.client.call('upload_private_file', {
+          user_id: /^\d+$/.test(owner) ? Number(owner) : owner,
+          file,
+          name: `茉莉花周信-${weekKey}.md`,
+        })
+        await this.client.sendPrivateMsg(owner, [
+          { type: 'text', data: { text: `这周的信写长了些，发你一份文件（茉莉花周信-${weekKey}.md），点开看。` } },
+        ])
+        return { via: 'file', file }
+      } catch (err) {
+        this.logger?.('warn', `周信：文件发送失败（${err?.message || err}），改发文本`)
+      }
+    }
+    // 文本按段落分条，每条 ≤ 480 字，避免 QQ 单条过长被截
+    const chunks = []
+    let cur = ''
+    for (const para of body.split(/\n+/)) {
+      const p = para.trim()
+      if (!p) continue
+      if (cur && cur.length + p.length + 1 > 480) {
+        chunks.push(cur)
+        cur = p
+      } else {
+        cur = cur ? `${cur}\n${p}` : p
+      }
+    }
+    if (cur) chunks.push(cur)
+    for (const c of chunks) await this.client.sendPrivateMsg(owner, [{ type: 'text', data: { text: c } }])
+    return { via: chunks.length > 1 ? 'text-chunks' : 'text', chunks: chunks.length }
   }
 
   /** 上一个完整自然周的周一（本地时区，YYYY-MM-DD）——和 memory.weekKeyOf 的口径一致。 */

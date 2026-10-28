@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Molly 控制�?/title>
-<!-- 图标内联，避免控制台离线时还去请�?favicon -->
+<title>Molly 控制台</title>
+<!-- 图标内联，避免控制台离线时还去请求 favicon -->
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%90%B3%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="/console.css">
 <script src="/console.js" defer></script>
@@ -15,22 +15,22 @@
   <aside class="sidebar">
     <div class="brand">
       <span class="brand-mark" aria-hidden="true">🐳</span>
-      <span class="brand-text">Molly 控制�?/span>
+      <span class="brand-text">Molly 控制台</span>
     </div>
 
-    <nav class="nav" id="nav" aria-label="主导�?>
-      <!-- 总览单独放最上面，不再套组标题（组标题也叫「总览」会重复�?-->
+    <nav class="nav" id="nav" aria-label="主导航">
+      <!-- 总览单独放最上面，不再套组标题（组标题也叫「总览」会重复） -->
       <a class="nav-item" href="#/overview" data-page="overview">总览</a>
       <div class="nav-group">
-        <div class="nav-group-title">�?/div>
-        <a class="nav-item" href="#/chats" data-page="chats">会话与消�?/a>
+        <div class="nav-group-title">她</div>
+        <a class="nav-item" href="#/chats" data-page="chats">会话与消息</a>
         <a class="nav-item" href="#/memory" data-page="memory">记忆</a>
-        <a class="nav-item" href="#/pending" data-page="pending">待核�?span class="nav-badge" id="pendBadge" hidden>0</span></a>
-        <a class="nav-item" href="#/stickers" data-page="stickers">表情�?/a>
+        <a class="nav-item" href="#/pending" data-page="pending">待核实<span class="nav-badge" id="pendBadge" hidden>0</span></a>
+        <a class="nav-item" href="#/stickers" data-page="stickers">表情包</a>
       </div>
       <div class="nav-group">
         <div class="nav-group-title">行为</div>
-        <a class="nav-item" href="#/switches" data-page="switches">发言开�?/a>
+        <a class="nav-item" href="#/switches" data-page="switches">发言开关</a>
         <a class="nav-item" href="#/budget" data-page="budget">预算</a>
       </div>
       <div class="nav-group">
@@ -46,13 +46,13 @@
       </div>
       <div class="nav-group">
         <div class="nav-group-title">系统</div>
-        <a class="nav-item" href="#/exec" data-page="exec">执行�?/a>
+        <a class="nav-item" href="#/exec" data-page="exec">执行块</a>
         <a class="nav-item" href="#/settings" data-page="settings">设置</a>
       </div>
     </nav>
 
     <div class="sidebar-foot">
-      <button class="foot-ver mono" id="footVersion" type="button" title="点击查看本次更新了什�?>1.1.6-preview.4</button>
+      <button class="foot-ver mono" id="footVersion" type="button" title="点击查看本次更新了什么">1.1.6-preview.6</button>
       <span class="sidebar-foot-dot">·</span>
       <span class="mono">127.0.0.1</span>
     </div>
@@ -62,14 +62,14 @@
     <header class="topbar">
       <div class="topbar-left">
         <span class="pill pill-idle" id="pillMolly"><i class="dot"></i>Molly 未知</span>
-        <span class="pill pill-idle" id="pillNapcat" title="QQ 连接状�?><i class="dot"></i>QQ 未知</span>
+        <span class="pill pill-idle" id="pillNapcat" title="QQ 连接状态"><i class="dot"></i>QQ 未知</span>
         <span class="pill pill-idle" id="pillWatchdog"><i class="dot"></i>守护 未知</span>
         <span class="pill pill-bad" id="pillLink" hidden><i class="dot"></i>连接中断</span>
       </div>
       <div class="topbar-right">
-        <span class="topbar-meta">模型 <b class="mono" id="topModel">�?/b></span>
-        <span class="topbar-meta">积分 <b class="mono" id="topBudget">�?/b></span>
-        <span class="topbar-meta">刷新 <b class="mono" id="topRefresh">�?/b></span>
+        <span class="topbar-meta">模型 <b class="mono" id="topModel">—</b></span>
+        <span class="topbar-meta">积分 <b class="mono" id="topBudget">—</b></span>
+        <span class="topbar-meta">刷新 <b class="mono" id="topRefresh">—</b></span>
         <button class="btn btn-ghost btn-sm" id="btnRefresh" type="button">刷新</button>
       </div>
     </header>
@@ -80,22 +80,22 @@
       <section class="page" data-page="overview">
         <div class="page-head">
           <h1>总览</h1>
-          <p class="page-sub">Molly 的运行状态、模型与数据源一览。顶部状态条回答「QQ 连没连上」�?/p>
+          <p class="page-sub">Molly 的运行状态、模型与数据源一览。顶部状态条回答「QQ 连没连上」。</p>
         </div>
         <!-- QQ 链路不通时插在最上面：整条可点，跳到「QQ 连接」页看状态、点重新登录 -->
         <a class="ov-login-banner" id="ovLoginBanner" href="#/qq" hidden>
-          <span>⚠️ Molly 还没连上 QQ —�?点这里看怎么处理</span>
-          <span class="ov-login-banner-go">�?QQ 连接 �?/span>
+          <span>⚠️ Molly 还没连上 QQ —— 点这里看怎么处理</span>
+          <span class="ov-login-banner-go">去 QQ 连接 →</span>
         </a>
         <div class="stat-grid" id="ovStats"></div>
         <div class="card-grid" id="ovCards"></div>
       </section>
 
-      <!-- 会话与消�?-->
+      <!-- 会话与消息 -->
       <section class="page" data-page="chats" hidden>
         <div class="page-head">
-          <h1>会话与消�?/h1>
-          <p class="page-sub">消息量、响应耗时与学习器的取舍记录�?/p>
+          <h1>会话与消息</h1>
+          <p class="page-sub">消息量、响应耗时与学习器的取舍记录。</p>
         </div>
         <div class="card-grid" id="chatCards"></div>
       </section>
@@ -105,46 +105,46 @@
         <div class="page-head page-head-row">
           <div>
             <h1>记忆</h1>
-            <p class="page-sub" id="memSub">正在读取�?/p>
+            <p class="page-sub" id="memSub">正在读取…</p>
           </div>
           <button class="btn btn-primary" id="memAdd" type="button" disabled>+ 新增记忆</button>
         </div>
         <div class="notice" id="memNotice" hidden></div>
         <div class="toolbar">
-          <input class="input" id="memSearch" type="search" placeholder="搜索正文 / 日期 / 类型 / �?/ QQ �? autocomplete="off" spellcheck="false">
+          <input class="input" id="memSearch" type="search" placeholder="搜索正文 / 日期 / 类型 / 人 / QQ 号" autocomplete="off" spellcheck="false">
           <button class="btn btn-ghost btn-sm" id="memReload" type="button">重新加载</button>
         </div>
         <div id="memGroups"></div>
       </section>
 
-      <!-- 待核实：拦下来的记忆先放这儿，等人过�?-->
+      <!-- 待核实：拦下来的记忆先放这儿，等人过目 -->
       <section class="page" data-page="pending" hidden>
         <div class="page-head page-head-row">
           <div>
-            <h1>待核�?/h1>
-            <p class="page-sub">这些是自动写入时被拦下的记忆，通过后才会进正式记忆�?/p>
+            <h1>待核实</h1>
+            <p class="page-sub">这些是自动写入时被拦下的记忆，通过后才会进正式记忆。</p>
           </div>
           <button class="btn btn-danger" id="pendRejectAll" type="button" disabled>全部丢弃</button>
         </div>
         <div class="notice" id="pendNotice" hidden></div>
         <div class="toolbar">
-          <span class="pend-stat" id="pendStat">待核�?�?�?/span>
+          <span class="pend-stat" id="pendStat">待核实 — 条</span>
           <span class="pend-hint" id="pendHint" hidden></span>
           <button class="btn btn-ghost btn-sm" id="pendReload" type="button">刷新</button>
         </div>
         <div class="pend-error" id="pendError" hidden></div>
         <div id="pendList" class="pend-list"></div>
-        <div class="empty" id="pendEmpty" hidden>没有待核实的记忆，拦下来的都会先放这儿�?/div>
+        <div class="empty" id="pendEmpty" hidden>没有待核实的记忆，拦下来的都会先放这儿。</div>
       </section>
 
-      <!-- 表情�?-->
+      <!-- 表情包 -->
       <section class="page" data-page="stickers" hidden>
         <div class="page-head page-head-row">
           <div>
-            <h1>表情�?/h1>
-            <p class="page-sub" id="stkSub">正在读取�?/p>
+            <h1>表情包</h1>
+            <p class="page-sub" id="stkSub">正在读取…</p>
           </div>
-          <button class="btn btn-primary" id="stkAdd" type="button">+ 上传表情�?/button>
+          <button class="btn btn-primary" id="stkAdd" type="button">+ 上传表情包</button>
         </div>
         <div class="toolbar">
           <input class="input stk-search" id="stkSearch" type="search" placeholder="搜索表情包：名字 / 关键词，空格分隔多个" autocomplete="off" spellcheck="false">
@@ -158,7 +158,7 @@
       <section class="page" data-page="budget" hidden>
         <div class="page-head">
           <h1>预算</h1>
-          <p class="page-sub">每日积分上限与实际用量。改动额度请到「执行块 �?积分限制」�?/p>
+          <p class="page-sub">每日积分上限与实际用量。改动额度请到「执行块 → 积分限制」。</p>
         </div>
         <div class="card-grid" id="budgetCards"></div>
       </section>
@@ -167,7 +167,7 @@
       <section class="page" data-page="work" hidden>
         <div class="page-head">
           <h1>干活</h1>
-          <p class="page-sub">工作总线、研究开关与学习器。快捷动作与「执行块」共用同一套接口�?/p>
+          <p class="page-sub">工作总线、研究开关与学习器。快捷动作与「执行块」共用同一套接口。</p>
         </div>
         <div class="card-grid" id="workCards"></div>
         <div class="card card-block">
@@ -178,7 +178,7 @@
           </div>
           <div class="row-actions">
             <button class="btn btn-primary" id="workProbe" type="button">探活</button>
-            <button class="btn btn-ghost" id="workRun" type="button">跑一条指�?/button>
+            <button class="btn btn-ghost" id="workRun" type="button">跑一条指令</button>
             <button class="btn btn-ghost" id="workResearch" type="button">研究测试</button>
           </div>
           <div class="action-result" id="workOut" hidden></div>
@@ -189,16 +189,16 @@
       <section class="page" data-page="watchdog" hidden>
         <div class="page-head">
           <h1>守护</h1>
-          <p class="page-sub">watchdog 的巡检状态、配置与计划任务�?/p>
+          <p class="page-sub">watchdog 的巡检状态、配置与计划任务。</p>
         </div>
-        <!-- 骂人模式开关：独立容器。守护不可达时它也要照常显示与可点�?-->
+        <!-- 骂人模式开关：独立容器。守护不可达时它也要照常显示与可点。 -->
         <div class="card-grid" id="pestCards"></div>
         <div class="card-grid" id="wdCards"></div>
         <div class="card card-block">
           <h2 class="card-title">快捷动作</h2>
           <div class="row-actions">
-            <button class="btn btn-primary" id="wdStatus" type="button">读取状�?/button>
-            <button class="btn btn-ghost" id="wdOnce" type="button">立即巡检一�?/button>
+            <button class="btn btn-primary" id="wdStatus" type="button">读取状态</button>
+            <button class="btn btn-ghost" id="wdOnce" type="button">立即巡检一次</button>
             <button class="btn btn-ghost" id="wdNotify" type="button">测试通知</button>
             <button class="btn btn-ghost" id="wdLogs" type="button">查看日志</button>
           </div>
@@ -210,12 +210,12 @@
       <section class="page" data-page="ops" hidden>
         <div class="page-head">
           <h1>运维</h1>
-          <p class="page-sub">Molly 进程、心跳中继、PushPlus 推送与日志。日志只在页面里看和复制，不提供下载�?/p>
+          <p class="page-sub">Molly 进程、心跳中继、PushPlus 推送与日志。日志只在页面里看和复制，不提供下载。</p>
         </div>
         <div class="card-grid" id="opsCards"></div>
         <div class="card card-block">
           <h2 class="card-title">进程操作</h2>
-          <p class="card-sub">启动会跳过已在跑的部分；停止只关 QQ 客户端和它的连接服务，不�?DSH 宿主、网关和控制台自己�?/p>
+          <p class="card-sub">启动会跳过已在跑的部分；停止只关 QQ 客户端和它的连接服务，不碰 DSH 宿主、网关和控制台自己。</p>
           <div class="row-actions">
             <button class="btn btn-primary" id="opsStart" type="button">启动 Molly</button>
             <button class="btn btn-danger" id="opsStop" type="button">停止 Molly</button>
@@ -225,7 +225,7 @@
         </div>
         <div class="card card-block">
           <h2 class="card-title">日志</h2>
-          <p class="card-sub">最�?200 行。复制走剪贴板，不生成下载文件�?/p>
+          <p class="card-sub">最近 200 行。复制走剪贴板，不生成下载文件。</p>
           <div class="toolbar">
             <select class="input input-sm" id="opsLogSource" aria-label="日志来源">
               <option value="watchdog">watchdog</option>
@@ -237,7 +237,7 @@
             <button class="btn btn-ghost btn-sm" id="opsLogCopy" type="button">复制</button>
             <span class="drawer-path mono" id="opsLogPath"></span>
           </div>
-          <pre class="log-body mono" id="opsLogBody">（尚未加载，点「加载」看最�?200 行）</pre>
+          <pre class="log-body mono" id="opsLogBody">（尚未加载，点「加载」看最近 200 行）</pre>
         </div>
       </section>
 
@@ -246,14 +246,14 @@
         <div class="page-head page-head-row">
           <div>
             <h1>外部服务</h1>
-            <p class="page-sub">网关计费与模型清单、服务器中继心跳。读不到时只标红，不拖垮整页�?/p>
+            <p class="page-sub">网关计费与模型清单、服务器中继心跳。读不到时只标红，不拖垮整页。</p>
           </div>
           <button class="btn btn-ghost btn-sm" id="extReload" type="button">刷新</button>
         </div>
         <div class="card-grid" id="extCards"></div>
         <div class="card card-block">
-          <h2 class="card-title">切模�?/h2>
-          <p class="card-sub">只在控制台可改；写进插件配置后立即生效，不需要重启。令牌只存在服务端，前端拿不到�?/p>
+          <h2 class="card-title">切模型</h2>
+          <p class="card-sub">只在控制台可改；写进插件配置后立即生效，不需要重启。令牌只存在服务端，前端拿不到。</p>
           <div class="ext-model-grid">
             <label class="ext-model-cell">
               <span class="field-label" for="extModelChat">聊天</span>
@@ -276,53 +276,53 @@
         </div>
       </section>
 
-      <!-- QQ 连接（原 NapCat 页改名；内部路由/字段仍叫 napcat 以兼容老配置和收藏�?-->
+      <!-- QQ 连接（原 NapCat 页改名；内部路由/字段仍叫 napcat 以兼容老配置和收藏） -->
       <section class="page" data-page="qq" hidden>
         <div class="page-head">
           <h1>QQ 连接</h1>
-          <p class="page-sub">Molly �?QQ 的链路状态、客户端信息与扫码入口。这里判的是「Molly 连没连上 QQ」，不是「QQ 进程开没开」�?/p>
+          <p class="page-sub">Molly 与 QQ 的链路状态、客户端信息与扫码入口。这里判的是「Molly 连没连上 QQ」，不是「QQ 进程开没开」。</p>
         </div>
         <div class="card-grid" id="ncCards"></div>
         <div class="card card-block">
           <h2 class="card-title">重新登录 QQ（扫码）</h2>
-          <p class="card-sub">当前后端�?b id="qqBackendName">读取中�?/b>。点按钮只会重启 QQ 客户端，<b>不会</b>重启 Molly 插件、网关和控制台�?/p>
+          <p class="card-sub">当前后端：<b id="qqBackendName">读取中…</b>。点按钮只会重启 QQ 客户端，<b>不会</b>重启 Molly 插件、网关和控制台。</p>
           <ul class="qq-flow">
-            <li><b>SnowLuma 后端</b>：触发计划任�?<span class="mono">SnowLuma-Relogin</span>，约 10~25 秒后 QQ 窗口弹出，用手机扫码即可（SnowLuma 进程不动，设备指纹不变）�?/li>
-            <li><b>回滚后端</b>：现场生成一张登录二维码（约 2�? 秒），用手机 QQ 扫码，扫完即失效�?/li>
-            <li>扫码�?QQ 窗口会自动关闭；看到「Molly 已连�?QQ」就成功了，不用再刷新�?/li>
-            <li>30 秒还不见窗口：先�?<span class="mono">${MOLLY_ROOT}\qq-whale\out\snowluma-runtime.out.log</span> �?<span class="mono">${MOLLY_ROOT}\qq-whale\out\snowluma-boot.log</span>；也可以在「运维」页的日志里选「SnowLuma 运行 / 启动」看最�?200 行�?/li>
-            <li>还不行就去「守护」看 watchdog 结论，或到「执行块」重新检查连接�?/li>
+            <li><b>SnowLuma 后端</b>：触发计划任务 <span class="mono">SnowLuma-Relogin</span>，约 10~25 秒后 QQ 窗口弹出，用手机扫码即可（SnowLuma 进程不动，设备指纹不变）。</li>
+            <li><b>回滚后端</b>：现场生成一张登录二维码（约 2–6 秒），用手机 QQ 扫码，扫完即失效。</li>
+            <li>扫码后 QQ 窗口会自动关闭；看到「Molly 已连接 QQ」就成功了，不用再刷新。</li>
+            <li>30 秒还不见窗口：先看 <span class="mono">${MOLLY_ROOT}\qq-whale\out\snowluma-runtime.out.log</span> 和 <span class="mono">${MOLLY_ROOT}\qq-whale\out\snowluma-boot.log</span>；也可以在「运维」页的日志里选「SnowLuma 运行 / 启动」看最近 200 行。</li>
+            <li>还不行就去「守护」看 watchdog 结论，或到「执行块」重新检查连接。</li>
           </ul>
           <div class="login-status" id="loginStatus"></div>
           <div class="login-success" id="loginSuccess" hidden></div>
           <div class="login-error" id="loginError" hidden></div>
           <div class="login-actions">
             <button class="btn btn-primary" id="loginGen" type="button">重新登录 QQ（扫码）</button>
-            <button class="btn btn-ghost btn-sm" id="loginRefresh" type="button">刷新状�?/button>
+            <button class="btn btn-ghost btn-sm" id="loginRefresh" type="button">刷新状态</button>
             <span class="login-progress" id="loginProgress" hidden></span>
             <span class="login-countdown" id="loginCountdown" hidden></span>
           </div>
           <div class="login-qr" id="loginQr" hidden>
-            <img class="login-qr-img" id="loginQrImg" alt="QQ 登录二维�?>
+            <img class="login-qr-img" id="loginQrImg" alt="QQ 登录二维码">
             <div class="login-link-row">
-              <input class="input input-sm mono" id="loginUrl" type="text" readonly aria-label="二维码链�? spellcheck="false">
+              <input class="input input-sm mono" id="loginUrl" type="text" readonly aria-label="二维码链接" spellcheck="false">
               <button class="btn btn-ghost btn-sm" id="loginCopy" type="button">复制链接</button>
             </div>
             <p class="login-hint" id="loginHint"></p>
           </div>
           <div class="login-idle" id="loginIdle">
-            <p class="card-sub" id="loginIdleMain">点「重新登�?QQ（扫码）」：SnowLuma 后端会触发计划任务重�?QQ 客户端，�?10~25 秒后 QQ 窗口弹出，用手机扫码�?/p>
-            <p class="login-hint" id="loginIdleHint">不会重启 Molly 插件、网关和控制台。回滚后端则改为现场生成二维码（�?2�? 秒，2 分钟过期，最多自动换 3 张）�?/p>
+            <p class="card-sub" id="loginIdleMain">点「重新登录 QQ（扫码）」：SnowLuma 后端会触发计划任务重启 QQ 客户端，约 10~25 秒后 QQ 窗口弹出，用手机扫码。</p>
+            <p class="login-hint" id="loginIdleHint">不会重启 Molly 插件、网关和控制台。回滚后端则改为现场生成二维码（约 2–6 秒，2 分钟过期，最多自动换 3 张）。</p>
           </div>
         </div>
       </section>
 
 
-      <!-- 执行�?-->
+      <!-- 执行块 -->
       <section class="page" data-page="exec" hidden>
         <div class="page-head">
-          <h1>执行�?/h1>
-          <p class="page-sub">契约 §4.2 �?14 个动作。红色按钮会重启进程或改写配置，执行前会二次确认并写明后果�?/p>
+          <h1>执行块</h1>
+          <p class="page-sub">契约 §4.2 的 14 个动作。红色按钮会重启进程或改写配置，执行前会二次确认并写明后果。</p>
         </div>
         <div class="action-grid" id="actionGrid"></div>
       </section>
@@ -331,14 +331,15 @@
       <section class="page" data-page="settings" hidden>
         <div class="page-head">
           <h1>设置</h1>
-          <p class="page-sub">连接信息与诊断。这里只读，真正的开关都在「执行块」�?/p>
+          <p class="page-sub">连接信息与诊断。这里只读，真正的开关都在「执行块」。</p>
         </div>
         <div class="card-grid" id="setCards"></div>
         <div class="card card-block" id="sleepCard">
           <h2 class="card-title">作息时间（北京时间）</h2>
-          <p class="card-sub">这段时间里她在睡觉：群里不掺和，私聊/@ 被叫醒才会短回一句。时间按北京时间算，改完立即生效（不用重启）�?/p>
+          <p class="card-sub">这段时间里她在睡觉：群里不掺和，私聊/@ 被叫醒才会短回一句。时间按北京时间算，改完立即生效（不用重启）。</p>
           <div class="row-actions" style="flex-wrap:wrap;gap:10px;align-items:flex-end">
-            <label class="card-sub" style="margin:0">开�?              <select class="input" id="sleepEnabled" style="width:96px;margin-left:6px">
+            <label class="card-sub" style="margin:0">开关
+              <select class="input" id="sleepEnabled" style="width:96px;margin-left:6px">
                 <option value="true">睡着</option>
                 <option value="false">不睡</option>
               </select>
@@ -355,12 +356,12 @@
         </div>
         <div class="card card-block">
           <h2 class="card-title">后端切换（回滚备注）</h2>
-          <p class="card-sub">QQ 后端�?<span class="mono">${MOLLY_ROOT}\qq-whale\watchdog-config.json</span> �?<span class="mono">backend</span> 决定：默�?<b>SnowLuma</b>；历史回滚后端的名字�?<b>NapCat</b>。切换属于运维操作，不在这里改�?/p>
-          <p class="card-sub">正常部署不用关心 NapCat，只有回滚时才会用到它；控制台其余页面都只显示「QQ」�?/p>
+          <p class="card-sub">QQ 后端由 <span class="mono">${MOLLY_ROOT}\qq-whale\watchdog-config.json</span> 的 <span class="mono">backend</span> 决定：默认 <b>SnowLuma</b>；历史回滚后端的名字是 <b>NapCat</b>。切换属于运维操作，不在这里改。</p>
+          <p class="card-sub">正常部署不用关心 NapCat，只有回滚时才会用到它；控制台其余页面都只显示「QQ」。</p>
         </div>
         <div class="card card-block">
           <h2 class="card-title">诊断</h2>
-          <p class="card-sub">把当�?overview / memory / stickers 的原�?JSON 复制走，方便贴给 Molly 排查�?/p>
+          <p class="card-sub">把当前 overview / memory / stickers 的原始 JSON 复制走，方便贴给 Molly 排查。</p>
           <div class="row-actions">
             <button class="btn btn-primary" id="setCopyDiag" type="button">复制诊断信息</button>
             <button class="btn btn-ghost" id="setOpenLogs" type="button">打开日志抽屉</button>
@@ -368,20 +369,20 @@
         </div>
       </section>
 
-      <!-- 发言开�?-->
+      <!-- 发言开关 -->
       <section class="page" data-page="switches" hidden>
         <div class="page-head page-head-row">
           <div>
-            <h1>发言开�?/h1>
-            <p class="page-sub">运行时控制：私聊 / 群聊的「回话、表情包、轻回应、点赞、主动搭话」各自开关。改完立即生效，不用重载插件�?/p>
+            <h1>发言开关</h1>
+            <p class="page-sub">运行时控制：私聊 / 群聊的「回话、表情包、轻回应、点赞、主动搭话」各自开关。改完立即生效，不用重载插件。</p>
           </div>
           <button class="btn btn-ghost btn-sm" id="swReload" type="button">重新加载</button>
         </div>
         <div class="notice" id="swErr" hidden></div>
         <div class="card-grid" id="swCards"></div>
         <div class="card card-block">
-          <h2 class="card-title">最近改了啥（审计，最�?20 条）</h2>
-          <p class="card-sub" id="swAuditSub">改动会记在这里，同时写进 out/switches-audit.log�?/p>
+          <h2 class="card-title">最近改了啥（审计，最近 20 条）</h2>
+          <p class="card-sub" id="swAuditSub">改动会记在这里，同时写进 out/switches-audit.log。</p>
           <div id="swAudit"></div>
         </div>
       </section>
@@ -390,7 +391,7 @@
   </div>
 </div>
 
-<!-- 右下角浮动日志抽�?-->
+<!-- 右下角浮动日志抽屉 -->
 <button class="btn log-fab" id="logFab" type="button">日志</button>
 <aside class="drawer" id="drawer" hidden aria-label="日志">
   <div class="drawer-head">
@@ -408,7 +409,7 @@
   <pre class="log-body mono" id="logBody">（尚未加载）</pre>
 </aside>
 
-<!-- 通用 CRUD 弹层：记忆新�?编辑/删除、表情包上传/改关键词/删除共用 -->
+<!-- 通用 CRUD 弹层：记忆新增/编辑/删除、表情包上传/改关键词/删除共用 -->
 <div class="modal" id="crudModal" hidden role="dialog" aria-modal="true" aria-labelledby="crudTitle">
   <div class="modal-card crud-card">
     <div class="crud-head">
@@ -436,7 +437,7 @@
   </div>
 </div>
 
-<!-- 页内确认弹层：停/重启 Molly、切模型这类动作只在这里点一次确认，不做输入框二次保�?-->
+<!-- 页内确认弹层：停/重启 Molly、切模型这类动作只在这里点一次确认，不做输入框二次保险 -->
 <div class="modal" id="confirmSheet" hidden role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
   <div class="modal-card confirm-card">
     <h2 class="card-title" id="confirmTitle">确认</h2>
@@ -450,19 +451,19 @@
 
 <div class="toast" id="toast" hidden></div>
 
-<!-- 本次更新说明�?026-10-25，主�?m04452「控制台上的版本更新一下，注释一下这次更新了什么」） -->
+<!-- 本次更新说明（2026-10-25，主人 m04452「控制台上的版本更新一下，注释一下这次更新了什么」） -->
 <div class="modal" id="chgModal" hidden role="dialog" aria-modal="true" aria-labelledby="chgTitle">
   <div class="modal-card chg-card">
     <h2 class="card-title" id="chgTitle">本次更新</h2>
     <div class="chg-body" id="chgBody"></div>
     <div class="modal-foot">
       <a class="btn btn-ghost btn-sm" id="chgFull" href="#" target="_blank" rel="noopener">完整变更日志</a>
-      <button class="btn btn-primary btn-sm" id="chgClose" type="button">知道�?/button>
+      <button class="btn btn-primary btn-sm" id="chgClose" type="button">知道了</button>
     </div>
   </div>
 </div>
 
-<noscript><p class="noscript">控制台需�?JavaScript 才能读取数据�?/p></noscript>
+<noscript><p class="noscript">控制台需要 JavaScript 才能读取数据。</p></noscript>
 
 </body>
 </html>

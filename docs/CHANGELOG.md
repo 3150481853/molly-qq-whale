@@ -7,6 +7,81 @@
 
 ---
 
+## 2026-10-30 · v1.1.6-preview.6：茉莉花记忆系统 0.2.0 整合进包（识海图 + 周信 + 账本 + 出口核对）
+
+> 主人（m02258）：「再验证一遍，可以的话整合成新版的茉莉花记忆系统发GitHub」
+> 版本口径（主人拍板）：Molly `1.1.6-preview.6`、jasmine `0.2.0`。
+
+**这一版把预览3 之后散着的东西收进一个包**
+
+- **茉莉花记忆系统 `jasmine/`（0.2.0）随包发布**：`JasmineStore`（双卡存储 / RRF 召回）、
+  `TokenLedger`（token 账本）、`shouldSpeak`（群聊四档信号）、`buildLetter`（周信）。
+  插件侧通过 `lib/jasmine-bridge.mjs` 按 `../jasmine/index.mjs` 动态加载，缺失时降级为「无记忆系统」，不影响主流程。
+- **P0-1 出口核对**：`verifyOutgoing()` 在 45 秒去重之后、真正发送之前对照「本轮召回过的条目」；
+  只记 `jasmine/trace.jsonl`，不改写、不阻拦。
+- **P0-2 压缩提醒**：`buildMessages()` 之后按三档（可压 ≥5 万且增量 ≥1 万 / 75% / 95%）在请求末尾追加一行提示，不写进历史。
+- **P0-3 周信**：`main.js` 30 分钟定时 + 启动 60 秒首检，`summarizeWeek()` → `buildLetter()` → 写回一条 `letter` 记忆 → 私聊主人；一周一封。
+- **P1-5 token 账本**：`recordUsage()` 除原有 budget 记账外，再追加 jasmine 账本（model + purpose + 输入/缓存/输出）。
+  控制台新增 `GET /api/jasmine/tokens?days=7`（只读聚合 + 最近 20 条）。
+- **P1-6 群聊信号**：`shouldRespond()` 外包一层，只对「这条 @ 的是别人」一票否决，其余档只进 `decisionLog`。
+- **识海图（preview.5 引入，本版随包）**：`memoryGraph` 同一次召回的前 5 条两两连边、召回时沿边扩 2 跳（每跳 ×0.6）；
+  `memoryAbstract` 同 tag ≥3 条且至少一条 `hits>0` 时抽象一条「关于X：…」节点，原条目降一级不删。两个开关默认关，profile 里已打开。
+- **超预算不再降智**：`generate()` 的 `budgetOut` 分支不再丢掉上下文、不再系统级「说短点」；
+  超预算只走「备用脑 → trae（历史最近 12 条 + 降智提示）→ 正常分层链」，`callDegraded()` 的 `trae.chat()` 补了 try/catch。
+- **表情包/语音「文字假装发图」修复**：`persona.js` 把改写式发图宣告（「我打了张…的图」）转成真 `<sticker>` 指令，
+  纯旁白 `（我……了）` 整段删除但正文为空时保留原文；`voice.js` 送 TTS 前先剥掉「我发送了一个表情：xx」。
+
+**验证（发版前跑）**
+
+- 语法：`lib/` 下 **51 个 js** `node --check` 全过；`jasmine/` 全部 `.mjs` 全过。
+- 单测：`test-memory-graph.mjs` **25/25**、`test-sticker-claim.mjs` **20/20**、`test-sanitize.mjs` **33/33**；
+  `jasmine` 包内 `node --test`：`features` **33 pass**、`store` **12 pass**。
+- 接入自检：`jasmine-bridge-selftest.mjs` **12/12**、`_jasmine_engine_check` **15/15**、`_jasmine_ledger_check` **9/9**、`_jasmine_signal_check` **11/11**。
+- 记忆六回归：rrf 25/25、dedup 27/27、v2 25/25、archive 20/20、week 17/17、compact 18/18。
+- 线上：`/dsh-qq-whale/state` 的 `memory.graph=true`、`abstractTags=true`、`links=136`、`count≈2090`。
+
+**退回**
+
+- 只关功能：profile 里 `jasmine*` 四个开关置 `false`、`memoryGraph`/`memoryAbstract` 置 `false`。
+- 连代码一起退：覆盖回 preview.5 的 `lib/`，或 `git checkout -- plugin/dsh-qq-whale/lib` + 删 `jasmine/`；控制台接口随包，退回旧 `tools/console-server.mjs` 即可。
+
+---
+
+## 2026-10-28（晚）· 识海图：记忆之间连边 + 两跳扩散；同 tag 自动抽象（未升版本号，仍是 1.1.6-preview.5）
+
+> 主人（m02008）：「按照你的推荐来，日记的话不用，我有周记了」
+> 缘起：小黑盒那篇「四层记忆框架」把记忆写成一张带边的图（节点 + edges + 沿边扩散）；
+> Molly 的记忆库此前只有孤立节点——同一次对话里一起被想起来的几条，回盘上互不相干，谁也带不出谁。
+
+**新增两个开关（默认关；本次在 profile 里打开）**
+
+- `memoryGraph`：同一次召回命中的**前 5 条**两两连边（双向存 `edges: [[id, w, at], …]`，
+  首次 0.6、每再连一次 +0.25、封顶 1，单节点最多 8 条边）；召回时以融合分头部 8 条为种子，
+  沿边扩散**最多 2 跳**、每跳 ×0.6、多路取最大，增益直接加到 `rrf` 上再重排序。
+  扩散只在候选池内走，不会把没命中关键词的条目拉进来。
+- `memoryAbstract`：某个 tag 攒到 **3 条**、且至少一条真被问过（`hits > 0`），就生成一条
+  `kind='fact'`、`source='system'` 的「关于X：…」节点（正文取前 4 条各截 40 字，上限 200 字）；
+  原条目**不删**，只降一级（`level+1`，`abstractedBy` 记来源于哪个 tag），避免反复抽象。
+
+**边会自己老化**：`prune()` 时清掉悬空边、自环、权重 < 0.05 的边、以及 90 个**日历天**没再被连过的边。
+条目衰减按「活跃天」（不聊天就不掉），边按日历天——两者口径不同是有意的：边是「两条记忆的关联」，
+人不说话它也在变淡。
+
+**验证**
+
+- 新增 `tools/test-memory-graph.mjs`：**25 通过 / 0 失败**（边增益抬排名、只扩两跳、老化裁剪、
+  单节点边数上限、抽象生成与幂等、召回接线、两个开关全关时与改动前逐条一致）。
+- `node --check` 过 `memory.js` / `main.js` / `engine.js`；`/dsh-qq-whale/state` 的 `memory` 段新增
+  `graph` / `abstractTags` / `links` / `abstracted` 四个字段（控制台一眼能看出有没有生效）。
+
+**退回**
+
+- 只关功能：`${HOME}\.dsh\profiles\desktop\cordis.patch.yml` 里把 `memoryGraph` / `memoryAbstract` 改回 `false`。
+- 连代码一起退：`git checkout -- plugin/dsh-qq-whale/lib/memory.js plugin/dsh-qq-whale/lib/main.js plugin/dsh-qq-whale/lib/engine.js`
+  并删掉 `tools/test-memory-graph.mjs`。
+
+---
+
 ## 2026-10-31 · 茉莉花（Jasmine）记忆系统 0.1.0 发布 + P0/P1 接入（**preview.4**）
 
 > 主人（2026-10-31）：「开始做p0和p1，项目代码命名为茉莉花（Jasmine）记忆系统，做好后发布GitHub作为独立的分支更新（可供移植到其他人的其他架构上使用，又默认包含在molly的每一次更新中）」

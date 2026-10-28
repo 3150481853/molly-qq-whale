@@ -1,25 +1,12 @@
 #!/usr/bin/env node
 /**
- * console-server.mjs —— Molly 控制台服务端（127.0.0.1:19392）
- *
- * 规格：qq-whale/docs/console-contract.md（唯一事实来源，本文件严格按它实现）
- *
- * 设计要点：
- *  - 只用 Node 内置模块，零依赖，不用 shell:true（中文路径 + 空格会炸）。
- *  - 只监听 127.0.0.1，不对外暴露。
- *  - 宿主端口（DSH 的 /dsh-qq-whale/*）**不写死 7053**：先试 7053，再从 netstat 的
- *    LISTEN 列表里挑 1024-65535 的端口（原先是 7000-9000，DSH 桌面端重启后
- *    可能落到 2160 这类低位端口，故放宽），逐个 GET /dsh-qq-whale/state 探到 200 为止。
- *  - 任何上游挂掉，/api/overview 仍返回 200，对应块 reachable:false。
- *  - 所有 spawn 带超时，超时 kill（Windows 下用 taskkill /T 连子进程一起杀）。
- *  - 日志只在启动和 5xx 打，前端 4 秒轮询不会把日志撑爆；日志里不打印 token/secret。
- *
- * 路径约定（两套根目录，别混）：
- *  - ROOT = qq-whale 工作目录（代码/静态页/out 日志都在这里）：MOLLY_ROOT > console.json > 按本文件位置推导
+ * console-server.mjs —�?Molly 控制台服务端�?<REDACTED>:19392�? *
+ * 规格：qq-whale/docs/console-contract.md（唯一事实来源，本文件严格按它实现�? *
+ * 设计要点�? *  - 只用 Node 内置模块，零依赖，不�?shell:true（中文路�?+ 空格会炸）�? *  - 只监�?1<REDACTED>，不对外暴露�? *  - 宿主端口（DSH �?/dsh-qq-whale/*�?*不写�?7053**：先�?7053，再�?netstat �? *    LISTEN 列表里挑 1024-65535 的端口（原先�?7000-9000，DSH 桌面端重启后
+ *    可能落到 2160 这类低位端口，故放宽），逐个 GET /dsh-qq-whale/state 探到 200 为止�? *  - 任何上游挂掉�?api/overview 仍返�?200，对应块 reachable:false�? *  - 所�?spawn 带超时，超时 kill（Windows 下用 taskkill /T 连子进程一起杀）�? *  - 日志只在启动�?5xx 打，前端 4 秒轮询不会把日志撑爆；日志里不打�?token/secret�? *
+ * 路径约定（两套根目录，别混）�? *  - ROOT = qq-whale 工作目录（代�?静态页/out 日志都在这里）：MOLLY_ROOT > console.json > 按本文件位置推导
  *  - DATA = 运行时数据（memory/stickers/metrics/budget）：MOLLY_DATA_DIR > console.json > 插件配置里的
- *           dataDir > <用户目录>/.dsh/qq-whale。2026-10-26（部署者反馈 m03205）之前这里写死
- *           作者机的 `${MOLLY_ROOT}\data\qq-whale`，别的机器上部署只能改代码。
- */
+ *           dataDir > <用户目录>/.dsh/qq-whale�?026-10-26（部署者反�?m03205）之前这里写�? *           作者机�?`${MOLLY_ROOT}\data\qq-whale`，别的机器上部署只能改代码�? */
 
 import http from 'node:http';
 import net from 'node:net';
@@ -33,15 +20,11 @@ import { detectDataDirFromProfiles, defaultDataDir } from './resolve-paths.mjs';
 
 /*
  * ── 配置（三条来源，优先级从低到高）────────────────────────────────────────
- *   ① 下面的内置默认值          —— 在本机从源码跑时行为与以前完全一致
- *   ② console.json 配置文件     —— exe 模式放 exe 同级；源码模式放 console-server.mjs 同级
- *                                 （tools\console.json），改配置不用重新打包/改代码
- *   ③ 环境变量 MOLLY_*          —— 容器 / systemd / 临时排障时最高优先
- *
+ *   �?下面的内置默认�?         —�?在本机从源码跑时行为与以前完全一�? *   �?console.json 配置文件     —�?exe 模式�?exe 同级；源码模式放 console-server.mjs 同级
+ *                                 （tools\console.json），改配置不用重新打�?改代�? *   �?环境变量 MOLLY_*          —�?容器 / systemd / 临时排障时最高优�? *
  * 为什么要这一层：molly-console.exe 要能拷到任意目录跑、也可能搬到服务器上（docs/deploy.md），
  * 不能再把工作区绝对路径写死在代码里。SEA 单文件模式下 exe 拿不到源码目录，
- * 只能用 process.execPath 的所在目录当地基；源码模式则用脚本自己的目录。
- */
+ * 只能�?process.execPath 的所在目录当地基；源码模式则用脚本自己的目录�? */
 const IS_SEA = (() => {
   try {
     return isSea();
@@ -50,10 +33,7 @@ const IS_SEA = (() => {
   }
 })();
 const EXE_DIR = path.dirname(process.execPath);
-// 脚本自身目录（源码模式 = tools\）。不能用 ESM 的 importMeta.url：SEA 打包要求本文件
-// 保持「零 importMeta 引用」才能机械转成 CJS（tools/build-exe.mjs 的 toCjs 会直接报错）。
-// node tools\console-server.mjs 启动时 argv[1] 就是脚本路径，够用；SEA 下退回 EXE_DIR。
-const HERE = (() => {
+// 脚本自身目录（源码模�?= tools\）。不能用 ESM �?importMeta.url：SEA 打包要求本文�?// 保持「零 importMeta 引用」才能机械转�?CJS（tools/build-exe.mjs �?toCjs 会直接报错）�?// node tools\console-server.mjs 启动�?argv[1] 就是脚本路径，够用；SEA 下退�?EXE_DIR�?const HERE = (() => {
   try {
     const entry = process.argv?.[1];
     if (entry) {
@@ -66,10 +46,7 @@ const HERE = (() => {
   return EXE_DIR;
 })();
 
-// 配置文件位置：MOLLY_CONSOLE_CONFIG 指定优先；否则 exe 同级 / 脚本同级 console.json。
-// 源码模式以前落在 <node.exe 目录>（C:\...\node\bin\console.json）——没人会去那儿放配置，
-// 于是 tools\console.json 看着像生效其实没读（2026-10-21 切模型 403 的根因之一）。
-const CONFIG_FILE = (() => {
+// 配置文件位置：MOLLY_CONSOLE_CONFIG 指定优先；否�?exe 同级 / 脚本同级 console.json�?// 源码模式以前落在 <node.exe 目录>（C:\...\node\bin\console.json）——没人会去那儿放配置�?// 于是 tools\console.json 看着像生效其实没读（2026-10-21 切模�?403 的根因之一）�?const CONFIG_FILE = (() => {
   const explicit = String(process.env.MOLLY_CONSOLE_CONFIG || '').trim();
   if (explicit) return path.resolve(explicit);
   return path.join(IS_SEA ? EXE_DIR : HERE, 'console.json');
@@ -79,11 +56,9 @@ const FILE_CFG = (() => {
     const j = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
     return j && typeof j === 'object' && !Array.isArray(j) ? j : {};
   } catch {
-    return {}; // 没有文件 / 不是合法 JSON 都退回默认值，不阻断启动
-  }
+    return {}; // 没有文件 / 不是合法 JSON 都退回默认值，不阻断启�?  }
 })();
-// 按「环境变量 > 配置文件 > 默认值」取值；空字符串一律视为没设
-const pick = (envKey, cfgKey, fallback) => {
+// 按「环境变�?> 配置文件 > 默认值」取值；空字符串一律视为没�?const pick = (envKey, cfgKey, fallback) => {
   const e = String(process.env[envKey] ?? '').trim();
   if (e) return e;
   const c = FILE_CFG[cfgKey];
@@ -92,29 +67,24 @@ const pick = (envKey, cfgKey, fallback) => {
 };
 
 // 工作区根：MOLLY_ROOT > console.json > 源码模式按本文件位置推（<root>/tools/console-server.mjs），
-// exe 模式取 exe 所在目录（下面 CONSOLE_DIR 会再兜底）。
-const ROOT = pick('MOLLY_ROOT', 'root',
+// exe 模式�?exe 所在目录（下面 CONSOLE_DIR 会再兜底）�?const ROOT = pick('MOLLY_ROOT', 'root',
   IS_SEA ? EXE_DIR : path.resolve(HERE, '..'));
 const DATA = pick('MOLLY_DATA_DIR', 'dataDir',
   detectDataDirFromProfiles() || defaultDataDir());
-// 前端产物：MOLLY_CONSOLE_DIR > console.json(consoleDir) > exe 同级 console/ > 工作区 console/
-// SEA 模式下**不把静态资源打进 exe**，而是按目录查找，这样改前端不用重新打包。
-const CONSOLE_DIR = pick(
+// 前端产物：MOLLY_CONSOLE_DIR > console.json(consoleDir) > exe 同级 console/ > 工作�?console/
+// SEA 模式�?*不把静态资源打�?exe**，而是按目录查找，这样改前端不用重新打包�?const CONSOLE_DIR = pick(
   'MOLLY_CONSOLE_DIR',
   'consoleDir',
   IS_SEA ? path.join(EXE_DIR, 'console') : path.join(ROOT, 'console'),
 );
 const OUT = pick('MOLLY_OUT_DIR', 'outDir', path.join(ROOT, 'out')); // watchdog 日志/状态、二维码
 const TOOLS = path.join(ROOT, 'tools');
-// 看板数据服务（19391）的入口：控制台发现它不可达时会尝试拉起（2026-10-27，重启后常见“数据服务 19391 不可达”）
+// 看板数据服务�?9391）的入口：控制台发现它不可达时会尝试拉起�?026-10-27，重启后常见“数据服�?19391 不可达”）
 const PANEL_DATA_JS = path.join(TOOLS, 'panel-data.mjs');
 // 监听地址：默认只听本机回环（默认值不变）；要对外网卡开放设 MOLLY_CONSOLE_HOST=0.0.0.0
-const HOST = pick('MOLLY_CONSOLE_HOST', 'host', '127.0.0.1');
+const HOST = pick('MOLLY_CONSOLE_HOST', 'host', '1<REDACTED>');
 const PORT = Number(pick('MOLLY_CONSOLE_PORT', 'port', 19392)) || 19392;
-// 控制台版本：以插件 package.json 为唯一真源，别在这里写死（2026-10-25 主人 m03522：
-// 左下角一直显示 v1.0.0 就是这一行写死的；发布版本与插件版本从此自动同步）。
-// exe 模式读不到 package.json 时退回 FALLBACK_VERSION，保证打包版也有版本号。
-const FALLBACK_VERSION = '1.1.6-preview.3';
+// 控制台版本：以插�?package.json 为唯一真源，别在这里写死（2026-10-25 主人 m03522�?// 左下角一直显�?v1.0.0 就是这一行写死的；发布版本与插件版本从此自动同步）�?// exe 模式读不�?package.json 时退�?FALLBACK_VERSION，保证打包版也有版本号�?const FALLBACK_VERSION = '1.1.6-preview.4';
 const VERSION = (() => {
   try {
     const pkg = JSON.parse(
@@ -123,24 +93,20 @@ const VERSION = (() => {
     const v = String(pkg.version || '').trim();
     if (v) return v;
   } catch {
-    /* 读不到就用兜底值，不阻断启动 */
+    /* 读不到就用兜底值，不阻断启�?*/
   }
   return FALLBACK_VERSION;
 })();
 
-// 鉴权：默认关闭（本机免鉴权，行为不变）。MOLLY_CONSOLE_TOKEN 有值才校验请求头
-// x-molly-token —— 放请求头不放 query，避免密钥进访问日志（契约 §7.1.3）
-const CONSOLE_TOKEN = String(pick('MOLLY_CONSOLE_TOKEN', 'token', '')).trim();
+// 鉴权：默认关闭（本机免鉴权，行为不变）。MOLLY_CONSOLE_TOKEN 有值才校验请求�?// x-molly-token —�?放请求头不放 query，避免密钥进访问日志（契�?§7.1.3�?const CONSOLE_TOKEN = String(pick('MOLLY_CONSOLE_TOKEN', 'token', '')).trim();
 
-// ── 上游 base（全部可覆盖：以后把控制台搬到服务器时不用改代码，契约 §7.2）────
+// ── 上游 base（全部可覆盖：以后把控制台搬到服务器时不用改代码，契�?§7.2）────
 const stripSlash = (s) => String(s || '').trim().replace(/\/+$/, '');
 
 // 数据服务（只读，已在跑，别动它）
-const SIDECAR = stripSlash(pick('MOLLY_SIDECAR', 'sidecar', 'http://127.0.0.1:19391'));
+const SIDECAR = stripSlash(pick('MOLLY_SIDECAR', 'sidecar', 'http://1<REDACTED>:19391'));
 
-// 数据服务自愈（2026-10-27）：重启后没人拉起 panel-data.mjs 时，控制台主动补一个。
-// 30 秒内最多尝试一次；失败只记日志，不影响只读接口。
-let sidecarSpawnAt = 0;
+// 数据服务自愈�?026-10-27）：重启后没人拉�?panel-data.mjs 时，控制台主动补一个�?// 30 秒内最多尝试一次；失败只记日志，不影响只读接口�?let sidecarSpawnAt = 0;
 function ensureSidecar(reason) {
   if (Date.now() - sidecarSpawnAt < 30000) return;
   sidecarSpawnAt = Date.now();
@@ -152,30 +118,25 @@ function ensureSidecar(reason) {
       windowsHide: true,
     });
     child.unref();
-    console.log(`[console] 数据服务不可达（${reason || 'unknown'}），已尝试拉起 panel-data.mjs (pid ${child.pid})`);
+    console.log(`[console] 数据服务不可达（${reason || 'unknown'}），已尝试拉�?panel-data.mjs (pid ${child.pid})`);
   } catch (e) {
-    console.log('[console] 拉起 panel-data.mjs 失败：' + (e && e.message ? e.message : e));
+    console.log('[console] 拉起 panel-data.mjs 失败�? + (e && e.message ? e.message : e));
   }
 }
-// NapCat WebUI（需 JWT 鉴权，见契约 §6）——2026-10-22 起仅作回滚后端展示
-const NAPCAT = stripSlash(pick('MOLLY_NAPCAT', 'napcat', 'http://127.0.0.1:6099'));
-// SnowLuma OneBot HTTP（P2 迁移后的主后端）。token 与 watchdog-config.json 的 snowluma.token 一致。
-// 注意：token 只在服务端内存里用，绝不回显给前端、绝不写日志。
-const SNOWLUMA = stripSlash(pick('MOLLY_SNOWLUMA', 'snowluma', 'http://127.0.0.1:3000'));
+// NapCat WebUI（需 JWT 鉴权，见契约 §6）—�?026-10-22 起仅作回滚后端展�?const NAPCAT = stripSlash(pick('MOLLY_NAPCAT', 'napcat', 'http://1<REDACTED>:6099'));
+// SnowLuma OneBot HTTP（P2 迁移后的主后端）。token �?watchdog-config.json �?snowluma.token 一致�?// 注意：token 只在服务端内存里用，绝不回显给前端、绝不写日志�?const SNOWLUMA = stripSlash(pick('MOLLY_SNOWLUMA', 'snowluma', 'http://1<REDACTED>:3000'));
 const SNOWLUMA_TOKEN = String(pick('MOLLY_SNOWLUMA_TOKEN', 'snowlumaToken', '${ONEBOT_TOKEN}')).trim();
-const SNOWLUMA_WEBUI = stripSlash(pick('MOLLY_SNOWLUMA_WEBUI', 'snowlumaWebui', 'http://127.0.0.1:5099'));
-// 强制后端：空 = 每次都读 watchdog-config.json 的 backend（默认 snowluma）
-const FORCE_BACKEND = String(pick('MOLLY_BACKEND', 'backend', '')).trim();
-// DSH 宿主插件接口。留空 = 运行时探测端口（宿主重启会换端口，见下方探测逻辑）；
-// 设了就用设的、不再扫端口。两种写法都收：http://h:7053 或 http://h:7053/dsh-qq-whale
+const SNOWLUMA_WEBUI = stripSlash(pick('MOLLY_SNOWLUMA_WEBUI', 'snowlumaWebui', 'http://1<REDACTED>:5099'));
+// 强制后端：空 = 每次都读 watchdog-config.json �?backend（默�?snowluma�?const FORCE_BACKEND = String(pick('MOLLY_BACKEND', 'backend', '')).trim();
+// DSH 宿主插件接口。留�?= 运行时探测端口（宿主重启会换端口，见下方探测逻辑）；
+// 设了就用设的、不再扫端口。两种写法都收：http://h:7053 �?http://h:7053/dsh-qq-whale
 const PLUGIN_BASE = (() => {
   let s = stripSlash(pick('MOLLY_PLUGIN_BASE', 'pluginBase', ''));
   if (s.toLowerCase().endsWith('/dsh-qq-whale')) s = s.slice(0, -'/dsh-qq-whale'.length);
   return stripSlash(s);
 })();
 
-// 外部 node（仅本机动作如 watchdog/make-qr 用；部署到服务器后这些动作会如实报错，不影响只读接口）
-const NODE_EXE = pick(
+// 外部 node（仅本机动作�?watchdog/make-qr 用；部署到服务器后这些动作会如实报错，不影响只读接口�?const NODE_EXE = pick(
   'MOLLY_NODE_EXE',
   'nodeExe',
   'C:\\Users\\example\\.dsh\\dsh-runtimes\\dsh-primary-runtime\\dependencies\\node\\bin\\node.exe',
@@ -186,24 +147,16 @@ const WD_STATE = path.join(OUT, 'watchdog-state.json');
 const WD_LOG = path.join(OUT, 'watchdog.log');
 const WD_CONFIG = path.join(ROOT, 'watchdog-config.json');
 const QR_PNG = path.join(OUT, 'console-qr.png');
-// 端口被占时开独立窗口用的浏览器用户目录（与 tools\open-console-window.ps1 保持一致，
-// 这样 exe 开的窗口和桌面快捷方式开的是同一个窗口，不会叠出第二个）。
-const BROWSER_PROFILE = path.join(OUT, 'edge-console-profile');
-const STICKER_DIR = path.join(DATA, 'stickers', '学来的'); // 表情包图片目录（与 panel-data.mjs 一致）
-const TASK_NAME = 'Molly-Watchdog';                       // Windows 计划任务名
-const LIVE = process.env.MOLLY_CONSOLE_LIVE === '1';      // 只有显式置 1 才真跑危险动作
-
-// ── 外部服务（task-57：集成终端里的"外部服务类"动作）──────────────────────
-// 网关是本地单进程（wb_proxy.py），面板密码默认 admin；**密码与 token 绝不进日志**。
-const GATEWAY = stripSlash(pick('MOLLY_GATEWAY', 'gateway', 'http://127.0.0.1:8788'));
+// 端口被占时开独立窗口用的浏览器用户目录（�?tools\open-console-window.ps1 保持一致，
+// 这样 exe 开的窗口和桌面快捷方式开的是同一个窗口，不会叠出第二个）�?const BROWSER_PROFILE = path.join(OUT, 'edge-console-profile');
+const STICKER_DIR = path.join(DATA, 'stickers', '学来�?); // 表情包图片目录（�?panel-data.mjs 一致）
+const TASK_NAME = 'Molly-Watchdog';                       // Windows 计划任务�?const LIVE = process.env.MOLLY_CONSOLE_LIVE === '1';      // 只有显式�?1 才真跑危险动�?
+// ── 外部服务（task-57：集成终端里�?外部服务�?动作）──────────────────────
+// 网关是本地单进程（wb_proxy.py），面板密码默认 admin�?*密码�?token 绝不进日�?*�?const GATEWAY = stripSlash(pick('MOLLY_GATEWAY', 'gateway', 'http://1<REDACTED>:8788'));
 const GATEWAY_PASSWORD = pick('MOLLY_GATEWAY_PASSWORD', 'gatewayPassword', 'admin');
-// 心跳：家里 PC 往服务器推状态。两个文件都由推送器维护，控制台只读。
-const HB_STATE = path.join(OUT, 'heartbeat-state.json');
+// 心跳：家�?PC 往服务器推状态。两个文件都由推送器维护，控制台只读�?const HB_STATE = path.join(OUT, 'heartbeat-state.json');
 const HB_CONFIG = path.join(OUT, 'heartbeat-config.json');
-// 切模型的 x-molly-admin 令牌（用户 m39817：「模型切换仅限控制台」）。
-// 必须与插件配置 modelSwitchToken 一致；插件侧留空时写接口一律 403，这里也不编造。
-// **绝不写日志、绝不回显** —— 前端只会看到"服务端还没配置切模型令牌"这类透传原文。
-const MODEL_SWITCH_TOKEN = pick('MOLLY_MODEL_SWITCH_TOKEN', 'modelSwitchToken', '');
+// 切模型的 x-molly-admin 令牌（用�?m39817：「模型切换仅限控制台」）�?// 必须与插件配�?modelSwitchToken 一致；插件侧留空时写接口一�?403，这里也不编造�?// **绝不写日志、绝不回�?* —�?前端只会看到"服务端还没配置切模型令牌"这类透传原文�?const MODEL_SWITCH_TOKEN = pick('MOLLY_MODEL_SWITCH_TOKEN', 'modelSwitchToken', '');
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -211,7 +164,7 @@ const CORS = {
   'Access-Control-Allow-Headers': '*',
 };
 
-// ── 小工具 ──────────────────────────────────────────────────────────────────
+// ── 小工�?──────────────────────────────────────────────────────────────────
 function readJson(file, dflt = null) {
   try {
     return JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -302,7 +255,7 @@ async function jget(url, timeoutMs = 1500) {
   }
 }
 
-// 发 JSON 的 POST（宿主插件的写接口统一走这个）
+// �?JSON �?POST（宿主插件的写接口统一走这个）
 async function jpost(url, body, timeoutMs = 6000) {
   try {
     const r = await fetch(url, {
@@ -326,14 +279,12 @@ async function jpost(url, body, timeoutMs = 6000) {
 }
 
 // ── 宿主端口探测（不写死 7053；DSH 重启会换端口）───────────────────────────
-// 前端 4 秒轮询，绝不能每次都遍历端口：结果（含"没探到"）统一缓存 30 秒。
-const HOST_PROBE_TTL = 30_000;
+// 前端 4 秒轮询，绝不能每次都遍历端口：结果（�?没探�?）统一缓存 30 秒�?const HOST_PROBE_TTL = 30_000;
 const HOST_PROBE_TIMEOUT = 700;
 let hostCache = { base: null, port: 0, at: 0 };
 let hostProbing = null;
 
-// 走 PowerShell 拿本机 LISTEN 端口（只用内置模块，不装依赖）
-function listListenPorts() {
+// �?PowerShell 拿本�?LISTEN 端口（只用内置模块，不装依赖�?function listListenPorts() {
   return new Promise((resolve) => {
     let out = '';
     let done = false;
@@ -361,8 +312,7 @@ function listListenPorts() {
     ps.stdout.on('data', (b) => { out += b.toString('utf8'); });
     ps.on('error', () => { clearTimeout(timer); finish([]); });
     ps.on('exit', (code) => {
-      // 用 'exit' 而不是 'close'：stdout 被重定向到文件时 'close' 可能因管道未关而迟迟不来
-      clearTimeout(timer);
+      // �?'exit' 而不�?'close'：stdout 被重定向到文件时 'close' 可能因管道未关而迟迟不�?      clearTimeout(timer);
       const ports = out
         .split(/\r?\n/)
         .map((s) => Number(s.trim()))
@@ -372,20 +322,18 @@ function listListenPorts() {
   });
 }
 
-// 探一个端口是不是 DSH 宿主（要真的返回 /state 的 JSON，不是随便 200）
-async function probeHost(port) {
-  const r = await jget(`http://127.0.0.1:${port}/dsh-qq-whale/state`, HOST_PROBE_TIMEOUT);
+// 探一个端口是不是 DSH 宿主（要真的返回 /state �?JSON，不是随�?200�?async function probeHost(port) {
+  const r = await jget(`http://1<REDACTED>:${port}/dsh-qq-whale/state`, HOST_PROBE_TIMEOUT);
   if (!r.ok) return null;
   const d = r.data;
   if (!d || typeof d !== 'object') return null;
   if (!d.link && d.enabled === undefined) return null; // 不是宿主
-  return `http://127.0.0.1:${port}`;
+  return `http://1<REDACTED>:${port}`;
 }
 
 async function discoverHostBase() {
   const tried = new Set();
-  // 1) 先试上次探到的端口（宿主重启后多半还是它）
-  if (hostCache.port) {
+  // 1) 先试上次探到的端口（宿主重启后多半还是它�?  if (hostCache.port) {
     tried.add(hostCache.port);
     const again = await probeHost(hostCache.port);
     if (again) return again;
@@ -396,7 +344,7 @@ async function discoverHostBase() {
     const direct = await probeHost(7053);
     if (direct) return direct;
   }
-  // 3) 再遍历 1024-65535 的 LISTEN 端口（并发探，整体耗时≈单次超时）
+  // 3) 再遍�?1024-65535 �?LISTEN 端口（并发探，整体耗时≈单次超时）
   const ports = (await listListenPorts()).filter((p) => !tried.has(p));
   if (!ports.length) return null;
   const hits = await Promise.all(ports.map((p) => probeHost(p)));
@@ -404,11 +352,8 @@ async function discoverHostBase() {
 }
 
 async function resolveHostBase() {
-  // 显式配了 MOLLY_PLUGIN_BASE 就用它，不再扫端口（部署到服务器时走这条）
-  if (PLUGIN_BASE) return PLUGIN_BASE;
-  if (Date.now() - hostCache.at < HOST_PROBE_TTL) return hostCache.base; // 30 秒内直接用缓存
-  if (hostProbing) return hostProbing; // 4 秒轮询并发时只探一次
-  hostProbing = (async () => {
+  // 显式配了 MOLLY_PLUGIN_BASE 就用它，不再扫端口（部署到服务器时走这条�?  if (PLUGIN_BASE) return PLUGIN_BASE;
+  if (Date.now() - hostCache.at < HOST_PROBE_TTL) return hostCache.base; // 30 秒内直接用缓�?  if (hostProbing) return hostProbing; // 4 秒轮询并发时只探一�?  hostProbing = (async () => {
     let base = null;
     try {
       base = await discoverHostBase();
@@ -426,15 +371,14 @@ async function resolveHostBase() {
   return hostProbing;
 }
 
-// ── /api/overview 聚合（契约 §3.2：任何上游挂了都返回 200）───────────────────
+// ── /api/overview 聚合（契�?§3.2：任何上游挂了都返回 200）───────────────────
 async function buildOverview() {
-  // build 让前端能判断自己跑的是不是最新前端文件（不一致就自动 reload）
-  const out = { ok: true, at: Date.now(), build: consoleBuild() };
+  // build 让前端能判断自己跑的是不是最新前端文件（不一致就自动 reload�?  const out = { ok: true, at: Date.now(), build: consoleBuild() };
 
-  // 1) 插件（DSH 宿主 /dsh-qq-whale/state）——端口后置位，先用 7053
+  // 1) 插件（DSH 宿主 /dsh-qq-whale/state）——端口后置位，先�?7053
   const pluginBase = await resolveHostBase();
   if (!pluginBase) {
-    out.plugin = { reachable: false, error: '没探到 DSH 宿主端口（1024-65535）' };
+    out.plugin = { reachable: false, error: '没探�?DSH 宿主端口�?024-65535�? };
   } else {
     const r = await jget(`${pluginBase}/dsh-qq-whale/state`, 1500);
     if (!r.ok) {
@@ -479,8 +423,7 @@ async function buildOverview() {
               kept: isNum(s.learner.kept) ? s.learner.kept : null,
               rejected: isNum(s.learner.rejected) ? s.learner.rejected : null,
               dup: isNum(s.learner.dup) ? s.learner.dup : null,
-              /* 累计 / 今日：插件 learner.total / learner.today 原样透出。
-                 不在这里算「累计 = lifetime.kept」，免得两套口径对不上。 */
+              /* 累计 / 今日：插�?learner.total / learner.today 原样透出�?                 不在这里算「累�?= lifetime.kept」，免得两套口径对不上�?*/
               total: isNum(s.learner.total) ? s.learner.total : null,
               today: s.learner.today && typeof s.learner.today === 'object'
                 ? {
@@ -492,11 +435,8 @@ async function buildOverview() {
                     skipped: isNum(s.learner.today.skipped) ? s.learner.today.skipped : null,
                   }
                 : null,
-              // 入库闸门计数（task-27 插件侧 learner.memory）。插件没上线这段时
-              // 整个对象为 null —— 契约要求「拿不到就用 null」，绝不编造 0。
-              // queued 与 pending 是两个数：pending 是「被拦了 N 次」，queued 才是
-              // 待核实区**此刻真实有几条**（同一条 24h 内重复被拦会让 pending 涨而 queued 不变）。
-              memory: s.learner.memory
+              // 入库闸门计数（task-27 插件�?learner.memory）。插件没上线这段�?              // 整个对象�?null —�?契约要求「拿不到就用 null」，绝不编�?0�?              // queued �?pending 是两个数：pending 是「被拦了 N 次」，queued 才是
+              // 待核实区**此刻真实有几�?*（同一�?24h 内重复被拦会�?pending 涨�?queued 不变）�?              memory: s.learner.memory
                 ? {
                     added: isNum(s.learner.memory.added) ? s.learner.memory.added : null,
                     rejected: isNum(s.learner.memory.rejected) ? s.learner.memory.rejected : null,
@@ -508,10 +448,7 @@ async function buildOverview() {
             }
           : null,
         /*
-         * 骂人模式（出气筒）总开关。字段来自插件的 pest 快照（task-36）。
-         * 拿不到整块 null —— 控制台不能因为"猜一个 false"就显示成关着，
-         * 那会让主人以为自己关掉了，实际还在骂。
-         */
+         * 骂人模式（出气筒）总开关。字段来自插件的 pest 快照（task-36）�?         * 拿不到整�?null —�?控制台不能因�?猜一�?false"就显示成关着�?         * 那会让主人以为自己关掉了，实际还在骂�?         */
         pest: s.pest
           ? {
               enabled: s.pest.enabled === true,
@@ -529,25 +466,24 @@ async function buildOverview() {
         base: pluginBase,
       };
 
-      /* 群数：插件 /state 只报 bot 身份，群列表要去 SnowLuma 的 get_group_list 拿。
-         拿不到就保持 null —— 前端显示「—」，绝不编造 0。 */
+      /* 群数：插�?/state 只报 bot 身份，群列表要去 SnowLuma �?get_group_list 拿�?         拿不到就保持 null —�?前端显示「—」，绝不编�?0�?*/
       if (out.plugin.bot) {
         try {
           const gl = await snowlumaAction('get_group_list', {}, 2000);
           const list = gl && gl.retcode === 0 && Array.isArray(gl.data) ? gl.data : null;
           if (list) out.plugin.bot.groupCount = list.length;
         } catch {
-          /* 探测失败不拖累总览：这一项留空即可 */
+          /* 探测失败不拖累总览：这一项留空即�?*/
         }
       }
     }
   }
 
-  // 2) 数据服务（19391，只读，别动它）；不可达时顺手拉起一次再重试
+  // 2) 数据服务�?9391，只读，别动它）；不可达时顺手拉起一次再重试
   let sd = await jget(`${SIDECAR}/api/all`, 1500);
   if (!sd.ok) {
     ensureSidecar(sd.error);
-    // panel-data 从 spawn 到 listen 通常 1–2 秒，单次 700ms 重试往往抢不到；分三档等
+    // panel-data �?spawn �?listen 通常 1�? 秒，单次 700ms 重试往往抢不到；分三档等
     for (const wait of [700, 900, 1200]) {
       await new Promise((r) => setTimeout(r, wait));
       sd = await jget(`${SIDECAR}/api/all`, 2500);
@@ -561,9 +497,7 @@ async function buildOverview() {
     out.sidecar = { reachable: true, ...d };
   }
 
-  /* 记忆条数兜底：数据服务（19391）读的是 memory.md 明文，记忆加密后它读不到，
-     count 会是空的。这里用插件侧 memory.count 补上，并标 source=plugin，
-     只做展示、不落盘。 */
+  /* 记忆条数兜底：数据服务（19391）读的是 memory.md 明文，记忆加密后它读不到�?     count 会是空的。这里用插件�?memory.count 补上，并�?source=plugin�?     只做展示、不落盘�?*/
   if (out.plugin && out.plugin.memory && isNum(out.plugin.memory.count)) {
     if (!out.sidecar || typeof out.sidecar !== 'object') out.sidecar = { reachable: false };
     const sideCount = isNum(out.sidecar.memory && out.sidecar.memory.count)
@@ -577,21 +511,18 @@ async function buildOverview() {
     }
   }
 
-  // 3) QQ 客户端探测（SnowLuma 走 OneBot HTTP 3000；回滚后端 NapCat 走 WebUI 6099。
-  //    token/secret 绝不落日志）
+  // 3) QQ 客户端探测（SnowLuma �?OneBot HTTP 3000；回滚后�?NapCat �?WebUI 6099�?  //    token/secret 绝不落日志）
   out.napcat = await buildNapcat();
 
-  // 3.5) QQ 链路聚合（2026-10-25）：主依据 = 插件桥接，次依据 = QQ 客户端探测。
-  //    out.napcat 原样保留做兼容；前端新逻辑优先读 out.qq。
-  out.qq = await buildQqStatus(out.plugin, out.napcat);
+  // 3.5) QQ 链路聚合�?026-10-25）：主依�?= 插件桥接，次依据 = QQ 客户端探测�?  //    out.napcat 原样保留做兼容；前端新逻辑优先�?out.qq�?  out.qq = await buildQqStatus(out.plugin, out.napcat);
 
-  // 4) 守护（本地文件 + 计划任务状态）
+  // 4) 守护（本地文�?+ 计划任务状态）
   out.watchdog = await buildWatchdog();
 
   return out;
 }
 
-// ── 后端选择：watchdog-config.json 的 backend（默认 snowluma，可切回 napcat 回滚）──
+// ── 后端选择：watchdog-config.json �?backend（默�?snowluma，可切回 napcat 回滚）──
 function currentBackend() {
   if (FORCE_BACKEND === 'napcat' || FORCE_BACKEND === 'snowluma') return FORCE_BACKEND;
   const cfg = readJson(WD_CONFIG, null);
@@ -625,11 +556,7 @@ async function snowlumaAction(action, params = {}, timeoutMs = 2000) {
 }
 
 /**
- * SnowLuma 状态探测（返回形状与 NapCat 版兼容，前端字段名不变）。
- * 三层：get_login_info（连通 + 账号）→ get_status.online（登录态）→ get_csrf_token（深度探测）。
- * 为什么要有深度探测：SnowLuma 也可能「假在线」——get_status 说 online 但服务端登录态
- * 已经作废（10-22 11:30 的 NapCat 事故同型）；get_csrf_token 需要服务端往返，能暴露出来。
- */
+ * SnowLuma 状态探测（返回形状�?NapCat 版兼容，前端字段名不变）�? * 三层：get_login_info（连�?+ 账号）→ get_status.online（登录态）�?get_csrf_token（深度探测）�? * 为什么要有深度探测：SnowLuma 也可能「假在线」——get_status �?online 但服务端登录�? * 已经作废�?0-22 11:30 �?NapCat 事故同型）；get_csrf_token 需要服务端往返，能暴露出来�? */
 async function buildSnowluma() {
   const base = {
     reachable: false,
@@ -659,7 +586,7 @@ async function buildSnowluma() {
     ]);
     const online = Boolean(st && st.retcode === 0 && st.data && st.data.online === true);
     const deepOk = Boolean(csrf && csrf.retcode === 0);
-    // SnowLuma 把客户端列表包在 data.clients 里（NapCat 兼容接口历史上放在 data 直接成数组）
+    // SnowLuma 把客户端列表包在 data.clients 里（NapCat 兼容接口历史上放�?data 直接成数组）
     const rawClients = clients && clients.retcode === 0 ? clients.data : null;
     const list = Array.isArray(rawClients)
       ? rawClients
@@ -720,19 +647,13 @@ async function buildNapcat() {
   }
 }
 
-// ── QQ 链路聚合：主依据 = 插件桥接，次依据 = QQ 客户端探测 ───────────────────
+// ── QQ 链路聚合：主依据 = 插件桥接，次依据 = QQ 客户端探�?───────────────────
 /*
  * 2026-10-25 主人确认的判定优先级（部署者反馈：QQ 明明在跑，控制台却显示未连接）：
- *   - 插件 /state.link.state === 'online' ⇒ Molly 已经连上 OneBot，QQ 链路是通的。
- *   - QQ 客户端 WebUI 探测只回答「客户端进程在不在」，**不能**拿来判「未连接」。
- * 四种组合（level）：connected / bridge-only / client-only / offline；
- * 文案与「下一步」建议都放这里，前端只取，避免两处文案漂移。
- * 以前误报的原因：前端只有 napcat 块（客户端探测），拿它当主依据，
- * 客户端探测失败就直接显示未登录，把「插件已在线」这个更强的证据盖掉了。
- */
+ *   - 插件 /state.link.state === 'online' �?Molly 已经连上 OneBot，QQ 链路是通的�? *   - QQ 客户�?WebUI 探测只回答「客户端进程在不在」，**不能**拿来判「未连接」�? * 四种组合（level）：connected / bridge-only / client-only / offline�? * 文案与「下一步」建议都放这里，前端只取，避免两处文案漂移�? * 以前误报的原因：前端只有 napcat 块（客户端探测），拿它当主依据，
+ * 客户端探测失败就直接显示未登录，把「插件已在线」这个更强的证据盖掉了�? */
 
-// 客户端探测缓存：4 秒轮询下不能每轮都等一次连接超时（不可达时尤其慢）。
-const clientProbeCache = { key: '', at: 0, reachable: false };
+// 客户端探测缓存：4 秒轮询下不能每轮都等一次连接超时（不可达时尤其慢）�?const clientProbeCache = { key: '', at: 0, reachable: false };
 const CLIENT_PROBE_TTL = 10_000;
 const CLIENT_PROBE_TIMEOUT = 800;
 
@@ -745,8 +666,7 @@ async function probeClientWebui() {
   }
   let reachable = false;
   try {
-    // 只要 HTTP 有应答就算进程活着：WebUI 要鉴权时 401/403 也算可达。
-    const r = await fetch(url + '/', {
+    // 只要 HTTP 有应答就算进程活着：WebUI 要鉴权时 401/403 也算可达�?    const r = await fetch(url + '/', {
       method: 'GET',
       redirect: 'manual',
       signal: AbortSignal.timeout(CLIENT_PROBE_TIMEOUT),
@@ -767,25 +687,23 @@ async function buildQqStatus(plugin, napcat) {
   const bridgeState = link.state || 'unknown';
   const bridgeReady = link.ready === true;
   const bridgeOnline = bridgeReady && bridgeState === 'online';
-  // 客户端进程的两种证据：WebUI 能应答，或 OneBot HTTP 已经回过话
-  //（回过话说明 SnowLuma 进程活着，哪怕 QQ 还没登录）。任一成立都算「进程可达」。
-  const webuiOk = await probeClientWebui();
+  // 客户端进程的两种证据：WebUI 能应答，�?OneBot HTTP 已经回过�?  //（回过话说明 SnowLuma 进程活着，哪�?QQ 还没登录）。任一成立都算「进程可达」�?  const webuiOk = await probeClientWebui();
   const clientReachable = webuiOk || !!(napcat && napcat.reachable === true);
   const clientLogin = !!(napcat && napcat.isLogin === true);
   const level = bridgeOnline
     ? (clientReachable ? 'connected' : 'bridge-only')
     : (clientReachable ? 'client-only' : 'offline');
   const text = {
-    connected: 'Molly 已连接 QQ',
-    'bridge-only': 'Molly 已连接 QQ（客户端状态信息不可用）',
-    'client-only': 'QQ 在运行，但 Molly 还没连上',
-    offline: 'QQ 未连接',
+    connected: 'Molly 已连�?QQ',
+    'bridge-only': 'Molly 已连�?QQ（客户端状态信息不可用�?,
+    'client-only': 'QQ 在运行，�?Molly 还没连上',
+    offline: 'QQ 未连�?,
   }[level];
   const nextStep = {
     connected: '',
-    'bridge-only': '链路已通，消息能正常收发就不用管；持续异常去「运维」看日志。',
-    'client-only': '到「执行块」点「重新检查连接」；刚重启过 QQ 就等 10~25 秒再刷新，或去「守护」看 watchdog 结论。',
-    offline: '点「重新登录 QQ（扫码）」（「QQ 连接」页，或总览页的提示条）。',
+    'bridge-only': '链路已通，消息能正常收发就不用管；持续异常去「运维」看日志�?,
+    'client-only': '到「执行块」点「重新检查连接」；刚重启过 QQ 就等 10~25 秒再刷新，或去「守护」看 watchdog 结论�?,
+    offline: '点「重新登�?QQ（扫码）」（「QQ 连接」页，或总览页的提示条）�?,
   }[level];
   return {
     level,
@@ -797,7 +715,7 @@ async function buildQqStatus(plugin, napcat) {
     clientReachable,
     clientLogin,
     backend,
-    backendName: backend === 'snowluma' ? 'SnowLuma' : '回滚后端（NapCat）',
+    backendName: backend === 'snowluma' ? 'SnowLuma' : '回滚后端（NapCat�?,
     webui: backend === 'snowluma' ? SNOWLUMA_WEBUI : NAPCAT,
     uin: (napcat && napcat.uin) || (plugin && plugin.bot && plugin.bot.userId) || null,
     nickname: (napcat && napcat.nickname) || (plugin && plugin.bot && plugin.bot.nickname) || null,
@@ -808,7 +726,7 @@ async function buildQqStatus(plugin, napcat) {
   };
 }
 
-// ── 守护：状态/配置读文件，quiet 由配置算，taskEnabled 查计划任务 ───────────
+// ── 守护：状�?配置读文件，quiet 由配置算，taskEnabled 查计划任�?───────────
 function inQuietHours(cfg, at = new Date()) {
   const q = cfg && Array.isArray(cfg.quietHours) ? cfg.quietHours : null;
   if (!q || q.length !== 2) return false;
@@ -818,10 +736,8 @@ function inQuietHours(cfg, at = new Date()) {
   return from <= to ? h >= from && h < to : h >= from || h < to;
 }
 
-// watchdog.log 每行形如 `2026-10-18 23:20:01 检查: online -> online phase=ready`
-// 判定：含 FAIL / 退出码非 0 / 抢修失败 才算失败；正常巡检行算成功。
-// （旧实现只要见到「检查」就返回 1，导致守护永远显示「上次失败」，已修）
-function lastWatchdogLine(text) {
+// watchdog.log 每行形如 `2026-10-18 23:20:01 检�? online -> online phase=ready`
+// 判定：含 FAIL / 退出码�?0 / 抢修失败 才算失败；正常巡检行算成功�?// （旧实现只要见到「检查」就返回 1，导致守护永远显示「上次失败」，已修�?function lastWatchdogLine(text) {
   if (!text) return { lastRun: null, lastResult: null };
   const lines = text.split(/\r?\n/).filter(Boolean);
   let line = '';
@@ -834,7 +750,7 @@ function lastWatchdogLine(text) {
   const body = m ? m[2] : line;
   let lastResult;
   if (/\bNOTIFY_FAIL\b|失败|\bFAIL\b|退出码 [1-9]/.test(body)) lastResult = 1;
-  else if (/^(检查|抢修|NOTIFY|风控静默期)/.test(body)) lastResult = 0;
+  else if (/^(检查|抢修|NOTIFY|风控静默�?/.test(body)) lastResult = 0;
   else lastResult = null;
   return { lastRun, lastResult, tail: line.slice(0, 400) };
 }
@@ -870,8 +786,7 @@ async function buildWatchdog() {
           recoverAttempts: isNum(state.recoverAttempts) ? state.recoverAttempts : 0,
           consecutiveFails: isNum(state.consecutiveFails) ? state.consecutiveFails : 0,
           lastNotifyAt: isNum(state.lastNotifyAt) ? state.lastNotifyAt : 0,
-          // 前端「距上次巡检」要用；之前漏传导致页面显示「—」
-          lastCheckAt: isNum(state.lastCheckAt) ? state.lastCheckAt : 0,
+          // 前端「距上次巡检」要用；之前漏传导致页面显示「—�?          lastCheckAt: isNum(state.lastCheckAt) ? state.lastCheckAt : 0,
         }
       : null,
     config,
@@ -882,10 +797,8 @@ async function buildWatchdog() {
   };
 }
 
-// 计划任务是否启用（查询失败返回 null，不要假装有值）
-// 用 Get-ScheduledTask 而不是 schtasks：后者在中文系统输出 GBK，Node 读出来是乱码。
-// 结果缓存 30 秒——4 秒轮询不该每次都 spawn 一个 PowerShell。
-const TASK_CACHE_TTL = 30_000;
+// 计划任务是否启用（查询失败返�?null，不要假装有值）
+// �?Get-ScheduledTask 而不�?schtasks：后者在中文系统输出 GBK，Node 读出来是乱码�?// 结果缓存 30 秒—�? 秒轮询不该每次都 spawn 一�?PowerShell�?const TASK_CACHE_TTL = 30_000;
 let taskCache = { value: null, at: 0 };
 let taskProbing = null;
 
@@ -946,7 +859,7 @@ const MIME = {
   '.json': 'application/json; charset=utf-8',
 };
 
-// 静态路由白名单：只放这三个 + favicon，别的一律 404（防止任意文件读取）
+// 静态路由白名单：只放这三个 + favicon，别的一�?404（防止任意文件读取）
 const STATIC_ROUTES = {
   '/': 'index.html',
   '/index.html': 'index.html',
@@ -955,12 +868,7 @@ const STATIC_ROUTES = {
 };
 
 // ── 前端构建标识（每次请求现算，绝不缓存死）─────────────────────────────────
-// 为什么需要：浏览器里长期开着的控制台窗口不会因为前端文件更新而自动加载新代码，
-// 每次改前端都得人工 Ctrl+F5，这个坑会反复复发。
-// 做法：把 console.js/console.css 的 mtime+size 揉成 8 位短哈希 → 静态资源加 ?v=<build>、
-// index.html 里注入 window.__MOLLY_BUILD__，前端轮询 /api/overview 时比对 build，
-// 不一致就自动 reload 一次。任一文件缺失时返回 '0'（前端见到 '0' 不动作）。
-function consoleBuild() {
+// 为什么需要：浏览器里长期开着的控制台窗口不会因为前端文件更新而自动加载新代码�?// 每次改前端都得人�?Ctrl+F5，这个坑会反复复发�?// 做法：把 console.js/console.css �?mtime+size 揉成 8 位短哈希 �?静态资源加 ?v=<build>�?// index.html 里注�?window.__MOLLY_BUILD__，前端轮�?/api/overview 时比�?build�?// 不一致就自动 reload 一次。任一文件缺失时返�?'0'（前端见�?'0' 不动作）�?function consoleBuild() {
   try {
     const parts = [];
     for (const rel of ['console.js', 'console.css']) {
@@ -980,8 +888,7 @@ function serveStatic(req, res, urlPath) {
     return res.end();
   }
 
-  // STATIC_ROUTES 只认精确路径，所以 ?v=<build> 这类查询串必须先剥掉再匹配
-  let relPath = urlPath;
+  // STATIC_ROUTES 只认精确路径，所�??v=<build> 这类查询串必须先剥掉再匹�?  let relPath = urlPath;
   try {
     relPath = new URL(urlPath || '/', 'http://x').pathname;
   } catch {
@@ -996,11 +903,10 @@ function serveStatic(req, res, urlPath) {
   try {
     buf = fs.readFileSync(full);
   } catch {
-    // 前端还没产出：503 + 明确提示（契约 §3 静态文件不存在 → 503）
-    const msg =
+    // 前端还没产出�?03 + 明确提示（契�?§3 静态文件不存在 �?503�?    const msg =
       `控制台前端文件还没生成：${full}\n` +
       `请等 console-ui 产出 console/index.html、console.js、console.css 后刷新本页。\n` +
-      `服务端（本进程）已就绪，接口可用：/api/health、/api/overview。`;
+      `服务端（本进程）已就绪，接口可用�?api/health�?api/overview。`;
     if (rel.endsWith('.html')) {
       return sendBuffer(
         res,
@@ -1008,7 +914,7 @@ function serveStatic(req, res, urlPath) {
         Buffer.from(
           `<!doctype html><meta charset="utf-8"><title>控制台前端未就绪</title>` +
             `<body style="font:14px/1.7 system-ui;padding:40px;color:#333">` +
-            `<h2 style="margin:0 0 12px">控制台前端还没生成</h2>` +
+            `<h2 style="margin:0 0 12px">控制台前端还没生�?/h2>` +
             `<pre style="white-space:pre-wrap;background:#f7f6f3;border:1px solid #e5e3df;` +
             `border-radius:8px;padding:12px">${msg.replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]))}</pre>` +
             `</body>`,
@@ -1021,18 +927,16 @@ function serveStatic(req, res, urlPath) {
     return sendJson(res, 503, { ok: false, error: '前端文件还没生成', path: full });
   }
 
-  // index.html：注入构建标识 + 给静态资源加 ?v=<build>（服务端改写，文件本身不动）
+  // index.html：注入构建标�?+ 给静态资源加 ?v=<build>（服务端改写，文件本身不动）
   let outBuf = buf;
   if (rel.endsWith('.html')) {
     const build = consoleBuild();
     let html = buf.toString('utf8');
-    // 1) 老写法（index.html 目前就是 "href=\"/console.css\"" / "src=\"/console.js\""）
-    html = html.replace('"/console.css"', `"/console.css?v=${build}"`);
+    // 1) 老写法（index.html 目前就是 "href=\"/console.css\"" / "src=\"/console.js\""�?    html = html.replace('"/console.css"', `"/console.css?v=${build}"`);
     html = html.replace('"/console.js"', `"/console.js?v=${build}"`);
-    // 2) 兜底：单引号/无引号等其它写法也补上（已带 ? 的不重复加，所以可重复执行）
-    html = html.replace(/(["'])(\/console\.css)(?!\?)/g, `$1$2?v=${build}`);
+    // 2) 兜底：单引号/无引号等其它写法也补上（已带 ? 的不重复加，所以可重复执行�?    html = html.replace(/(["'])(\/console\.css)(?!\?)/g, `$1$2?v=${build}`);
     html = html.replace(/(["'])(\/console\.js)(?!\?)/g, `$1$2?v=${build}`);
-    // 3) 注入 window.__MOLLY_BUILD__（必须在 console.js 之前跑，放 </head> 前最稳）
+    // 3) 注入 window.__MOLLY_BUILD__（必须在 console.js 之前跑，�?</head> 前最稳）
     const marker = `<script>window.__MOLLY_BUILD__="${build}";</script>`;
     if (html.includes('</head>')) html = html.replace('</head>', marker + '\n</head>');
     else if (html.includes('<head>')) html = html.replace('<head>', '<head>\n' + marker);
@@ -1041,23 +945,16 @@ function serveStatic(req, res, urlPath) {
   }
 
   const type = MIME[path.extname(full).toLowerCase()] || 'application/octet-stream';
-  // 静态资源一律 no-store：配合 ?v=<build>，彻底断掉浏览器缓存旧 console.js 的可能
-  return sendBuffer(res, 200, outBuf, type, 'no-store');
+  // 静态资源一�?no-store：配�??v=<build>，彻底断掉浏览器缓存�?console.js 的可�?  return sendBuffer(res, 200, outBuf, type, 'no-store');
 }
 
 // ── 启动三态的探针（task-31）────────────────────────────────────────────────
-// 为什么「先探再 listen」而不是等 EADDRINUSE：Windows 的 EADDRINUSE 只有一个 errno，
-// 拿不到占用者 pid，也分不清占用者是「我们自己的另一个实例」还是别人的程序。
-// 先探就能在启动前给出可读、可执行的提示，而且整个过程零副作用（不 kill、不改文件）。
-// 注意：这一段在模块顶层执行，早于下面 errText 的 const 初始化（TDZ），所以自带一个格式化函数。
-const eText = (e) => (e && e.message ? e.message : String(e));
+// 为什么「先探再 listen」而不是等 EADDRINUSE：Windows �?EADDRINUSE 只有一�?errno�?// 拿不到占用�?pid，也分不清占用者是「我们自己的另一个实例」还是别人的程序�?// 先探就能在启动前给出可读、可执行的提示，而且整个过程零副作用（不 kill、不改文件）�?// 注意：这一段在模块顶层执行，早于下�?errText �?const 初始化（TDZ），所以自带一个格式化函数�?const eText = (e) => (e && e.message ? e.message : String(e));
 
-// 监听地址是通配地址（0.0.0.0 / ::）时，本机自探要走回环，不然某些系统上 connect 不出去。
-const PROBE_HOST = (HOST === '0.0.0.0' || HOST === '::' || HOST === '') ? '127.0.0.1' : HOST;
+// 监听地址是通配地址�?.0.0.0 / ::）时，本机自探要走回环，不然某些系统�?connect 不出去�?const PROBE_HOST = (HOST === '0.0.0.0' || HOST === '::' || HOST === '') ? '1<REDACTED>' : HOST;
 const SELF_URL = `http://${PROBE_HOST}:${PORT}/`;
 
-// 连一下看有没有人在听。连上=被占；拒绝/超时=空闲。
-function portIsFree(port, host) {
+// 连一下看有没有人在听。连�?被占；拒�?超时=空闲�?function portIsFree(port, host) {
   return new Promise((resolve) => {
     let done = false;
     const sock = net.createConnection({ host, port });
@@ -1074,9 +971,7 @@ function portIsFree(port, host) {
   });
 }
 
-// 是不是「我们自己的控制台」：契约判据 = 200 + ok:true + 有 version 字段。
-// 三条缺一条都不认（比如别的程序也回 200 的 JSON，但没有 version）。
-async function probeExistingConsole(port, host) {
+// 是不是「我们自己的控制台」：契约判据 = 200 + ok:true + �?version 字段�?// 三条缺一条都不认（比如别的程序也�?200 �?JSON，但没有 version）�?async function probeExistingConsole(port, host) {
   const r = await fetchJson(`http://${host}:${port}/api/health`, {}, 1500);
   if (!r || r.status !== 200 || !r.data || typeof r.data !== 'object') return null;
   const d = r.data;
@@ -1085,9 +980,7 @@ async function probeExistingConsole(port, host) {
   return d;
 }
 
-// 占端口的进程号：Windows 用 netstat -ano 解析（状态列 LISTENING 是 ASCII，不受系统语言影响）。
-// 非 Windows 或解析失败一律返回 null —— 拿不到就不编造。
-function portOwnerPid(port) {
+// 占端口的进程号：Windows �?netstat -ano 解析（状态列 LISTENING �?ASCII，不受系统语言影响）�?// �?Windows 或解析失败一律返�?null —�?拿不到就不编造�?function portOwnerPid(port) {
   if (process.platform !== 'win32') return null;
   try {
     const r = spawnSync('netstat.exe', ['-ano', '-p', 'TCP'], {
@@ -1095,7 +988,7 @@ function portOwnerPid(port) {
     });
     const out = String((r && r.stdout) || '');
     for (const line of out.split(/\r?\n/)) {
-      // 形如：  TCP    127.0.0.1:19392    0.0.0.0:0    LISTENING    37528
+      // 形如�? TCP    1<REDACTED>:19392    0.0.0.0:0    LISTENING    37528
       const m = line.match(/^\s*TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$/i);
       if (m && Number(m[1]) === Number(port)) return Number(m[2]);
     }
@@ -1119,8 +1012,7 @@ function processNameOf(pid) {
   }
 }
 
-// 找浏览器：顺序与 tools\open-console-window.ps1 一致（Edge 优先，其次 Chrome）
-function findBrowser() {
+// 找浏览器：顺序与 tools\open-console-window.ps1 一致（Edge 优先，其�?Chrome�?function findBrowser() {
   const dirs = [process.env['ProgramFiles(x86)'], process.env.ProgramFiles, process.env.LOCALAPPDATA]
     .filter(Boolean);
   const rels = [
@@ -1138,17 +1030,12 @@ function findBrowser() {
   return null;
 }
 
-// 用 --app 开独立窗口。user-data-dir 与桌面快捷方式共用同一个 profile，
-// 因此不会和用户日常浏览的窗口混在一起，也不会开出第二个「Molly 控制台」窗口。
-//
-// 踩过的坑：spawn 完立刻 process.exit 的话，新窗口**开不出来**。实测（node spawn msedge --app）：
-//   立刻退出 → 新增窗口 0；等 1200ms 再退 → 新增窗口 1。
-// 原因是 Edge 的启动器要先把真正的 browser 进程拉起来，父进程提前退出会让这条链路断掉。
-// 所以 openAppWindow 之后调用方必须等 OPEN_SETTLE_MS 再退（见 handleOccupiedPort）。
-const OPEN_SETTLE_MS = 1500;
+// �?--app 开独立窗口。user-data-dir 与桌面快捷方式共用同一�?profile�?// 因此不会和用户日常浏览的窗口混在一起，也不会开出第二个「Molly 控制台」窗口�?//
+// 踩过的坑：spawn 完立�?process.exit 的话，新窗口**开不出�?*。实测（node spawn msedge --app）：
+//   立刻退�?�?新增窗口 0；等 1200ms 再退 �?新增窗口 1�?// 原因�?Edge 的启动器要先把真正的 browser 进程拉起来，父进程提前退出会让这条链路断掉�?// 所�?openAppWindow 之后调用方必须等 OPEN_SETTLE_MS 再退（见 handleOccupiedPort）�?const OPEN_SETTLE_MS = 1500;
 function openAppWindow(url) {
   const browser = findBrowser();
-  if (!browser) return { opened: false, reason: '没找到 Edge / Chrome' };
+  if (!browser) return { opened: false, reason: '没找�?Edge / Chrome' };
   try {
     fs.mkdirSync(BROWSER_PROFILE, { recursive: true });
   } catch { /* 建不建得出来都继续试 */ }
@@ -1160,9 +1047,7 @@ function openAppWindow(url) {
     '--window-size=1120,900',
   ];
   try {
-    // 不用 detached：detached 在 Windows 上会另给子进程配一个控制台窗口，
-    // 而「不弹黑框」是硬约束。实测 detached 反而开不出窗口（见上面的对照实验）。
-    const child = spawn(browser, args, { stdio: 'ignore', windowsHide: true });
+    // 不用 detached：detached �?Windows 上会另给子进程配一个控制台窗口�?    // 而「不弹黑框」是硬约束。实�?detached 反而开不出窗口（见上面的对照实验）�?    const child = spawn(browser, args, { stdio: 'ignore', windowsHide: true });
     child.unref();
     return { opened: true, browser, pid: child.pid };
   } catch (err) {
@@ -1171,51 +1056,41 @@ function openAppWindow(url) {
 }
 
 // ── 启动 ────────────────────────────────────────────────────────────────────
-// 命令行：--version / -v 只打印版本退出（打包成 exe 后用它确认文件没坏）；
-// --help / -h 打印配置说明。正常启动时不消费任何参数。
-const ARGV = process.argv.slice(2);
+// 命令行：--version / -v 只打印版本退出（打包�?exe 后用它确认文件没坏）�?// --help / -h 打印配置说明。正常启动时不消费任何参数�?const ARGV = process.argv.slice(2);
 if (ARGV.includes('--version') || ARGV.includes('-v')) {
   console.log(`molly-console ${VERSION}${IS_SEA ? ' (sea)' : ''}`);
   console.log(`node ${process.version} / ${process.platform}-${process.arch}`);
   console.log(`exec ${process.execPath}`);
   console.log(`consoleDir ${CONSOLE_DIR}`);
-  console.log(`config ${CONFIG_FILE}${fs.existsSync(CONFIG_FILE) ? '' : ' (不存在，用默认值)'}`);
+  console.log(`config ${CONFIG_FILE}${fs.existsSync(CONFIG_FILE) ? '' : ' (不存在，用默认�?'}`);
   process.exit(0);
 }
 if (ARGV.includes('--help') || ARGV.includes('-h')) {
-  console.log(`molly-console ${VERSION} —— Molly 控制台服务端
+  console.log(`molly-console ${VERSION} —�?Molly 控制台服务端
 
-用法：
-  molly-console.exe            按 console.json + 环境变量启动
-  molly-console.exe --version  打印版本和生效路径
-  molly-console.exe --help     本说明
-
-配置文件（可选）：exe 模式 <exe 同级>\\console.json；源码模式 tools\\console.json（脚本同级）
-                  键名见 console.example.json；当前读：${CONFIG_FILE}
-环境变量（优先级最高）：
-  MOLLY_CONSOLE_HOST / MOLLY_CONSOLE_PORT / MOLLY_CONSOLE_TOKEN
-  MOLLY_CONSOLE_DIR  前端静态目录（默认 <exe同级>\\console）
-  MOLLY_CONSOLE_CONFIG  配置文件路径（覆盖上面两个默认位置）
+用法�?  molly-console.exe            �?console.json + 环境变量启动
+  molly-console.exe --version  打印版本和生效路�?  molly-console.exe --help     本说�?
+配置文件（可选）：exe 模式 <exe 同级>\\console.json；源码模�?tools\\console.json（脚本同级）
+                  键名�?console.example.json；当前读�?{CONFIG_FILE}
+环境变量（优先级最高）�?  MOLLY_CONSOLE_HOST / MOLLY_CONSOLE_PORT / MOLLY_CONSOLE_TOKEN
+  MOLLY_CONSOLE_DIR  前端静态目录（默认 <exe同级>\\console�?  MOLLY_CONSOLE_CONFIG  配置文件路径（覆盖上面两个默认位置）
   MOLLY_PLUGIN_BASE / MOLLY_SIDECAR / MOLLY_NAPCAT
   MOLLY_ROOT / MOLLY_DATA_DIR / MOLLY_OUT_DIR  本机路径覆盖
 
-当前生效：
-  ${HOST}:${PORT}  前端=${CONSOLE_DIR}
-  插件=${PLUGIN_BASE || '(运行时自动探测 1024-65535)'}  数据=${SIDECAR}  NapCat=${NAPCAT}`);
+当前生效�?  ${HOST}:${PORT}  前端=${CONSOLE_DIR}
+  插件=${PLUGIN_BASE || '(运行时自动探�?1024-65535)'}  数据=${SIDECAR}  NapCat=${NAPCAT}`);
   process.exit(0);
 }
 
-// 启动自检：前端目录/入口文件缺失时打印清晰指引，而不是让用户看到白屏。
-// 注意不 exit —— 接口（/api/health 等）仍可用，符合原「上游挂掉也要能诊断」的设计。
-(function preflight() {
+// 启动自检：前端目�?入口文件缺失时打印清晰指引，而不是让用户看到白屏�?// 注意�?exit —�?接口�?api/health 等）仍可用，符合原「上游挂掉也要能诊断」的设计�?(function preflight() {
   const entry = path.join(CONSOLE_DIR, 'index.html');
   if (fs.existsSync(entry)) return;
   console.log('');
-  console.log(`[console] ⚠ 找不到前端入口：${entry}`);
+  console.log(`[console] �?找不到前端入口：${entry}`);
   console.log(`[console]   请把 console/ 目录（index.html、console.js、console.css）放到：`);
   console.log(`[console]      ${CONSOLE_DIR}`);
-  console.log(`[console]   或用 MOLLY_CONSOLE_DIR / console.json 的 consoleDir 指向别处。`);
-  console.log(`[console]   现在只有接口可用（/api/health、/api/overview），网页会 503。`);
+  console.log(`[console]   或用 MOLLY_CONSOLE_DIR / console.json �?consoleDir 指向别处。`);
+  console.log(`[console]   现在只有接口可用�?api/health�?api/overview），网页�?503。`);
   console.log('');
 })();
 
@@ -1235,9 +1110,7 @@ const server = http.createServer((req, res) => {
   }
 });
 
-// 双击 exe 出问题时窗口会瞬间消失，用户什么都看不到。只有在真正连着交互式控制台时才停一下。
-// 被 Start-Process 重定向 / 计划任务 / 管道拉起时 stdin 不是 TTY，这里立刻返回，不会挂住自动化。
-function pauseIfInteractive(ms = 30000) {
+// 双击 exe 出问题时窗口会瞬间消失，用户什么都看不到。只有在真正连着交互式控制台时才停一下�?// �?Start-Process 重定�?/ 计划任务 / 管道拉起�?stdin 不是 TTY，这里立刻返回，不会挂住自动化�?function pauseIfInteractive(ms = 30000) {
   if (!process.stdin || !process.stdin.isTTY) return Promise.resolve();
   return new Promise((resolve) => {
     let done = false;
@@ -1247,7 +1120,7 @@ function pauseIfInteractive(ms = 30000) {
       try { process.stdin.pause(); } catch { /* ignore */ }
       resolve();
     };
-    process.stdout.write('按回车键关闭窗口…');
+    process.stdout.write('按回车键关闭窗口�?);
     try {
       process.stdin.resume();
       process.stdin.once('data', fin);
@@ -1259,20 +1132,16 @@ function pauseIfInteractive(ms = 30000) {
   });
 }
 
-// 端口已被占用时的判定与收尾：可能「已经在跑」也可能「被别的程序占了」。
-// 两种情况都不碰占用者的进程，只决定退出码。
-async function handleOccupiedPort() {
+// 端口已被占用时的判定与收尾：可能「已经在跑」也可能「被别的程序占了」�?// 两种情况都不碰占用者的进程，只决定退出码�?async function handleOccupiedPort() {
   const health = await probeExistingConsole(PORT, PROBE_HOST);
   if (health) {
-    console.log(`控制台已经在运行：${SELF_URL}（本次不再启动，直接给你开窗口）`);
+    console.log(`控制台已经在运行�?{SELF_URL}（本次不再启动，直接给你开窗口）`);
     const r = openAppWindow(SELF_URL);
     if (r.opened) {
       console.log(`[console] 已用 ${path.basename(r.browser)} 打开独立窗口（pid=${r.pid}）`);
-      // 必须等窗口真正开出来再退：立刻退会让 Edge 这条启动链路断掉，窗口根本不出。
-      // 实测 1200ms 够用，这里留 1500ms 富余；stdin 非 TTY 时没有额外等待，不影响自动化。
-      await new Promise((resolve) => setTimeout(resolve, OPEN_SETTLE_MS));
+      // 必须等窗口真正开出来再退：立刻退会让 Edge 这条启动链路断掉，窗口根本不出�?      // 实测 1200ms 够用，这里留 1500ms 富余；stdin �?TTY 时没有额外等待，不影响自动化�?      await new Promise((resolve) => setTimeout(resolve, OPEN_SETTLE_MS));
     } else {
-      console.log(`[console] 没能自动开窗（${r.reason}），请手动打开：${SELF_URL}`);
+      console.log(`[console] 没能自动开窗（${r.reason}），请手动打开�?{SELF_URL}`);
     }
     return 0;
   }
@@ -1281,44 +1150,40 @@ async function handleOccupiedPort() {
   const pname = pid ? processNameOf(pid) : null;
   console.log(`端口 ${PORT} 被别的程序占了（pid=${pid ?? '未知'}，见控制台）`);
   if (pname) console.log(`[console] 占用者进程：${pname}`);
-  // 提示要能照做：两种模式现在都有明确的配置文件落点（exe 同级 / 脚本同级），直接给路径最省事。
-  console.log(`[console] 换个端口：改 ${CONFIG_FILE} 的 port，或设环境变量 MOLLY_CONSOLE_PORT`);
+  // 提示要能照做：两种模式现在都有明确的配置文件落点（exe 同级 / 脚本同级），直接给路径最省事�?  console.log(`[console] 换个端口：改 ${CONFIG_FILE} �?port，或设环境变�?MOLLY_CONSOLE_PORT`);
   return 1;
 }
 
 server.on('error', async (err) => {
   if (err && err.code === 'EADDRINUSE') {
-    // 探端口和 listen 之间被抢的竞态（概率极低）。走同一套判定，别一概 exit 0。
-    const code = await handleOccupiedPort();
+    // 探端口和 listen 之间被抢的竞态（概率极低）。走同一套判定，别一�?exit 0�?    const code = await handleOccupiedPort();
     await pauseIfInteractive();
     process.exit(code);
   }
-  console.log(`[console] 启动失败：${err && err.message ? err.message : err}`);
+  console.log(`[console] 启动失败�?{err && err.message ? err.message : err}`);
   await pauseIfInteractive();
   process.exit(1);
 });
 
-// 启动三态：端口空闲 → 正常起；已被自己的控制台占 → 提示 + 开窗 + exit 0；被别人占 → 报 pid + exit 1。
-(async function boot() {
+// 启动三态：端口空闲 �?正常起；已被自己的控制台�?�?提示 + 开�?+ exit 0；被别人�?�?�?pid + exit 1�?(async function boot() {
   if (!(await portIsFree(PORT, PROBE_HOST))) {
     const code = await handleOccupiedPort();
     await pauseIfInteractive();
     process.exit(code);
   }
   server.listen(PORT, HOST, () => {
-    console.log(`[console] 已启动 http://${HOST}:${PORT}  version=${VERSION}`);
+    console.log(`[console] 已启�?http://${HOST}:${PORT}  version=${VERSION}`);
     console.log(`[console] 前端目录 ${CONSOLE_DIR}`);
     console.log(`[console] 数据服务 ${SIDECAR}`);
-    // 把「配置从哪读的、切模型能不能用」打出来：403 排查第一步就看这行（只报路径和有没有，不报令牌值）。
-    console.log(
-      `[console] 配置文件 ${CONFIG_FILE}${fs.existsSync(CONFIG_FILE) ? '' : '（不存在，走默认值/环境变量）'}；切模型令牌 ${MODEL_SWITCH_TOKEN ? '已配置' : '未配置（写接口会 403）'}`,
+    // 把「配置从哪读的、切模型能不能用」打出来�?03 排查第一步就看这行（只报路径和有没有，不报令牌值）�?    console.log(
+      `[console] 配置文件 ${CONFIG_FILE}${fs.existsSync(CONFIG_FILE) ? '' : '（不存在，走默认�?环境变量�?}；切模型令牌 ${MODEL_SWITCH_TOKEN ? '已配�? : '未配置（写接口会 403�?}`,
     );
   });
 })();
 
 // ── 路由分发（分步实现，见下方各段）─────────────────────────────────────────
 async function route(req, res) {
-  const url = new URL(req.url, 'http://127.0.0.1');
+  const url = new URL(req.url, 'http://1<REDACTED>');
   const p = url.pathname;
 
   if (req.method === 'OPTIONS') {
@@ -1326,22 +1191,20 @@ async function route(req, res) {
     return res.end();
   }
 
-  // 鉴权：只有设了 MOLLY_CONSOLE_TOKEN 才校验（默认免鉴权，本机行为不变）
-  if (CONSOLE_TOKEN && !tokenOk(req)) {
+  // 鉴权：只有设�?MOLLY_CONSOLE_TOKEN 才校验（默认免鉴权，本机行为不变�?  if (CONSOLE_TOKEN && !tokenOk(req)) {
     return sendJson(res, 401, { ok: false, error: '缺少或错误的 x-molly-token' });
   }
 
   // 数据接口
-  // 作息时间（2026-10-25 主人 m05189-3：控制台可设睡觉时间）
-  if (p === '/api/sleep') {
+  // 作息时间�?026-10-25 主人 m05189-3：控制台可设睡觉时间�?  if (p === '/api/sleep') {
     const base = await resolveHostBase();
-    if (!base) return sendJson(res, 503, { ok: false, error: '宿主端口还没探测到' });
+    if (!base) return sendJson(res, 503, { ok: false, error: '宿主端口还没探测�? });
     if (req.method === 'POST') {
       let body = {};
       try {
         body = await readJsonBody(req);
       } catch {
-        return sendJson(res, 400, { ok: false, error: '请求体不是合法 JSON' });
+        return sendJson(res, 400, { ok: false, error: '请求体不是合�?JSON' });
       }
       const r = await jpost(base + '/dsh-qq-whale/sleep', body, 6000);
       return sendJson(res, r.ok ? 200 : 502, r.ok ? r.data : { ok: false, error: r.error });
@@ -1355,11 +1218,42 @@ async function route(req, res) {
   }
 
   /*
-   * 本次更新说明（2026-10-25，主人 m04452：「控制台上的版本更新一下，注释一下这次更新了什么」）。
-   * 数据源就是仓库里的 docs/CHANGELOG.md——取最新一节（第一个 `## ` 标题到下一节之间），
-   * 前端点左下角版本号时弹层展示，不额外维护一份文案。
-   * 文件不存在也返回 200（打包版没带 docs 时前端只显示「版本号」）。
-   */
+   * 茉莉�?token 账本看板（P1-5�?026-10-30）�?   *
+   * 数据源是 <dataDir>/jasmine/ledger.jsonl（引擎每次模型调用追加一行，
+   * 字段 t/model/purpose/in/out/cached/cost）。这里只读、只聚合，不写�?   * 价格表从控制台配置的 jasminePrices 取（�?百万 token）；没配�?cost �?0�?   * �?in/out/cached 与缓存命中率仍然准确——那一列才是「省没省钱」的证据�?   *
+   * 为什么要单独一个接口而不是塞�?/api/overview：账本行数按调用量线性增长，
+   * overview 是每几秒轮询一次的高频接口，不该背着它翻文件�?   */
+  if (p === '/api/jasmine/tokens') {
+    const days = Math.max(1, Math.min(365, Number(url.searchParams.get('days')) || 7));
+    const since = Date.now() - days * 86400000;
+    try {
+      const { TokenLedger } = await import('../jasmine/index.mjs');
+      const prices = pick('jasminePrices') || {};
+      const led = new TokenLedger({
+        file: path.join(DATA, 'jasmine', 'ledger.jsonl'),
+        prices: typeof prices === 'object' ? prices : {},
+      });
+      const sum = led.summary({ since });
+      return sendJson(res, 200, {
+        ok: true,
+        since,
+        days,
+        ...sum,
+        recent: led.tail(20),
+      });
+    } catch (err) {
+      // jasmine 没随包或缺文件：返回 200 + configure/data 缺失说明，前端不至于整页报错
+      return sendJson(res, 200, {
+        ok: false,
+        days,
+        error: String(err?.message || err),
+        hint: '账本文件 <dataDir>/jasmine/ledger.jsonl 由引擎写入；没有调用过就是空账本',
+      });
+    }
+  }
+
+  /*
+   * 本次更新说明�?026-10-25，主�?m04452：「控制台上的版本更新一下，注释一下这次更新了什么」）�?   * 数据源就是仓库里�?docs/CHANGELOG.md——取最新一节（第一�?`## ` 标题到下一节之间）�?   * 前端点左下角版本号时弹层展示，不额外维护一份文案�?   * 文件不存在也返回 200（打包版没带 docs 时前端只显示「版本号」）�?   */
   if (p === '/api/changelog') {
     const file = path.join(ROOT, 'docs', 'CHANGELOG.md');
     let text = '';
@@ -1373,7 +1267,7 @@ async function route(req, res) {
         let section = (next >= 0 ? rest.slice(0, next + 1) : rest).trim();
         const sep = section.search(/^---$/m);
         if (sep > 0) section = section.slice(0, sep).trim();
-        text = section.length > 8000 ? section.slice(0, 8000) + '\n…' : section;
+        text = section.length > 8000 ? section.slice(0, 8000) + '\n�? : section;
         title = String((section.match(/^##\s+(.+)$/m) || [])[1] || '').trim();
       }
     } catch (err) {
@@ -1383,20 +1277,19 @@ async function route(req, res) {
     return sendJson(res, 200, { ok: true, version: VERSION, title, text, file: 'docs/CHANGELOG.md' });
   }
 
-  // 总览聚合（契约 §3.2）——上游全挂也必须 200
+  // 总览聚合（契�?§3.2）——上游全挂也必须 200
   if (p === '/api/overview') {
     return sendJson(res, 200, await buildOverview());
   }
 
-  // 日志（契约 §3.3）
-  if (p === '/api/logs') {
+  // 日志（契�?§3.3�?  if (p === '/api/logs') {
     const source = url.searchParams.get('source') || 'watchdog';
     const tail = Math.min(Math.max(Number(url.searchParams.get('tail')) || 200, 1), 2000);
     const r = await readLogTail(source, tail);
     return sendJson(res, 200, r);
   }
 
-  // 记忆（契约 §3.4）—— 透传 sidecar，前端按 {groups:[{name,items:[{date,tag,text}]}]} 渲染
+  // 记忆（契�?§3.4）—�?透传 sidecar，前端按 {groups:[{name,items:[{date,tag,text}]}]} 渲染
   if (p === '/api/memory') {
     let r = await jget(SIDECAR + '/api/memory', 5000);
     if (!r.ok) {
@@ -1408,7 +1301,7 @@ async function route(req, res) {
     return sendJson(res, 200, Object.assign({ ok: true, reachable: true }, r.data || {}));
   }
 
-  // 表情包列表（契约 §3.5）—— 透传 sidecar，前端按 {count,items} 渲染
+  // 表情包列表（契约 §3.5）—�?透传 sidecar，前端按 {count,items} 渲染
   if (p === '/api/stickers') {
     let r = await jget(SIDECAR + '/api/stickers', 5000);
     if (!r.ok) {
@@ -1420,13 +1313,12 @@ async function route(req, res) {
     return sendJson(res, 200, Object.assign({ ok: true, reachable: true }, r.data || {}));
   }
 
-  // 表情包原图（契约 §3.6）
-  if (p.startsWith('/api/sticker/')) {
+  // 表情包原图（契约 §3.6�?  if (p.startsWith('/api/sticker/')) {
     return serveSticker(res, p.slice('/api/sticker/'.length));
   }
 
-  // 发言开关（2026-10-22）—— 透传宿主插件 /dsh-qq-whale/switches*
-  // GET  /api/plugin/switches                → 读全部状态（含审计/静音/生效值）
+  // 发言开关（2026-10-22）—�?透传宿主插件 /dsh-qq-whale/switches*
+  // GET  /api/plugin/switches                �?读全部状态（含审�?静音/生效值）
   // POST /api/plugin/switches/set            {path,value}
   // POST /api/plugin/switches/mute           {scope,minutes,note}
   // POST /api/plugin/switches/unmute         {scope}
@@ -1447,21 +1339,20 @@ async function route(req, res) {
       if (err && err.code === 'BODY_TOO_LARGE') {
         return sendJson(res, 413, { ok: false, error: err.message });
       }
-      return sendJson(res, 400, { ok: false, error: '请求体不是合法 JSON：' + errText(err) });
+      return sendJson(res, 400, { ok: false, error: '请求体不是合�?JSON�? + errText(err) });
     }
     const sub = p.slice('/api/plugin/switches'.length) || '/';
     if (!['/set', '/mute', '/unmute', '/reset'].includes(sub)) {
-      return sendJson(res, 404, { ok: false, error: '未知的开关接口 ' + sub });
+      return sendJson(res, 404, { ok: false, error: '未知的开关接�?' + sub });
     }
-    /* /set 对应插件侧 POST /switches（同一个接口，省得插件再开一个别名路由） */
+    /* /set 对应插件�?POST /switches（同一个接口，省得插件再开一个别名路由） */
     const targetPath = sub === '/set' ? '/dsh-qq-whale/switches' : ('/dsh-qq-whale/switches' + sub);
     const r = await jpost(base + targetPath, body, 6000);
     if (!r.ok) return sendJson(res, 200, { ok: false, reachable: true, error: r.error });
     return sendJson(res, 200, Object.assign({ ok: true }, r.data || {}));
   }
 
-  // 动作执行（契约 §4.2）
-  if (p.startsWith('/api/action/')) {
+  // 动作执行（契�?§4.2�?  if (p.startsWith('/api/action/')) {
     if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: 'use POST' });
     const name = decodeURIComponent(p.slice('/api/action/'.length));
     let body = {};
@@ -1472,25 +1363,22 @@ async function route(req, res) {
       if (err && err.code === 'BODY_TOO_LARGE') {
         return sendJson(res, 413, { ok: false, action: name, error: err.message });
       }
-      return sendJson(res, 400, { ok: false, error: '请求体不是合法 JSON：' + errText(err) });
+      return sendJson(res, 400, { ok: false, error: '请求体不是合�?JSON�? + errText(err) });
     }
     return runAction(res, name, body);
   }
 
-  // 登录二维码原图（契约 §3.7）
-  if (p === '/api/qr/latest.png') {
+  // 登录二维码原图（契约 §3.7�?  if (p === '/api/qr/latest.png') {
     return serveQr(res);
   }
 
 
-  // 静态资源
-  return serveStatic(req, res, p);
+  // 静态资�?  return serveStatic(req, res, p);
 }
 
 // ── 数据/动作接口实现（patch-console-server 注入）──
 /* ─────────────────────────────────────────────────────────────────────────────
- * 以下由 patch-console-server.mjs 注入到 console-server.mjs 末尾。
- * 依赖前面的：SIDECAR / STICKER_DIR / OUT / PORT / TASK_NAME / LIVE / PS_EXE /
+ * 以下�?patch-console-server.mjs 注入�?console-server.mjs 末尾�? * 依赖前面的：SIDECAR / STICKER_DIR / OUT / PORT / TASK_NAME / LIVE / PS_EXE /
  *            NODE_EXE / CORS / sendJson / sendBuffer / jget / readJson /
  *            readTextSafe / resolveHostBase / napcatBearer / notFound
  * ───────────────────────────────────────────────────────────────────────────── */
@@ -1522,10 +1410,10 @@ async function fetchJson(url, opts = {}, ms = 15000) {
 // ── 通用：读请求体（上限 12MB：表情包 base64 膨胀后约 10.7MB，留余量）────────
 const MAX_BODY = 12 * 1024 * 1024;
 
-// 超限用这个错误类型区分，好回 413 而不是 400
+// 超限用这个错误类型区分，好回 413 而不�?400
 class BodyTooLarge extends Error {
   constructor(limit) {
-    super(`请求体超过 ${Math.round(limit / 1024 / 1024)}MB 上限`);
+    super(`请求体超�?${Math.round(limit / 1024 / 1024)}MB 上限`);
     this.code = 'BODY_TOO_LARGE';
     this.limit = limit;
   }
@@ -1534,7 +1422,7 @@ class BodyTooLarge extends Error {
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
     const declared = Number(req.headers['content-length']);
-    // content-length 能提前判就直接拒，免得白读 12MB
+    // content-length 能提前判就直接拒，免得白�?12MB
     if (Number.isFinite(declared) && declared > MAX_BODY) {
       return reject(new BodyTooLarge(MAX_BODY));
     }
@@ -1572,7 +1460,7 @@ function readJsonBody(req) {
   });
 }
 
-// ── 跑 node 脚本（带超时、按行收集）──────────────────────────────────────────
+// ── �?node 脚本（带超时、按行收集）──────────────────────────────────────────
 function runNode(scriptPath, args = [], timeoutMs = 30_000) {
   return new Promise((resolve) => {
     const t0 = Date.now();
@@ -1617,18 +1505,18 @@ function runNode(scriptPath, args = [], timeoutMs = 30_000) {
   });
 }
 
-// ── 表情包图片：先问 sidecar 要 items 定位文件名，再回读本地字节 ─────────────
+// ── 表情包图片：先问 sidecar �?items 定位文件名，再回读本地字�?─────────────
 async function serveSticker(res, rawName) {
   let name;
   try {
     name = decodeURIComponent(rawName);
   } catch {
-    return notFound(res, '文件名编码不对');
+    return notFound(res, '文件名编码不�?);
   }
   if (!name || name.includes('/') || name.includes('\\') || name.includes('..')) {
     return notFound(res, '文件名不合法');
   }
-  // 只允许契约 §3.6 的字符集
+  // 只允许契�?§3.6 的字符集
   if (!/^[A-Za-z0-9_\-.()\u4e00-\u9fa5]+$/.test(name)) {
     return notFound(res, '文件名不合法');
   }
@@ -1642,8 +1530,7 @@ async function serveSticker(res, rawName) {
     webp: 'image/webp',
   };
 
-  // 前端传的是 it.file（带扩展名）。万一没扩展名，补一个再试。
-  const candidates = ext && MIME_IMG[ext] ? [name] : [name];
+  // 前端传的�?it.file（带扩展名）。万一没扩展名，补一个再试�?  const candidates = ext && MIME_IMG[ext] ? [name] : [name];
   for (const nm of candidates) {
     const e = path.extname(nm).slice(1).toLowerCase();
     if (!MIME_IMG[e]) continue;
@@ -1653,13 +1540,13 @@ async function serveSticker(res, rawName) {
       const buf = await fsp.readFile(full);
       return sendBuffer(res, 200, buf, MIME_IMG[e], 'public, max-age=3600');
     } catch {
-      /* 继续下一个候选 */
+      /* 继续下一个候�?*/
     }
   }
-  return notFound(res, '表情包图片不存在：' + name);
+  return notFound(res, '表情包图片不存在�? + name);
 }
 
-// ── 二维码：返回 out 目录里最新的那张登录二维码 ──────────────────────────────
+// ── 二维码：返回 out 目录里最新的那张登录二维�?──────────────────────────────
 async function serveQr(res) {
   const PREFERRED = ['console-qr.png', 'molly-login.png'];
   for (const nm of PREFERRED) {
@@ -1667,10 +1554,10 @@ async function serveQr(res) {
       const buf = await fsp.readFile(path.join(OUT, nm));
       if (buf.length > 0) return sendBuffer(res, 200, buf, 'image/png', 'no-store');
     } catch {
-      /* 下一个 */
+      /* 下一�?*/
     }
   }
-  // 退路：扫 out 目录里所有 *login*.png / *qr*.png，取 mtime 最新的
+  // 退路：�?out 目录里所�?*login*.png / *qr*.png，取 mtime 最新的
   let best = null;
   try {
     for (const nm of await fsp.readdir(OUT)) {
@@ -1687,30 +1574,25 @@ async function serveQr(res) {
     const e = path.extname(best.nm).slice(1).toLowerCase();
     return sendBuffer(res, 200, buf, e === 'jpg' || e === 'jpeg' ? 'image/jpeg' : 'image/png', 'no-store');
   }
-  return sendJson(res, 404, { ok: false, error: '还没有二维码，先点「生成二维码」' });
+  return sendJson(res, 404, { ok: false, error: '还没有二维码，先点「生成二维码�? });
 }
 
-// ── 日志尾部（契约 §3.3）────────────────────────────────────────────────────
+// ── 日志尾部（契�?§3.3）────────────────────────────────────────────────────
 async function readLogTail(source, tail) {
   const MAP = {
     watchdog: path.join(OUT, 'watchdog.log'),
     console: path.join(OUT, 'console.log'),
     plugin: path.join(OUT, 'plugin.log'),
     napcat: path.join(OUT, 'napcat.log'),
-    // 心跳推送器（tools\heartbeat-push.mjs）自己的日志。刚开始推的时候文件可能还不存在。
-    heartbeat: path.join(OUT, 'heartbeat.log'),
-    // SnowLuma 后端（2026-10-25 加）：扫码/重启失败时，这两个日志是第一现场。
-    //  - snowluma-boot：tools\snowluma-start.ps1 的启动过程日志
-    //  - snowluma-runtime：SnowLuma 进程自己的 stdout/err
+    // 心跳推送器（tools\heartbeat-push.mjs）自己的日志。刚开始推的时候文件可能还不存在�?    heartbeat: path.join(OUT, 'heartbeat.log'),
+    // SnowLuma 后端�?026-10-25 加）：扫�?重启失败时，这两个日志是第一现场�?    //  - snowluma-boot：tools\snowluma-start.ps1 的启动过程日�?    //  - snowluma-runtime：SnowLuma 进程自己�?stdout/err
     'snowluma-boot': path.join(OUT, 'snowluma-boot.log'),
     'snowluma-runtime': path.join(OUT, 'snowluma-runtime.out.log'),
   };
   const known = Object.prototype.hasOwnProperty.call(MAP, source);
   const file = known ? MAP[source] : MAP.watchdog;
   const txt = readTextSafe(file, 4 * 1024 * 1024);
-  // 缺文件不是错误：心跳推送器可能还没跑过、插件日志可能还没写过。
-  // 前端靠 exists 决定是显示空列表还是"这个日志还没生成"。
-  if (txt === null) {
+  // 缺文件不是错误：心跳推送器可能还没跑过、插件日志可能还没写过�?  // 前端�?exists 决定是显示空列表还是"这个日志还没生成"�?  if (txt === null) {
     return { ok: true, source, path: file, exists: false, lines: [], note: '该日志不存在' };
   }
   const lines = txt.split(/\r?\n/);
@@ -1723,54 +1605,42 @@ async function readLogTail(source, tail) {
     lines: lines.slice(-tail),
   };
   if (!known) {
-    // 兼容老前端：source 写错时仍回 watchdog，但明确告诉调用方用的是哪个
-    out.note = `未知 source「${source}」，已回退到 watchdog`;
+    // 兼容老前端：source 写错时仍�?watchdog，但明确告诉调用方用的是哪个
+    out.note = `未知 source�?{source}」，已回退�?watchdog`;
     out.known = Object.keys(MAP);
   }
   return out;
 }
 
-// ── 动作表（契约 §4.2 的 14 个 + CRUD 8 个 = 22）──────────────────────────────
+// ── 动作表（契约 §4.2 �?14 �?+ CRUD 8 �?= 22）──────────────────────────────
 const DESTRUCTIVE = new Set([
   'napcat/restart',
   'watchdog/config',
   'watchdog/task',
   'process/start-napcat',
   'memory/delete',   // 删记忆不可恢复，契约 §3 要求 confirm
-  'stickers/delete', // 删表情包会连哈希一起删，契约 §3 要求 confirm
-  'memory/pending/approve', // 转正后立刻进正式库并参与召回，等于一次写入
-  'memory/pending/reject',  // 丢弃后该条彻底消失，没有回收站
-  'molly/stop',     // 停 QQ + NapCat：会直接掉线，刚扫完码的话得重扫
-  'molly/restart',  // 同上，而且中间有 3 秒空窗
-]);
+  'stickers/delete', // 删表情包会连哈希一起删，契�?§3 要求 confirm
+  'memory/pending/approve', // 转正后立刻进正式库并参与召回，等于一次写�?  'memory/pending/reject',  // 丢弃后该条彻底消失，没有回收�?  'molly/stop',     // �?QQ + NapCat：会直接掉线，刚扫完码的话得重扫
+  'molly/restart',  // 同上，而且中间�?3 秒空�?]);
 
 const TOOLS_DIR = TOOLS;
 
-// 关键词：数组或 "a,b c" 字符串都收（前端 chip 组件两种都可能给）
-function normKeywords(v) {
+// 关键词：数组�?"a,b c" 字符串都收（前端 chip 组件两种都可能给�?function normKeywords(v) {
   if (v == null) return null;
-  // 分隔符与插件 cleanKeywords 保持一致（含中文分号和全角逗号顿号）
-  const arr = Array.isArray(v) ? v : String(v).split(/[,，、;；\s]+/);
+  // 分隔符与插件 cleanKeywords 保持一致（含中文分号和全角逗号顿号�?  const arr = Array.isArray(v) ? v : String(v).split(/[,，�?；\s]+/);
   return arr.map((x) => String(x).trim()).filter(Boolean);
 }
 
 /**
- * 按码点数字数，与插件 charLen（`[...s].length`）保持一致。
- * 用 s.length 会把 emoji 算成 2 个，导致 100~200 字含表情的记忆在代理层就被误拒。
- */
+ * 按码点数字数，与插件 charLen（`[...s].length`）保持一致�? * �?s.length 会把 emoji 算成 2 个，导致 100~200 字含表情的记忆在代理层就被误拒�? */
 function charLen(s) {
   return [...String(s ?? '')].length;
 }
 
 /**
- * 待核实区条目 id 校验（task-28）。
- * 条目 id 形如 `mp1x2y3z4`，但插件侧实现可能换生成方式，所以这里不限制字符集，
- * 只挡住三类一定会出问题的输入：
- *   - 空 / 非字符串
- *   - 超长（128 码点）—— 防止有人拿它当超大 payload 撞插件
- *   - 控制字符（\x00-\x1f、\x7f）—— 含换行的 id 会污染插件日志
- * 返回 null 表示合法，否则返回错误话术。
- */
+ * 待核实区条目 id 校验（task-28）�? * 条目 id 形如 `mp1x2y3z4`，但插件侧实现可能换生成方式，所以这里不限制字符集，
+ * 只挡住三类一定会出问题的输入�? *   - �?/ 非字符串
+ *   - 超长�?28 码点）—�?防止有人拿它当超�?payload 撞插�? *   - 控制字符（\x00-\x1f、\x7f）—�?含换行的 id 会污染插件日�? * 返回 null 表示合法，否则返回错误话术�? */
 function badPendingId(v) {
   if (typeof v !== 'string') return 'id 必须是字符串';
   const id = v.trim();
@@ -1782,26 +1652,22 @@ function badPendingId(v) {
 }
 
 /**
- * 透传插件接口（契约 §3）：校验在本地先做一遍，插件没上线也能给出人话错误。
- * 返回 { ok, data, status?, error? }；data 是插件原始响应，前端直接读。
- * 注意：这里绝不把 payload / 响应正文写进日志（base64、记忆正文都是敏感内容）。
- */
+ * 透传插件接口（契�?§3）：校验在本地先做一遍，插件没上线也能给出人话错误�? * 返回 { ok, data, status?, error? }；data 是插件原始响应，前端直接读�? * 注意：这里绝不把 payload / 响应正文写进日志（base64、记忆正文都是敏感内容）�? */
 async function proxyPlugin(method, ep, payload, ms = 20_000) {
   const base = await resolveHostBase();
-  if (!base) return { ok: false, status: 503, error: '没探到 DSH 宿主端口' };
+  if (!base) return { ok: false, status: 503, error: '没探�?DSH 宿主端口' };
   const url = base + '/dsh-qq-whale' + ep;
   const r =
     method === 'GET'
       ? await fetchJson(url, {}, ms)
       : await fetchJson(url, { method: 'POST', body: JSON.stringify(payload || {}) }, ms);
   const d = r.data;
-  // 上游 HTTP 层失败：原样透传状态码（404 找不到 / 409 冲突 / 400 参数错都靠这个）
+  // 上游 HTTP 层失败：原样透传状态码�?04 找不�?/ 409 冲突 / 400 参数错都靠这个）
   if (!r.ok) {
     const msg = (d && (d.error || d.message)) || (r.status ? `HTTP ${r.status}` : r.error) || '插件请求失败';
     return { ok: false, status: r.status || 502, error: msg, data: d ?? null };
   }
-  // 上游 200 但业务失败：按业务错误处理，状态码沿用插件给的（没给就当 400）
-  if (d && d.ok === false) {
+  // 上游 200 但业务失败：按业务错误处理，状态码沿用插件给的（没给就�?400�?  if (d && d.ok === false) {
     return { ok: false, status: d.status || 400, error: d.error || '插件返回 ok:false', data: d };
   }
   return { ok: true, data: d ?? null };
@@ -1809,12 +1675,9 @@ async function proxyPlugin(method, ep, payload, ms = 20_000) {
 
 /** 每个动作返回 { ok, data?, stdout?, stderr?, error?, status? } */
 /**
- * 把一条控制台自己的操作日志追加到 out/console.log。
- *
- * 为什么不用 console.log：控制台进程的 stdout 由启动器重定向，真实文件位置
- * 取决于怎么启动的；骂人模式这种"主人点的开关"必须有一个固定位置能翻到。
- * 写失败只吞掉——日志写不进去不该让开关也失败。
- */
+ * 把一条控制台自己的操作日志追加到 out/console.log�? *
+ * 为什么不�?console.log：控制台进程�?stdout 由启动器重定向，真实文件位置
+ * 取决于怎么启动的；骂人模式这种"主人点的开�?必须有一个固定位置能翻到�? * 写失败只吞掉——日志写不进去不该让开关也失败�? */
 function appendConsoleLog(line) {
   try {
     fs.mkdirSync(OUT, { recursive: true });
@@ -1827,12 +1690,9 @@ function appendConsoleLog(line) {
 // ── 外部服务辅助（task-57）──────────────────────────────────────────────────
 
 /**
- * 网关面板登录 → token。
- *
- * 密码来自配置（`MOLLY_GATEWAY_PASSWORD` / console.json `gatewayPassword`，默认 admin）。
- * **token 与密码一律不进日志、不进返回值**：这个函数只在内部用，调用方只能拿到
- * `{ok, token}` 或 `{ok:false, error}`，而 error 里已把响应正文剥掉了。
- */
+ * 网关面板登录 �?token�? *
+ * 密码来自配置（`MOLLY_GATEWAY_PASSWORD` / console.json `gatewayPassword`，默�?admin）�? * **token 与密码一律不进日志、不进返回�?*：这个函数只在内部用，调用方只能拿到
+ * `{ok, token}` �?`{ok:false, error}`，�?error 里已把响应正文剥掉了�? */
 async function gatewayPanelToken() {
   const r = await fetchJson(
     GATEWAY + '/panel/login',
@@ -1841,11 +1701,11 @@ async function gatewayPanelToken() {
   );
   if (!r.ok) {
     // 只说状态码，不回显任何请求体（里面有密码）
-    return { ok: false, error: `网关面板登录失败（HTTP ${r.status || '无响应'}）` };
+    return { ok: false, error: `网关面板登录失败（HTTP ${r.status || '无响�?}）` };
   }
   const tk = r.data?.token;
   if (!tk || typeof tk !== 'string') {
-    return { ok: false, error: '网关面板登录返回里没有 token' };
+    return { ok: false, error: '网关面板登录返回里没�?token' };
   }
   return { ok: true, token: tk, usingDefaultPassword: Boolean(r.data?.using_default_password) };
 }
@@ -1866,22 +1726,18 @@ function readHeartbeatLocal() {
 }
 
 /**
- * 服务器侧状态。
- *
- * 约定：服务器 `GET <relayBase>/health` 返回 `{ok, level, stale, ageSeconds, lastReceivedAt}`。
- * 服务器不在（家里断网、服务器重启）时**不抛**，回 `{ok:false, error}` —— 调用方据此
- * 仍然给前端 200，让页面能显示"远端不可达"，而不是整页报错。
- */
+ * 服务器侧状态�? *
+ * 约定：服务器 `GET <relayBase>/health` 返回 `{ok, level, stale, ageSeconds, lastReceivedAt}`�? * 服务器不在（家里断网、服务器重启）时**不抛**，回 `{ok:false, error}` —�?调用方据�? * 仍然给前�?200，让页面能显�?远端不可�?，而不是整页报错�? */
 async function fetchHeartbeatRemote(timeoutMs) {
   const cfg = readJson(HB_CONFIG, null);
   const relayBase = typeof cfg?.relayBase === 'string' ? cfg.relayBase.trim() : '';
-  if (!relayBase) return { ok: false, error: '没有配置服务器地址（out/heartbeat-config.json 缺 relayBase）' };
+  if (!relayBase) return { ok: false, error: '没有配置服务器地址（out/heartbeat-config.json �?relayBase�? };
   const base = relayBase.replace(/\/+$/, '');
   const r = await fetchJson(base + '/health', {}, Math.max(1000, Math.min(timeoutMs || 8000, 20000)));
   if (!r.ok) {
     return {
       ok: false,
-      error: r.status ? `服务器返回 HTTP ${r.status}` : r.error || '服务器不可达',
+      error: r.status ? `服务器返�?HTTP ${r.status}` : r.error || '服务器不可达',
       relayBase: base,
     };
   }
@@ -1897,9 +1753,7 @@ async function fetchHeartbeatRemote(timeoutMs) {
 }
 
 /**
- * 列出某个进程名下的所有 pid（Windows 用 tasklist，别用 wmic —— 新版已移除）。
- * 返回 [{pid, name}]；拿不到就返回空数组，绝不抛。
- */
+ * 列出某个进程名下的所�?pid（Windows �?tasklist，别�?wmic —�?新版已移除）�? * 返回 [{pid, name}]；拿不到就返回空数组，绝不抛�? */
 function listPidsByName(name) {
   const r = spawnSync('tasklist.exe', ['/FI', `IMAGENAME eq ${name}`, '/FO', 'CSV', '/NH'], {
     encoding: 'utf8',
@@ -1909,7 +1763,7 @@ function listPidsByName(name) {
   const out = typeof r.stdout === 'string' ? r.stdout : '';
   const pids = [];
   for (const line of out.split(/\r?\n/)) {
-    // 格式： "QQ.exe","1234","Console","1","120,000 K"
+    // 格式�?"QQ.exe","1234","Console","1","120,000 K"
     const m = line.match(/^"([^"]+)","(\d+)"/);
     if (m && m[1].toLowerCase() === String(name).toLowerCase()) {
       pids.push({ pid: Number(m[2]), name: m[1] });
@@ -1918,13 +1772,11 @@ function listPidsByName(name) {
   return pids;
 }
 
-/** 要停的进程：只这两类。DSH 宿主、网关、控制台自己一概不碰。 */
+/** 要停的进程：只这两类。DSH 宿主、网关、控制台自己一概不碰�?*/
 const MOLLY_PROCESS_NAMES = ['QQ.exe', 'NapCatWinBootMain.exe'];
 
 /**
- * 停 Molly（QQ + NapCat）。**不碰 DSH 宿主、不碰网关**（用户原话：只停这两个）。
- * 返回杀了哪些 pid，没找到的如实说"本来就没在跑"。
- */
+ * �?Molly（QQ + NapCat）�?*不碰 DSH 宿主、不碰网�?*（用户原话：只停这两个）�? * 返回杀了哪�?pid，没找到的如实说"本来就没在跑"�? */
 function stopMollyProcesses() {
   const killed = [];
   const notRunning = [];
@@ -1948,12 +1800,12 @@ function stopMollyProcesses() {
   return { killed, notRunning, failed };
 }
 
-// ── 动作表 ──────────────────────────────────────────────────────────────────
+// ── 动作�?──────────────────────────────────────────────────────────────────
 const ACTIONS = {
   'plugin/toggle': async (body) => {
-    if (typeof body?.enabled !== 'boolean') return { ok: false, status: 400, error: 'enabled 必须是 boolean' };
+    if (typeof body?.enabled !== 'boolean') return { ok: false, status: 400, error: 'enabled 必须�?boolean' };
     const base = await resolveHostBase();
-    if (!base) return { ok: false, status: 503, error: '没探到 DSH 宿主端口' };
+    if (!base) return { ok: false, status: 503, error: '没探�?DSH 宿主端口' };
     const r = await fetchJson(base + '/dsh-qq-whale/toggle', {
       method: 'POST',
       body: JSON.stringify({ enabled: body.enabled }),
@@ -1963,25 +1815,25 @@ const ACTIONS = {
 
   'plugin/recheck': async () => {
     const base = await resolveHostBase();
-    if (!base) return { ok: false, status: 503, error: '没探到 DSH 宿主端口' };
+    if (!base) return { ok: false, status: 503, error: '没探�?DSH 宿主端口' };
     const r = await fetchJson(base + '/dsh-qq-whale/recheck', { method: 'POST', body: '{}' }, 30_000);
     return { ...r, ok: r.ok && r.data?.ok !== false };
   },
 
   'plugin/budget': async (body) => {
     const base = await resolveHostBase();
-    if (!base) return { ok: false, status: 503, error: '没探到 DSH 宿主端口' };
+    if (!base) return { ok: false, status: 503, error: '没探�?DSH 宿主端口' };
     const payload = {};
     if (typeof body?.enabled === 'boolean') payload.enabled = body.enabled;
     if (Number.isFinite(Number(body?.cap)) && Number(body.cap) > 0) payload.cap = Number(body.cap);
-    if (!Object.keys(payload).length) return { ok: false, status: 400, error: 'enabled 和 cap 至少要给一个' };
+    if (!Object.keys(payload).length) return { ok: false, status: 400, error: 'enabled �?cap 至少要给一�? };
     const r = await fetchJson(base + '/dsh-qq-whale/budget', { method: 'POST', body: JSON.stringify(payload) });
     return { ...r, ok: r.ok && r.data?.ok !== false };
   },
 
   'plugin/work-probe': async () => {
     const base = await resolveHostBase();
-    if (!base) return { ok: false, status: 503, error: '没探到 DSH 宿主端口' };
+    if (!base) return { ok: false, status: 503, error: '没探�?DSH 宿主端口' };
     const r = await fetchJson(base + '/dsh-qq-whale/work/probe', { method: 'POST', body: '{}' }, 60_000);
     return { ...r, ok: r.ok && r.data?.ok !== false };
   },
@@ -1990,7 +1842,7 @@ const ACTIONS = {
     const task = String(body?.task || '').trim();
     if (!task) return { ok: false, status: 400, error: 'task 不能为空' };
     const base = await resolveHostBase();
-    if (!base) return { ok: false, status: 503, error: '没探到 DSH 宿主端口' };
+    if (!base) return { ok: false, status: 503, error: '没探�?DSH 宿主端口' };
     const r = await fetchJson(base + '/dsh-qq-whale/work/run', {
       method: 'POST',
       body: JSON.stringify({ task, send: false }),
@@ -2002,7 +1854,7 @@ const ACTIONS = {
     const text = String(body?.text || '').trim();
     if (!text) return { ok: false, status: 400, error: 'text 不能为空' };
     const base = await resolveHostBase();
-    if (!base) return { ok: false, status: 503, error: '没探到 DSH 宿主端口' };
+    if (!base) return { ok: false, status: 503, error: '没探�?DSH 宿主端口' };
     const r = await fetchJson(base + '/dsh-qq-whale/research/test', {
       method: 'POST',
       body: JSON.stringify({ text }),
@@ -2011,31 +1863,27 @@ const ACTIONS = {
   },
 
   /*
-   * 骂人模式（出气筒）总开关（task-36）。
-   *
-   * 两个动作分开而不是一个：status 是纯读（守护页每次轮询都要），set 才写。
-   * set 不需要 confirm —— 它是可逆的（再点一下就开回来），而且"立即停"这件事
-   * 如果需要二次确认，出事的时候人根本来不及点。
-   */
+   * 骂人模式（出气筒）总开关（task-36）�?   *
+   * 两个动作分开而不是一个：status 是纯读（守护页每次轮询都要），set 才写�?   * set 不需�?confirm —�?它是可逆的（再点一下就开回来），而且"立即�?这件�?   * 如果需要二次确认，出事的时候人根本来不及点�?   */
   'pest/status': async () => {
     const base = await resolveHostBase();
-    if (!base) return { ok: false, status: 503, error: '没探到 DSH 宿主端口' };
+    if (!base) return { ok: false, status: 503, error: '没探�?DSH 宿主端口' };
     const r = await fetchJson(base + '/dsh-qq-whale/pest', { method: 'GET' }, 5000);
     const okAll = r.ok && r.data?.ok !== false;
-    const err = r.data?.error || `插件还没有 /pest 路由（HTTP ${r.status}）——重载插件后再试`;
+    const err = r.data?.error || `插件还没�?/pest 路由（HTTP ${r.status}）——重载插件后再试`;
     return { ...r, ok: okAll, error: okAll ? undefined : err };
   },
 
   'pest/set': async (body) => {
     if (typeof body?.enabled !== 'boolean') {
-      return { ok: false, status: 400, error: 'enabled 必须是 boolean（true / false）' };
+      return { ok: false, status: 400, error: 'enabled 必须�?boolean（true / false�? };
     }
     const payload = { enabled: body.enabled };
     if (body.targets !== undefined) payload.targets = body.targets;
     if (body.dailyCap !== undefined) payload.dailyCap = body.dailyCap;
     if (body.intervalMinutes !== undefined) payload.intervalMinutes = body.intervalMinutes;
     const base = await resolveHostBase();
-    if (!base) return { ok: false, status: 503, error: '没探到 DSH 宿主端口' };
+    if (!base) return { ok: false, status: 503, error: '没探�?DSH 宿主端口' };
     const r = await fetchJson(
       base + '/dsh-qq-whale/pest',
       { method: 'POST', body: JSON.stringify(payload) },
@@ -2045,25 +1893,23 @@ const ACTIONS = {
     const okAll = r.ok && r.data?.ok !== false;
     const err = r.data?.error || `开关没生效（HTTP ${r.status}）——插件重载了吗？`;
     appendConsoleLog(
-      `[pest] 控制台把骂人模式 → ${body.enabled ? '开' : '关'}` +
+      `[pest] 控制台把骂人模式 �?${body.enabled ? '开' : '�?}` +
         (st
-          ? `｜对象 ${(st.targets || []).join(',') || '（空）'}｜日额度 ${st.dailyCap}｜停止词 ${st.stopWord || '（无）'}`
+          ? `｜对�?${(st.targets || []).join(',') || '（空�?}｜日额度 ${st.dailyCap}｜停止词 ${st.stopWord || '（无�?}`
           : '') +
         (okAll ? '' : `｜失败：${err}`),
     );
     return { ...r, ok: okAll, error: okAll ? undefined : err };
   },
 
-  // SnowLuma 后端：没有 WebUI 二维码可生成（登录是 QQ 原生窗口扫码），
-  // 「重新登录」= 触发提权任务 snowluma-start.ps1 -QQOnly：只重启 QQ、不动 SnowLuma 进程，
-  // 保住设备指纹，hookAutoLoad 会把 hook 重新注入新 QQ，QQ 窗口弹出扫码。
-  'napcat/qr': async () => {
+  // SnowLuma 后端：没�?WebUI 二维码可生成（登录是 QQ 原生窗口扫码），
+  // 「重新登录�? 触发提权任务 snowluma-start.ps1 -QQOnly：只重启 QQ、不�?SnowLuma 进程�?  // 保住设备指纹，hookAutoLoad 会把 hook 重新注入�?QQ，QQ 窗口弹出扫码�?  'napcat/qr': async () => {
     if (currentBackend() === 'snowluma') {
       if (!LIVE) {
         return {
           ok: false,
           status: 409,
-          error: '开发保护：真实重启会踢掉当前 QQ 登录。设 MOLLY_CONSOLE_LIVE=1 后重启控制台才允许执行。',
+          error: '开发保护：真实重启会踢掉当�?QQ 登录。设 MOLLY_CONSOLE_LIVE=1 后重启控制台才允许执行�?,
           data: { dryRun: true, would: 'schtasks /Run /TN SnowLuma-Relogin' },
         };
       }
@@ -2072,12 +1918,12 @@ const ACTIONS = {
         ...r,
         data: {
           backend: 'snowluma',
-          hint: '已触发 SnowLuma-Relogin：约 10~25 秒后 QQ 窗口会弹出，用手机扫码即可（SnowLuma 进程没重启，设备指纹不变）。',
+          hint: '已触�?SnowLuma-Relogin：约 10~25 秒后 QQ 窗口会弹出，用手机扫码即可（SnowLuma 进程没重启，设备指纹不变）�?,
         },
       };
     }
     const r = await runNode(path.join(TOOLS_DIR, 'make-qr.mjs'), [path.join(OUT, 'console-qr.png')], 45_000);
-    if (!r.ok) return { ok: false, error: r.error || '生成二维码失败', stdout: r.stdout };
+    if (!r.ok) return { ok: false, error: r.error || '生成二维码失�?, stdout: r.stdout };
     const out = r.stdout || '';
     if (out.includes('ALREADY_LOGIN')) {
       return { ok: true, stdout: out, data: { alreadyLogin: true, qr: null, url: null } };
@@ -2094,13 +1940,12 @@ const ACTIONS = {
     };
   },
 
-  // SnowLuma 后端：全量重启 = 触发 SnowLuma-Boot（清 QQ → 起 SnowLuma → 起 QQ → 等扫码）。
-  'napcat/restart': async () => {
+  // SnowLuma 后端：全量重�?= 触发 SnowLuma-Boot（清 QQ �?�?SnowLuma �?�?QQ �?等扫码）�?  'napcat/restart': async () => {
     if (!LIVE) {
       return {
         ok: false,
         status: 409,
-        error: '开发保护：真实重启会踢掉当前 QQ 登录。设 MOLLY_CONSOLE_LIVE=1 后重启控制台才允许执行。',
+        error: '开发保护：真实重启会踢掉当�?QQ 登录。设 MOLLY_CONSOLE_LIVE=1 后重启控制台才允许执行�?,
         data: {
           dryRun: true,
           would: currentBackend() === 'snowluma' ? 'schtasks /Run /TN SnowLuma-Boot' : 'start-molly.ps1 -Restart',
@@ -2111,7 +1956,7 @@ const ACTIONS = {
       const r = await runTaskNow('SnowLuma-Boot', 60_000);
       return {
         ...r,
-        data: { backend: 'snowluma', hint: '已触发 SnowLuma-Boot：全量重启 SnowLuma + QQ，约 20~40 秒后 QQ 窗口弹出扫码。' },
+        data: { backend: 'snowluma', hint: '已触�?SnowLuma-Boot：全量重�?SnowLuma + QQ，约 20~40 秒后 QQ 窗口弹出扫码�? },
       };
     }
     return runPowerShell(['-Restart'], 240_000);
@@ -2153,7 +1998,7 @@ const ACTIONS = {
   'watchdog/config': async (body) => {
     const patch = body?.patch;
     if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
-      return { ok: false, status: 400, error: 'patch 必须是对象' };
+      return { ok: false, status: 400, error: 'patch 必须是对�? };
     }
     const ALLOWED = [
       'enabled',
@@ -2171,7 +2016,7 @@ const ACTIONS = {
       return { ok: false, status: 400, error: '不允许改这些键：' + bad.join(', '), data: { allowed: ALLOWED } };
     }
     const cur = readJson(WD_CONFIG, null);
-    if (!cur) return { ok: false, status: 500, error: '读不到 watchdog-config.json' };
+    if (!cur) return { ok: false, status: 500, error: '读不�?watchdog-config.json' };
     const next = { ...cur, ...patch };
     try {
       fs.writeFileSync(WD_CONFIG, JSON.stringify(next, null, 2) + '\n', 'utf8');
@@ -2182,7 +2027,7 @@ const ACTIONS = {
   },
 
   'watchdog/task': async (body) => {
-    if (typeof body?.enable !== 'boolean') return { ok: false, status: 400, error: 'enable 必须是 boolean' };
+    if (typeof body?.enable !== 'boolean') return { ok: false, status: 400, error: 'enable 必须�?boolean' };
     const flag = body.enable ? '/ENABLE' : '/DISABLE';
     const t0 = Date.now();
     const r = await new Promise((resolve) => {
@@ -2211,13 +2056,12 @@ const ACTIONS = {
       child.on('error', (e) => done({ ok: false, error: errText(e) }));
       child.on('exit', (code) => done({ ok: code === 0, code, stdout: out, stderr: errOut }));
     });
-    // 中文 Windows 上 schtasks 输出是 GBK，stdout 可能乱码；用 exit code 判定，回查一次真实状态
-    const after = await probeTaskEnabled(TASK_NAME);
+    // 中文 Windows �?schtasks 输出�?GBK，stdout 可能乱码；用 exit code 判定，回查一次真实状�?    const after = await probeTaskEnabled(TASK_NAME);
     return {
       ok: r.ok,
       stdout: r.stdout,
       stderr: r.stderr,
-      error: r.ok ? undefined : 'schtasks 退出码 ' + (r.code ?? '?') + '（输出可能是 GBK 乱码，以 taskEnabled 为准）',
+      error: r.ok ? undefined : 'schtasks 退出码 ' + (r.code ?? '?') + '（输出可能是 GBK 乱码，以 taskEnabled 为准�?,
       data: { enable: body.enable, taskEnabled: after, durationMs: Date.now() - t0 },
     };
   },
@@ -2227,7 +2071,7 @@ const ACTIONS = {
       return {
         ok: false,
         status: 409,
-        error: '开发保护：拉起 QQ 进程可能和现有进程抢端口。设 MOLLY_CONSOLE_LIVE=1 后重启控制台才允许执行。',
+        error: '开发保护：拉起 QQ 进程可能和现有进程抢端口。设 MOLLY_CONSOLE_LIVE=1 后重启控制台才允许执行�?,
         data: {
           dryRun: true,
           would: currentBackend() === 'snowluma' ? 'schtasks /Run /TN SnowLuma-Boot' : 'start-molly.ps1',
@@ -2238,27 +2082,26 @@ const ACTIONS = {
       const r = await runTaskNow('SnowLuma-Boot', 60_000);
       return {
         ...r,
-        data: { backend: 'snowluma', hint: '已触发 SnowLuma-Boot：拉起 SnowLuma + QQ，约 20~40 秒后等扫码。' },
+        data: { backend: 'snowluma', hint: '已触�?SnowLuma-Boot：拉�?SnowLuma + QQ，约 20~40 秒后等扫码�? },
       };
     }
     return runPowerShell([], 240_000);
   },
 
   // ── CRUD 8 条（契约 §3）：全部透传插件，代理层只做本地参数校验 ──────────────
-  // 为什么不在代理层改盘：插件持有内存态，直改文件会被它下次 save() 覆写（契约 §0）
-
+  // 为什么不在代理层改盘：插件持有内存态，直改文件会被它下�?save() 覆写（契�?§0�?
   'memory/list': async () => proxyPlugin('GET', '/memory/list', null, 15_000),
 
   'memory/add': async (body) => {
     const text = String(body?.text ?? '').trim();
     if (!text) return { ok: false, status: 400, error: 'text 不能为空' };
-    if (charLen(text) > 200) return { ok: false, status: 400, error: 'text 最多 200 字' };
+    if (charLen(text) > 200) return { ok: false, status: 400, error: 'text 最�?200 �? };
     const payload = { text };
     if (body?.kind !== undefined) payload.kind = String(body.kind);
     if (body?.who !== undefined) payload.who = String(body.who);
     if (body?.weight !== undefined && body.weight !== null) {
       const w = Number(body.weight);
-      if (!Number.isInteger(w) || w < 1 || w > 5) return { ok: false, status: 400, error: 'weight 必须是 1-5 的整数' };
+      if (!Number.isInteger(w) || w < 1 || w > 5) return { ok: false, status: 400, error: 'weight 必须�?1-5 的整�? };
       payload.weight = w;
     }
     return proxyPlugin('POST', '/memory/add', payload);
@@ -2270,20 +2113,20 @@ const ACTIONS = {
     const payload = { id };
     if (body?.text !== undefined) {
       const text = String(body.text).trim();
-      if (!text) return { ok: false, status: 400, error: 'text 不能改成空' };
-      if (charLen(text) > 200) return { ok: false, status: 400, error: 'text 最多 200 字' };
+      if (!text) return { ok: false, status: 400, error: 'text 不能改成�? };
+      if (charLen(text) > 200) return { ok: false, status: 400, error: 'text 最�?200 �? };
       payload.text = text;
     }
     if (body?.kind !== undefined) payload.kind = String(body.kind);
     if (body?.who !== undefined) payload.who = String(body.who);
     if (body?.weight !== undefined && body.weight !== null) {
       const w = Number(body.weight);
-      if (!Number.isInteger(w) || w < 1 || w > 5) return { ok: false, status: 400, error: 'weight 必须是 1-5 的整数' };
+      if (!Number.isInteger(w) || w < 1 || w > 5) return { ok: false, status: 400, error: 'weight 必须�?1-5 的整�? };
       payload.weight = w;
     }
     // 至少要改一个字段，否则等于空跑
     if (Object.keys(payload).length === 1) {
-      return { ok: false, status: 400, error: 'text/kind/who/weight 至少要给一个' };
+      return { ok: false, status: 400, error: 'text/kind/who/weight 至少要给一�? };
     }
     return proxyPlugin('POST', '/memory/update', payload);
   },
@@ -2300,11 +2143,10 @@ const ACTIONS = {
     const raw = String(body?.dataBase64 ?? '').trim();
     if (!raw) return { ok: false, status: 400, error: 'dataBase64 不能为空' };
     const keywords = normKeywords(body?.keywords ?? body?.keyword);
-    if (!keywords || !keywords.length) return { ok: false, status: 400, error: 'keywords 至少要给一个' };
+    if (!keywords || !keywords.length) return { ok: false, status: 400, error: 'keywords 至少要给一�? };
     const payload = { dataBase64: raw, keywords };
     if (body?.filename !== undefined) payload.filename = String(body.filename);
-    // 大图上传慢，给足 60 秒（插件那边还要算 sha256 + 重扫目录）
-    return proxyPlugin('POST', '/stickers/add', payload, 60_000);
+    // 大图上传慢，给足 60 秒（插件那边还要�?sha256 + 重扫目录�?    return proxyPlugin('POST', '/stickers/add', payload, 60_000);
   },
 
   'stickers/update': async (body) => {
@@ -2312,7 +2154,7 @@ const ACTIONS = {
     if (!file) return { ok: false, status: 400, error: 'file 不能为空' };
     if (file.includes('..')) return { ok: false, status: 400, error: 'file 不能包含 ..' };
     const keywords = normKeywords(body?.keywords ?? body?.keyword);
-    if (!keywords || !keywords.length) return { ok: false, status: 400, error: 'keywords 至少要给一个' };
+    if (!keywords || !keywords.length) return { ok: false, status: 400, error: 'keywords 至少要给一�? };
     return proxyPlugin('POST', '/stickers/update', { file, keywords });
   },
 
@@ -2323,17 +2165,14 @@ const ACTIONS = {
     return proxyPlugin('POST', '/stickers/delete', { file });
   },
 
-  // ── 待核实区（task-28，插件侧见 task-27）──────────────────────────────────
-  // 拦下来的记忆不再直接丢弃，而是进 pending.json 等主人审批。
-  // 代理层不做业务判断，只做 id 三级校验 + 原样透传（含插件的 404/409）。
-
+  // ── 待核实区（task-28，插件侧�?task-27）──────────────────────────────────
+  // 拦下来的记忆不再直接丢弃，而是�?pending.json 等主人审批�?  // 代理层不做业务判断，只做 id 三级校验 + 原样透传（含插件�?404/409）�?
   'memory/pending': async () => proxyPlugin('GET', '/memory/pending', null, 15_000),
 
   'memory/pending/approve': async (body) => {
     const bad = badPendingId(body?.id);
     if (bad) return { ok: false, status: 400, error: bad };
-    // 转正后立刻进正式库并参与召回，等于一次写入 —— DESTRUCTIVE 已含此动作
-    return proxyPlugin('POST', '/memory/pending/approve', { id: String(body.id).trim(), confirm: true });
+    // 转正后立刻进正式库并参与召回，等于一次写�?—�?DESTRUCTIVE 已含此动�?    return proxyPlugin('POST', '/memory/pending/approve', { id: String(body.id).trim(), confirm: true });
   },
 
   'memory/pending/reject': async (body) => {
@@ -2343,30 +2182,26 @@ const ACTIONS = {
   },
 
   // ── 运维：Molly 本体（task-57）────────────────────────────────────────────
-  // stop / restart 会踢掉 QQ 登录，属于破坏性动作（DESTRUCTIVE 里已登记，缺 confirm 一律 409）。
-  // start 不破坏任何东西（已有进程时 start-molly.ps1 自己会跳过启动），所以不用 confirm。
-
-  /** 拉起 / 检查 Molly。不带 -Restart：那个开关会先杀 QQ。 */
+  // stop / restart 会踢�?QQ 登录，属于破坏性动作（DESTRUCTIVE 里已登记，缺 confirm 一�?409）�?  // start 不破坏任何东西（已有进程�?start-molly.ps1 自己会跳过启动），所以不�?confirm�?
+  /** 拉起 / 检�?Molly。不�?-Restart：那个开关会先杀 QQ�?*/
   'molly/start': async () => {
-    // SnowLuma 后端：控制台是普通权限，拉不起提权的 QQ；交给 SnowLuma-Boot 计划任务
+    // SnowLuma 后端：控制台是普通权限，拉不起提权的 QQ；交�?SnowLuma-Boot 计划任务
     if (currentBackend() === 'snowluma') {
       const r = await runTaskNow('SnowLuma-Boot', 60_000);
-      appendConsoleLog(`[molly] 控制台启动 Molly（SnowLuma/计划任务）：ok=${r.ok}`);
+      appendConsoleLog(`[molly] 控制台启�?Molly（SnowLuma/计划任务）：ok=${r.ok}`);
       return {
         ok: Boolean(r.ok),
         durationMs: r.durationMs,
         data: {
           backend: 'snowluma',
           task: 'SnowLuma-Boot',
-          note: '已触发 SnowLuma-Boot（清 QQ → 起 SnowLuma → 起原生 QQ）；需要登录时 QQ 窗口会弹出等你扫码。',
+          note: '已触�?SnowLuma-Boot（清 QQ �?�?SnowLuma �?起原�?QQ）；需要登录时 QQ 窗口会弹出等你扫码�?,
           taskResult: r,
         },
         error: r.error,
       };
     }
-    // 不加 LIVE 闸：这个动作不破坏任何东西——start-molly.ps1 自己会跳过
-    // 已经在跑的 NapCat，结尾只做一次状态检查。真正的破坏性动作是 stop / restart。
-    const r = await runPowerShell([], 180_000);
+    // 不加 LIVE 闸：这个动作不破坏任何东西——start-molly.ps1 自己会跳�?    // 已经在跑�?NapCat，结尾只做一次状态检查。真正的破坏性动作是 stop / restart�?    const r = await runPowerShell([], 180_000);
     const tail = String(r.stdout || '')
       .split(/\r?\n/)
       .filter((l) => l.trim())
@@ -2382,7 +2217,7 @@ const ACTIONS = {
     };
   },
 
-  /** 只停 QQ + NapCat。DSH 宿主、网关、控制台自己都不碰。 */
+  /** 只停 QQ + NapCat。DSH 宿主、网关、控制台自己都不碰�?*/
   'molly/stop': async () => {
     // SnowLuma 后端：QQ/SnowLuma 都是提权进程，普通权限杀不掉，走 SnowLuma-Stop 任务
     if (currentBackend() === 'snowluma') {
@@ -2395,7 +2230,7 @@ const ACTIONS = {
         data: {
           backend: 'snowluma',
           task: 'SnowLuma-Stop',
-          note: '已触发 SnowLuma-Stop（温和关 QQ + 结束 SnowLuma）；DSH 宿主、网关、控制台本身没动。',
+          note: '已触�?SnowLuma-Stop（温和关 QQ + 结束 SnowLuma）；DSH 宿主、网关、控制台本身没动�?,
           taskResult: r,
         },
         error: r.ok ? undefined : (r.error || '触发 SnowLuma-Stop 失败'),
@@ -2404,9 +2239,9 @@ const ACTIONS = {
     const r = stopMollyProcesses();
     const okAll = r.failed.length === 0;
     appendConsoleLog(
-      `[molly] 控制台停 Molly：杀掉 ${r.killed.map((k) => `${k.name}#${k.pid}`).join(',') || '（无）'}` +
-        `｜本来没在跑 ${r.notRunning.join(',') || '（无）'}` +
-        (okAll ? '' : `｜失败 ${r.failed.map((f) => `${f.name}#${f.pid}`).join(',')}`),
+      `[molly] 控制台停 Molly：杀�?${r.killed.map((k) => `${k.name}#${k.pid}`).join(',') || '（无�?}` +
+        `｜本来没在跑 ${r.notRunning.join(',') || '（无�?}` +
+        (okAll ? '' : `｜失�?${r.failed.map((f) => `${f.name}#${f.pid}`).join(',')}`),
     );
     return {
       ok: okAll,
@@ -2415,26 +2250,25 @@ const ACTIONS = {
         killed: r.killed,
         notRunning: r.notRunning,
         failed: r.failed,
-        note: '只停了 QQ 与 NapCat；DSH 宿主、网关、控制台本身没动。',
+        note: '只停�?QQ �?NapCat；DSH 宿主、网关、控制台本身没动�?,
       },
       error: okAll ? undefined : '有些进程没停掉：' + r.failed.map((f) => `${f.name}#${f.pid}`).join(', '),
     };
   },
 
-  /** 先停再起。中间留 3 秒让 NapCat 释放 6099 / 3001。 */
+  /** 先停再起。中间留 3 秒让 NapCat 释放 6099 / 3001�?*/
   'molly/restart': async () => {
-    // SnowLuma 后端：停 → 等 2 秒 → 起，全部走提权计划任务
-    if (currentBackend() === 'snowluma') {
+    // SnowLuma 后端：停 �?�?2 �?�?起，全部走提权计划任�?    if (currentBackend() === 'snowluma') {
       const stopped = await runTaskNow('SnowLuma-Stop', 60_000);
       await new Promise((resolve) => setTimeout(resolve, 2000));
       const started = await runTaskNow('SnowLuma-Boot', 60_000);
-      appendConsoleLog(`[molly] 控制台重启 Molly（SnowLuma/计划任务）：停=${stopped.ok} 起=${started.ok}`);
+      appendConsoleLog(`[molly] 控制台重�?Molly（SnowLuma/计划任务）：�?${stopped.ok} �?${started.ok}`);
       return {
         ok: Boolean(started.ok),
         durationMs: (stopped.durationMs || 0) + 2000 + (started.durationMs || 0),
         data: {
           backend: 'snowluma',
-          note: '已触发 SnowLuma-Stop → SnowLuma-Boot；中间有约 20~40 秒空窗，需要登录时会弹 QQ 扫码窗。',
+          note: '已触�?SnowLuma-Stop �?SnowLuma-Boot；中间有�?20~40 秒空窗，需要登录时会弹 QQ 扫码窗�?,
           stopped,
           started,
         },
@@ -2445,7 +2279,7 @@ const ACTIONS = {
     await new Promise((resolve) => setTimeout(resolve, 3000));
     const started = await runPowerShell([], 180_000);
     appendConsoleLog(
-      `[molly] 控制台重启 Molly：停 ${stopped.killed.map((k) => `${k.name}#${k.pid}`).join(',') || '（无）'}` +
+      `[molly] 控制台重�?Molly：停 ${stopped.killed.map((k) => `${k.name}#${k.pid}`).join(',') || '（无�?}` +
         `｜起 ${started.ok ? '成功' : '失败'}`,
     );
     return {
@@ -2467,8 +2301,7 @@ const ACTIONS = {
   },
 
   // ── 外部服务：网关（task-57）──────────────────────────────────────────────
-  // 密码与 token 只在内存里过一趟，**绝不写日志、绝不回显**。
-
+  // 密码�?token 只在内存里过一趟，**绝不写日志、绝不回�?*�?
   'gateway/usage': async () => {
     const lg = await gatewayPanelToken();
     if (!lg.ok) return { ok: false, status: 502, error: lg.error };
@@ -2525,10 +2358,7 @@ const ACTIONS = {
   },
 
   // ── 切模型（用户 m39817：仅限控制台）─────────────────────────────────────
-  // 为什么不让前端直连 7053：插件写接口要求 x-molly-admin，令牌只能待在服务端；
-  // 而且前端只认 /api/action/*，不给它第二个入口。
-  // 令牌没配时**不编造成功**：插件会回 403 并说明原因，原样透给前端。
-
+  // 为什么不让前端直�?7053：插件写接口要求 x-molly-admin，令牌只能待在服务端�?  // 而且前端只认 /api/action/*，不给它第二个入口�?  // 令牌没配�?*不编造成�?*：插件会�?403 并说明原因，原样透给前端�?
   'plugin/model-set': async (body) => {
     const patch = {};
     for (const role of ['chat', 'work', 'code']) {
@@ -2537,19 +2367,18 @@ const ACTIONS = {
       patch[role] = String(raw).trim();
     }
     if (!Object.keys(patch).length) {
-      return { ok: false, status: 400, error: 'chat / work / code 至少要给一个' };
+      return { ok: false, status: 400, error: 'chat / work / code 至少要给一�? };
     }
     if (!MODEL_SWITCH_TOKEN) {
-      // 本地先拦一道，说清楚是"服务端没配"，别让前端对着 403 猜
-      return {
+      // 本地先拦一道，说清楚是"服务端没�?，别让前端对着 403 �?      return {
         ok: false,
         status: 403,
-        error: '服务端还没配置切模型令牌（MOLLY_MODEL_SWITCH_TOKEN / console.json 的 modelSwitchToken），切模型现在用不了。',
+        error: '服务端还没配置切模型令牌（MOLLY_MODEL_SWITCH_TOKEN / console.json �?modelSwitchToken），切模型现在用不了�?,
         data: { needToken: true, roles: ['chat', 'work', 'code'] },
       };
     }
     const base = await resolveHostBase();
-    if (!base) return { ok: false, status: 503, error: '没探到 DSH 宿主端口' };
+    if (!base) return { ok: false, status: 503, error: '没探�?DSH 宿主端口' };
     const r = await fetchJson(
       base + '/dsh-qq-whale/model',
       {
@@ -2564,13 +2393,12 @@ const ACTIONS = {
       // 403 把服务端原文透出去：前端靠它提示"服务端还没配置切模型令牌"
       return { ok: false, status: r.status || 502, error: String(msg), data: r.data ?? null };
     }
-    appendConsoleLog(`[model] 控制台切模型：${Object.entries(patch).map(([k, v]) => `${k}=${v}`).join(' ')}`);
+    appendConsoleLog(`[model] 控制台切模型�?{Object.entries(patch).map(([k, v]) => `${k}=${v}`).join(' ')}`);
     return { ok: true, data: r.data ?? null };
   },
 
   // ── 外部服务：心跳（task-57）─────────────────────────────────────────────
-  // 服务器挂了不能把整页拖垮：远端不可达照样 200，前端按 remote.ok 显示。
-
+  // 服务器挂了不能把整页拖垮：远端不可达照样 200，前端按 remote.ok 显示�?
   'heartbeat/status': async () => {
     const local = readHeartbeatLocal();
     const cfg = readJson(HB_CONFIG, null);
@@ -2597,11 +2425,10 @@ const ACTIONS = {
   },
 
   // ── 外部服务：PushPlus 推送开关（task-57）────────────────────────────────
-  // 只改 notify.enabled 一个布尔值；写盘前备份；返回值里 token **打码**。
-
+  // 只改 notify.enabled 一个布尔值；写盘前备份；返回值里 token **打码**�?
   'pushplus/status': async () => {
     const cur = readJson(WD_CONFIG, null);
-    if (!cur) return { ok: false, status: 500, error: '读不到 watchdog-config.json' };
+    if (!cur) return { ok: false, status: 500, error: '读不�?watchdog-config.json' };
     const notify = cur.notify && typeof cur.notify === 'object' ? cur.notify : {};
     const tk = typeof notify.token === 'string' ? notify.token : '';
     return {
@@ -2617,19 +2444,18 @@ const ACTIONS = {
 
   'pushplus/toggle': async (body) => {
     if (typeof body?.enabled !== 'boolean') {
-      return { ok: false, status: 400, error: 'enabled 必须是 boolean（true / false）' };
+      return { ok: false, status: 400, error: 'enabled 必须�?boolean（true / false�? };
     }
     const cur = readJson(WD_CONFIG, null);
-    if (!cur) return { ok: false, status: 500, error: '读不到 watchdog-config.json' };
+    if (!cur) return { ok: false, status: 500, error: '读不�?watchdog-config.json' };
     const notify = cur.notify && typeof cur.notify === 'object' ? cur.notify : {};
     const before = notify.enabled === true;
-    // 备份：配置写坏了 watchdog 就不推了，得能手工回滚
-    const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+    // 备份：配置写坏了 watchdog 就不推了，得能手工回�?    const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
     const bak = `${WD_CONFIG}.bak-${stamp}`;
     try {
       fs.copyFileSync(WD_CONFIG, bak);
     } catch (err) {
-      return { ok: false, status: 500, error: '备份配置失败：' + errText(err) };
+      return { ok: false, status: 500, error: '备份配置失败�? + errText(err) };
     }
     const next = { ...cur, notify: { ...notify, enabled: body.enabled } };
     try {
@@ -2638,13 +2464,13 @@ const ACTIONS = {
       return { ok: false, status: 500, error: '写配置失败：' + errText(err) };
     }
     const tk = typeof notify.token === 'string' ? notify.token : '';
-    appendConsoleLog(`[pushplus] 控制台把推送 → ${body.enabled ? '开' : '关'}（备份 ${path.basename(bak)}）`);
+    appendConsoleLog(`[pushplus] 控制台把推�?�?${body.enabled ? '开' : '�?}（备�?${path.basename(bak)}）`);
     return {
       ok: true,
       data: {
         enabled: body.enabled,
         changed: before !== body.enabled,
-        // 只露首尾各 4 位，中间打码；没配 token 就照实说
+        // 只露首尾�?4 位，中间打码；没�?token 就照实说
         token: tk ? `${tk.slice(0, 4)}****${tk.slice(-4)}` : null,
         hasToken: Boolean(tk),
         type: typeof notify.type === 'string' ? notify.type : null,
@@ -2655,11 +2481,7 @@ const ACTIONS = {
 };
 
 /**
- * 触发一个提权计划任务（SnowLuma 的「重新登录 / 全量重启」都走它）。
- * 为什么要绕一层计划任务：console-server 自己以 Limited 权限跑，直接调
- * snowluma-start.ps1 注入不了提权的 QQ.exe；计划任务以 RunLevel Highest 跑，能注入。
- * schtasks 在中文系统输出 GBK，这里只认退出码，不解析输出。
- */
+ * 触发一个提权计划任务（SnowLuma 的「重新登�?/ 全量重启」都走它）�? * 为什么要绕一层计划任务：console-server 自己�?Limited 权限跑，直接�? * snowluma-start.ps1 注入不了提权�?QQ.exe；计划任务以 RunLevel Highest 跑，能注入�? * schtasks 在中文系统输�?GBK，这里只认退出码，不解析输出�? */
 async function runTaskNow(taskName, timeoutMs = 60_000) {
   return new Promise((resolve) => {
     const t0 = Date.now();
@@ -2689,7 +2511,7 @@ async function runTaskNow(taskName, timeoutMs = 60_000) {
   });
 }
 
-/** 跑 start-molly.ps1（可能很久，输出也大） */
+/** �?start-molly.ps1（可能很久，输出也大�?*/
 async function runPowerShell(args, timeoutMs) {
   return new Promise((resolve) => {
     const t0 = Date.now();
@@ -2698,14 +2520,9 @@ async function runPowerShell(args, timeoutMs) {
     let child;
     try {
       /*
-       * 为什么要在 PowerShell 里先改输出编码：
-       * start-molly.ps1 里全是中文 Write-Host，而 Windows PowerShell 5.1 默认用
-       * 系统 ANSI（这台是 cp936/GBK）往管道里写。父进程 Node 按 utf8 解就会变成
-       * 「Molly ȫ��������」这样的乱码。
-       *
-       * [Console]::OutputEncoding 只影响本进程的标准输出编码，不碰系统设置；
-       * 设成 UTF8 后，Node 端直接 toString('utf8') 就是正确的中文。
-       */
+       * 为什么要�?PowerShell 里先改输出编码：
+       * start-molly.ps1 里全是中�?Write-Host，�?Windows PowerShell 5.1 默认�?       * 系统 ANSI（这台是 cp936/GBK）往管道里写。父进程 Node �?utf8 解就会变�?       * 「Molly ȫ��������」这样的乱码�?       *
+       * [Console]::OutputEncoding 只影响本进程的标准输出编码，不碰系统设置�?       * 设成 UTF8 后，Node 端直�?toString('utf8') 就是正确的中文�?       */
       const pre = "$ErrorActionPreference='Continue'; try{[Console]::OutputEncoding=[Text.Encoding]::UTF8}catch{}; & ";
       child = spawn(
         PS_EXE,
@@ -2741,18 +2558,18 @@ async function runPowerShell(args, timeoutMs) {
   });
 }
 
-/** 统一执行入口：校验 confirm → 跑 → 归一化响应 */
+/** 统一执行入口：校�?confirm �?�?�?归一化响�?*/
 async function runAction(res, name, body) {
   const fn = ACTIONS[name];
   if (!fn) {
     return sendJson(res, 404, {
       ok: false,
-      error: '未知动作：' + name,
+      error: '未知动作�? + name,
       data: { available: Object.keys(ACTIONS) },
     });
   }
   if (DESTRUCTIVE.has(name) && body?.confirm !== true) {
-    return sendJson(res, 409, { ok: false, action: name, status: 409, error: '这个动作需要 confirm:true 才执行' });
+    return sendJson(res, 409, { ok: false, action: name, status: 409, error: '这个动作需�?confirm:true 才执�? });
   }
   const t0 = Date.now();
   let out;
@@ -2774,8 +2591,7 @@ async function runAction(res, name, body) {
   if (out.stderr) payload.stderr = String(out.stderr).slice(-8000);
   if (out.error) payload.error = out.error;
   if (out.status && !payload.ok) {
-    // 契约 §3：失败体统一带 status，前端不用去读 HTTP 层
-    payload.status = out.status;
+    // 契约 §3：失败体统一�?status，前端不用去�?HTTP �?    payload.status = out.status;
     if (!payload.error) payload.error = 'HTTP ' + out.status;
   }
   if (!payload.ok && !payload.error) payload.error = '动作失败';

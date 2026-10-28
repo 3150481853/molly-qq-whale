@@ -1053,6 +1053,8 @@ export function apply(root, rawConfig = {}) {
   let proactiveTimer = null
   let pestTimer = null
   let pestKickTimer = null
+  let weeklyLetterTimer = null
+  let weeklyLetterKick = null
   // 「已关闭」日志只打一次：pestTick 每 15 分钟一轮，关掉之后每轮都记就成刷屏了
   let pestDisabledLogged = false
   let disposers = []
@@ -1523,6 +1525,31 @@ export function apply(root, rawConfig = {}) {
         'info',
         `出气筒已开启：对象 ${engine.pest.targets.join(',')}｜日额度 ${engine.pest.dailyCap}｜每 ${Math.round(tick / 60000)} 分钟检查一次`,
       )
+    }
+
+    /*
+     * 周信定时器（茉莉花 P0-3，2026-10-30）。
+     *
+     * 为什么单独一个 timer 而不是塞进主动联系：信是「每周一封」的叙事，
+     * 主动联系是「想起谁就找谁」的社交动作，两者的开关和使用者期待都不一样。
+     * 检查频率 30 分钟一次足够——内部按 lastLetterWeek 幂等，一周只会真写一封。
+     * 启动 1 分钟后先试一次：重载/重启那周如果还没写，补上就是。
+     */
+    if (config.jasmineLetter !== false) {
+      const weeklyTick = () => {
+        if (!engine || !state.connected || !config.enabled) return
+        engine
+          .maybeWriteWeeklyLetter()
+          .then((r) => {
+            if (r?.ok) logger('info', `周信已发出（${r.weekKey}，${r.chars} 字）`)
+          })
+          .catch((e) => logger('debug', `周信检查失败: ${e?.message || e}`))
+      }
+      weeklyLetterTimer = setInterval(weeklyTick, 30 * 60 * 1000)
+      if (typeof weeklyLetterTimer?.unref === 'function') weeklyLetterTimer.unref()
+      weeklyLetterKick = setTimeout(weeklyTick, 60000)
+      if (typeof weeklyLetterKick?.unref === 'function') weeklyLetterKick.unref()
+      logger('info', '周信已开启（每 30 分钟检查一次，一周只写一封）')
     }
   }
 

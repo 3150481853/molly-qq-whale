@@ -196,14 +196,29 @@ export function buildSystemPrompt(input, deps) {
       sp += `\n\n# 你记得的事\n${memText}`
     }
     // 关键词召回：最近说的话里有关键词，去记忆里捞相关的
+    //
+    // 2026-10-30（茉莉花 P0-1）：把本轮召回到的 id 回传给引擎。
+    // 出口核对要回答的是「她引用的记忆编号是不是真召回过」——只认这一轮、
+    // 不认历史轮次，所以每次拼提示词都先清空再填，避免把上一轮当成这一轮的出处。
+    try {
+      deps.noteRecalled?.([])
+    } catch {
+      /* 回传失败不影响拼提示词 */
+    }
     if (lastUserText) {
-      const related = deps.memory
+      const recalled = deps.memory
         .recall({
           qq,
           query: lastUserText.slice(0, 40),
           limit: degraded ? deps.memoryWindow.degradedQueryLimit : deps.memoryWindow.queryLimit,
         })
-        .filter((e) => e.who !== userName && !(qq && String(e.qq || '') === String(qq)))
+        .filter(Boolean)
+      try {
+        deps.noteRecalled?.(recalled.map((e) => e.id).filter(Boolean))
+      } catch {
+        /* 同上 */
+      }
+      const related = recalled.filter((e) => e.who !== userName && !(qq && String(e.qq || '') === String(qq)))
       if (related.length) {
         sp += `\n\n# 其他相关记忆\n${related.map((e) => `- ${e.text}`).join('\n')}`
       }

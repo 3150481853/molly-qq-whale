@@ -50,6 +50,19 @@ const SECRETS_FILE = process.env.MOLLY_RELEASE_SECRETS || path.join(process.cwd(
 
 /* ── 每个版本的「本版特性」：写进 release 正文，让仓库读者一眼看到改了什么 ── */
 const RELEASE_FEATURES = {
+  'v1.1.6-preview.4': [
+    '**预览版（1.1.6 第四个）**：新增独立记忆底座「茉莉花（Jasmine）」并把出口核对 / 压缩提醒 / 周信 / token 账本 / 群聊信号接进主链路。预览版可能有毛刺，稳妥请留在 `v1.1.5-A-Hotfix.1`',
+    '**茉莉花 0.1.0 第一次随包发布**：仓库根 `jasmine/` 是一个零依赖纯 Node ESM 的独立包（双卡存储、RRF 召回、活跃天衰减、出口核对、压缩提醒、周信模板、token 账本、群聊信号共八个模块）。它**不依赖 DSH、不依赖 QQ**，可以整包挪到别的 Agent 架构里；同时同一份源码也发布在仓库的 `jasmine` 独立分支（tag `jasmine-v0.1.0`），接入说明见 `jasmine/docs/PORTING.md`',
+    '**发送前核对（P0-1）**：回复里引用记忆编号必须来自本轮召回集合（对不上=编造）、说了「答应/说好/承诺」要查未闭合清单（对不上=失约）、复读三线（4-gram ≥0.60 / 句级余弦 ≥0.85 / 前 20 字全同，连续两次才标记）、迎合三条件同时成立才 flag。**只记 trace、不改写、不阻拦**——先看几天日志再决定要不要拦',
+    '**上下文压缩提醒（P0-2）**：三档（可压 ≥5 万且距上次 ≥1 万 / 窗口 75% / 95%），提示只追加在**本轮请求末尾**、不写进历史，同一回合最多一次；能回收不足 5000 token 不提醒（防高频小折）',
+    '**每周一封信（P0-3）**：每周一给主人写一封上周回顾（`summarizeWeek` 的事实 → 模板成信 → 私聊推送 → 落成一条 `letter` 记忆），一周只写一封；模板拼，不调模型',
+    '**token 账本（P1-5）**：每次模型调用按 `purpose`（chat / proactive / summary / verify / compaction / tool）记一行，`/state` 与账本文件都能查；价格表由宿主提供，项目不内置价格',
+    '**群聊四档信号（P1-6）**：被叫 1.0 / 在说我 0.5 / 接我话 0.2 / 纯闲聊 0.01。当前只做最确定的一档——「这条 @ 的是别人」时一票否决，其余档位只进决策日志（`/state.decisions` 新增 `signal` / `signalScore`），不擅自改她的脾气',
+    '**出问题可以单独关**：`jasmineVerify` / `jasmineCompact` / `jasmineLetter` / `jasmineSignal` 任一设 `false`，即回到接入前行为，不用回退整个版本',
+    '**数据落点**：`<dataDir>/jasmine/`（`jasmine.json` / `ledger.jsonl` / `_archive.json` / `state.json` / `ledger-tokens.json` / `trace.jsonl`）。删掉整个目录等于清零这套东西，聊天与旧记忆（`memory/`）不受影响',
+    '本版**不含语音包**：音色包仍单独下 Releases 里的 `voice-pack-v1.2`（301 MB）',
+    '升级：直接覆盖旧的插件包；本版会多一个 `jasmine/` 目录和 `<dataDir>/jasmine/` 数据目录，配置文件不用改。想回退见 `docs/CHANGELOG.md` 对应条目的「退回」段',
+  ],
   'v1.1.6-preview.3': [
     '**预览版（1.1.6 第三个）**：第二批记忆改造（RRF 融合召回 / 归档 / 周聚合 / 压缩标记）+ 超预算不再降智 + 远程指令信箱。预览版可能有毛刺，稳妥请留在 `v1.1.5-A-Hotfix.1`',
     '**上一版漏带的那批记忆改造，这次真的进包了**：`v1.1.6-preview.2` 的构建跑在这批代码落地之前，所以 GitHub 上的 preview.2 里没有它们；本版是第一次真正打包发出（细节见 `docs/CHANGELOG.md` 的「第二批记忆改造续记」）',

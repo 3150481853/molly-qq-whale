@@ -7,6 +7,131 @@
 
 ---
 
+## 2026-10-31 · 茉莉花（Jasmine）记忆系统 0.1.0 发布 + P0/P1 接入（**preview.4**）
+
+> 主人（2026-10-31）：「开始做p0和p1，项目代码命名为茉莉花（Jasmine）记忆系统，做好后发布GitHub作为独立的分支更新（可供移植到其他人的其他架构上使用，又默认包含在molly的每一次更新中）」
+
+**新包：`jasmine/`（仓库根，零依赖纯 Node ESM，Node ≥ 18）**
+
+- 八个模块：`src/store.mjs`（双卡：衰减卡 `jasmine.json` + 原始账 `ledger.jsonl`，归档 `_archive.json`）、
+  `src/recall.mjs`（RRF 两臂融合，K=60，关键词 0.6 / 权重 0.4）、`src/decay.mjs`（七类记忆、活跃天衰减、
+  只读不写回）、`src/verify.mjs`（出口核对）、`src/compact.mjs`（压缩三档提醒）、`src/letter.mjs`（周信模板）、
+  `src/ledger.mjs`（token 账本，按 purpose 分组）、`src/signal.mjs`（群聊四档信号）。
+- 测试：`node --test "test/**/*.test.mjs"`，39 用例（store/features）。
+- 文档：`README.md`、`docs/PORTING.md`（宿主接入 10 步）、`docs/DESIGN.md`（取舍与被否掉的方案）。
+- 发布：随 Molly 每次更新一起发（`tools/build-publish.mjs` 的 `DIRS` 加了 `['jasmine','jasmine',true]`），
+  同时在发布仓库的 **`jasmine` 孤儿分支**独立维护（tag `jasmine-v0.1.0`）。
+
+**接入点（插件侧）**
+
+1. **P0-1 出口核对**：新增 `lib/jasmine-bridge.mjs`（按 `../jasmine/index.mjs` 动态加载，失败降级为「无记忆系统」）；
+   `engine.js` 新增 `verifyOutgoing()`，在 `deliver()` 的 45 秒去重之后、真正 `sendPayload` 之前调用；
+   `engine-context.js` 召回后 `noteRecalled(ids)` 回传本轮 id 作为「出处白名单」。
+   只记 trace（`<dataDir>/jasmine/trace.jsonl`，5MB 轮转）、**不改写、不阻拦**。
+2. **P0-2 压缩提醒**：`engine.js` 新增 `maybeHintCompaction()`，`buildMessages()` 之后按三档
+   （可压 ≥5万且增量 ≥1万 / 75% / 95%，能回收 <5000 不提醒）往**本轮请求末尾**追加一行，
+   不写进历史；`contextWindowTokens`、`compactMinReclaim` 可配。
+3. **P0-3 周信**：`main.js` 加 30 分钟定时器 + 启动 60 秒首检；`engine.js` 新增 `maybeWriteWeeklyLetter()`，
+   `summarizeWeek(weekKey)` → `buildLetter()` → 写回一条 `letter` 记忆 → 私聊主人；一周只写一封（状态落 `state.json`）。
+4. **P1-5 token 账本**：`recordUsage()` 在原有 budget 记账之后追加 jasmine 账本（model + purpose + 输入/缓存/输出）。
+5. **P1-6 群聊四档信号**：`shouldRespond()` 外包一层，只做「这条 @ 的是别人（score=0）」一票否决；
+   其余档位只进 `decisionLog`（新增 `signal`/`signalScore` 字段）。
+6. `web.js` 的 `/state` 增加 `jasmine` 字段（available / checked / flagged / lastConstraint / compact / letter / recalledIds / loader）。
+
+**开关（默认全开，出问题单独关）**：`jasmineVerify` `jasmineCompact` `jasmineLetter` `jasmineSignal`，
+任一设 `false` 即回退到接入前行为。
+
+**验证**：`node --check` 全过；离线自检 `tools/jasmine-bridge-selftest.mjs` **12/12**、
+`out/_jasmine_engine_check.mjs`（压缩三档 + 周信）**15/15**、`out/_jasmine_ledger_check.mjs` **9/9**、
+`out/_jasmine_signal_check.mjs` **11/11**；jasmine 包内 **39/39**。
+
+**已知限制**：线上插件实例尚未重载，`/state.jasmine` 要等 DSH 重启后才出现；
+核对层是规则 + 统计，不做语义级事实核验。
+
+**退回**：四个开关任一设 `false` 只关单项；要整体回到 preview.3 的行为，
+把 `jasmineVerify/jasmineCompact/jasmineLetter/jasmineSignal` 全设 `false`（代码留着不执行），
+或者覆盖回 preview.3 的插件包。`<dataDir>/jasmine/` 删掉即清零，不影响 `memory/` 里的旧记忆。
+
+---
+
+## 2026-10-28 · 表情包/语音「发图宣告变成文字」修复（未升版本号，仍是 preview.3）
+
+> 主人（2026-10-28 00:1x）：「为什么 Molly 表情包又开始文字了」→ 排查后我给了两个修法，主人选 **A**（出口兜底）：
+> 「A：把清洗正则放宽到「（我(发|打|甩|扔|贴|丢)了…(表情包|图|图片)…）」→ 认下来，能抽关键词就发对应图，
+> 抽不到随机一张；纯动作旁白（我闭眼了）不补图、只删旁白」。
+
+**现象（真机取证，群 666666666，2026-10-27 23:52 ~ 10-28 00:04）**
+
+- 她开始用**文字演动作**，其中最要命的一条：`00:00:06` 消息号 `-77507227`
+  「收到，鱼要睡了。都散了吧，熬夜的那几个也是。**（我打了张打哈欠的图，先撤了）**」——
+  前后三分钟里**没有任何图片消息**，等于"说我发了图，其实一个像素都没发"。
+- 同窗口还有三条纯旁白：「（我缩回被窝里了）」「（我团成一团，缩进被窝里了）」「（我闭眼了）」。
+- 分时段统计（群内最近 900 条里属于她的）：`23:00` 时段 67 条 / 11 张图 / **0** 条括号动作；
+  `00:00` 时段 12 条 / 2 张图 / **4** 条括号动作 / 其中 1 条"假发图"。
+- **当天上午的两种变体（2026-10-28 10:46 / 11:23 真机，主人补齐）**：
+  `（发了张表情包：眯眼）`、`（发了张表情包：无语）` —— **没有主语「我」**；
+  主人还反馈「**发语音也会带着（我发送了一个表情：xx）**」—— 动词是「发送」、
+  名词是「表情」（不带"包"），而且这句会被一起送进 TTS **真念出来**。
+
+**根因：她在模仿自己的历史**
+
+1. 她真发出图后，`deliver()` 往 history 里写的是人话 `（我发了张表情包：${query}）`
+   （`lib/engine.js:5650` 那段，初衷是别让模型学到 `[表情包:x]` 这种协议格式）。
+2. 这段 history 下一轮原样喂回，模型学会了句式，开始**改写**成「我打了张打哈欠的图」——
+   只写句子、不写 `<sticker>` 标记，于是没有任何图发出去。
+3. 出口护栏只认两种**精确**写法：`[表情包:x]`（`lib/persona.js:303`）和
+   `（我发了(一张|张)?(表情包|图|图片)：x）`（`lib/persona.js:315`）。动词一换、
+   中间多几个修饰词就全漏成正文 —— 用正则实测：`（我打了张打哈欠的图，先撤了）`、
+   `（我甩了张表情包：睡觉）` **都不匹配**。
+4. 顺带确认不是功能坏了：图库 `scan()` = 557 张 / 跳过 0、`catalogText()` 222 字符标签齐全、
+   `/state.stats` 里 `stickersSent=26`、`stickerFallback=0`、`unmatched=17`（没命中也会改随机图）。
+
+**改动（只动 `lib/persona.js`，出口清洗层）**
+
+1. **改写式发图宣告 → 真出图**（`lib/persona.js:320` 起）：动词放宽到 `发/发送/打/甩/扔/贴/丢/拍/做`，
+   主语「我」改为**可选**，名词补上「表情」（不带"包"），中间允许任意修饰；关键词抽取顺序 =
+   **冒号后的内容 → 「X 的图」里的 X → 空**（空则交 `engine.resolveSticker()` 随机挑一张）。
+   转换结果是 `<sticker>关键词</sticker>`，走原有出图链路。
+2. **纯旁白动作 → 只删旁白**（`lib/persona.js:354` 起）：`（我……了）` 这类自述动作整段去掉，
+   正文保留；**保险**：删完若整条为空，则保留原文，绝不发空气泡。
+3. 新增 `pickStickerKeyword()`（`lib/persona.js:458`）负责上面那套关键词抽取（纯字符串处理，不查图库）。
+4. **语音链路同步清洗**（`lib/voice.js:48` `cleanVoiceText()`）：送进 TTS 之前把括号里提到
+   「图 / 表情 / 表情包」的短句剔掉（`（我发送了一个表情：可爱）` → 空），避免她把自己"发了个表情"
+   当台词念出来；不含图/表情的普通括号（如「（好好笑）」）照旧保留。
+5. 语音假宣告的两条护栏也一并放宽（`lib/persona.js:348-352`）：主语可选、动词补「发送」。
+
+**验证（2026-10-28 00:2x / 11:5x 两轮实测）**
+
+- 新增回归 `tools/test-sticker-claim.mjs`：**20 通过 / 0 失败**
+  （改写式三种形态、无主语版、`发送`+`表情` 版、无关键词仍出图、原有两种护栏不回归、
+  纯旁白只删旁白、只有旁白时不变空、普通插入语/语音宣告/正常句子不误伤、
+  语音清洗剔掉「发了张表情包」且不误伤普通括号）。
+- 既有 `tools/test-sanitize.mjs`：**33 通过 / 0 失败**（格式兜底没被改坏）。
+- `node --check` 通过：`lib/persona.js`（`BB3DF64B…`）、`lib/voice.js`（`26E985BB…`）；
+  部署副本与源目录逐字节一致；插件关开重载后 `/dsh-qq-whale/state`：
+  `enabled=true`、`link=online`、`stickers.count=557`、`plugins.failed=[]`。
+- 行为预期：上面那句改写现在会变成**「收到，鱼要睡了。都散了吧，熬夜的那几个也是。」+ 一张图**
+  （关键词 `打哈欠` → 图库匹配不到就随机，比甩一句假话强）；语音里夹的同一句不再被念出来。
+
+**已知限制 / 没做的**
+
+- **只做了 A（出口兜底）**：B（改 history 记录句式，从源头让模型学不到）与
+  C（system prompt 结尾再钉一句）主人这次没选，没动。A 是"改写被认下来变真图"，
+  模型还会继续改写，只是不会再漏成文字。
+- 纯旁白动作在**整条只有旁白**时仍会保留原文（防空气泡的代价）；要彻底不出现，得上 B/C。
+- 图库标签抽不中时是**随机图**，可能与语义不完全吻合；`unmatched` 计数继续累积，用来评估图库标签质量。
+
+**退回**
+
+```bash
+git checkout -- plugin/dsh-qq-whale/lib/persona.js plugin/dsh-qq-whale/lib/voice.js
+```
+
+部署侧：把旧的 `persona.js` / `voice.js` 拷回 `…\node_modules\dsh-qq-whale\lib\` → `plugin_manager` 关开一次。
+数据侧无需处理（这次只改出站清洗，不碰记忆/账本）。
+
+---
+
 ## 2026-10-27 · v1.1.6-preview.3（预览版，已推送 GitHub）
 
 > 主人（2026-10-27 23:2x，本会话）：「推送一下Molly现在的版本，作为1.1.6的下一个预览版」，确认版本号：「预览3」

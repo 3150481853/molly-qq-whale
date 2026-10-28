@@ -109,6 +109,13 @@ const recallUtil = await import(sub('./engine-recall.js'))
 // 群发豁免（2026-10-24，主人 m00480 需求①）：对方明确要求/第二次坚持「就在群里发」时，
 // 别再推私聊、别把长文截成一句。判定与分条都是纯函数，放 lib/group-echo.js。
 const groupEchoUtil = await import(sub('./group-echo.js'))
+/*
+ * 茉莉花记忆系统（2026-10-30，主人：P0-1 出口核对）。
+ *
+ * 桥接层自己找包位置（插件自带 / plugin/jasmine / 仓库根 jasmine），
+ * 找不到就静默降级——记忆系统是可选组件，绝不能因为它在不在而让消息发不出去。
+ */
+const jasmineBridge = await import(sub('./jasmine-bridge.mjs'))
 
 const SCENE_PRIVATE = 'private'
 const SCENE_MENTION = 'group_mention'
@@ -255,6 +262,29 @@ export class ChatEngine {
           ? null
           : { keyFile: String(config.memoryKeyFile || '').trim() || undefined },
     })
+
+    /*
+     * 茉莉花核对接缝（2026-10-30，主人 P0-1「出口核对」）。
+     *
+     * _recalledIds：本轮真正召回复进上下文的记忆 id，由 engine-context 通过
+     * deps.noteRecalled 回填；deliver 里读它，用来核「她说的出处是不是真召回过」。
+     * _jasmine：预热好的模块句柄。预热是异步的，首轮没热上就跳过核对，不拦消息。
+     */
+    this._recalledIds = []
+    this._jasmine = null
+    this._jasmineVerify = { checked: 0, flagged: 0, lastConstraint: '', lastAt: 0, lastIssues: [] }
+    /*
+     * P0-2 压缩提醒的状态（和 _jasmineVerify 一样只活在内存里，重启归零）。
+     * lastCompactable 记「上次提醒时可压缩量」，下一轮用差值算增长档；
+     * lastAt 用来在 /state 里看最后一次提醒是哪一轮。
+     */
+    this._jasmineCompact = { at: 0, tier: 'none', used: 0, limit: 0, reclaim: 0, compactable: 0 }
+    jasmineBridge
+      .preloadJasmine(logger)
+      .then((mod) => {
+        this._jasmine = mod
+      })
+      .catch(() => {})
 
     /**
      * 语音合成（2026-10-22，用户 m04697/m04855）。
@@ -1146,7 +1176,7 @@ export class ChatEngine {
    * 私聊必回（除非睡觉且不是被叫醒）；群里按意愿分掷骰子。
    */
   shouldRespond({ scene, ev, norm, conv }) {
-    return engineDecision.shouldRespond({ scene, ev, norm, conv }, {
+    const verdict = engineDecision.shouldRespond({ scene, ev, norm, conv }, {
       scenes: SCENES,
       isAllowedUser: (id) => this.isAllowedUser(id),
       isAllowedGroup: (id) => this.isAllowedGroup(id),
@@ -1161,6 +1191,53 @@ export class ChatEngine {
       nickname: this.selfNickname(),
       groupCardBases: this.groupCardBase,
     })
+
+    /*
+     * P1-6：群聊四档信号（茉莉花 signal）。
+     *
+     * 这里**不重写**原有的意愿算法，只在它上面补两条它看不见的信息：
+     *   1. 「这条消息是 @ 别人的，不是找我」——现有链路里也是旁观，会按意愿掷骰子，
+     *      偶尔会插一句不该插的话。这一档直接一票否决（score=0）。
+     *   2. 把档位/分数记进决策日志：以后调阈值时能回答「这条为什么回/不回」，
+     *      而不是只看一个意愿分。
+     * 其余档位（called/aboutMe/continuing/chatter）只做标注，不改判定——
+     * 改判定要等主人看几天日志再定，别一次把她的脾气改没了。
+     */
+    try {
+      const mod = this._jasmine
+      if (
+        mod &&
+        typeof mod.scoreSignal === 'function' &&
+        this.config?.jasmineSignal !== false &&
+        scene !== SCENES.PRIVATE &&
+        ev?.message_type === 'group' &&
+        verdict
+      ) {
+        const lastSelfAt = Number(conv?.lastSelfAt) || 0
+        const msSinceMyLast = lastSelfAt ? this.now() - lastSelfAt : Infinity
+        // 「@ 别人」：OneBot 的 at 段里有非自己、也非全体成员的目标（@全体不算）
+        const atSomeoneElse = Array.isArray(norm?.ats)
+          ? norm.ats.some((q) => String(q) !== 'all' && String(q) !== String(this.selfId))
+          : false
+        const signal = mod.scoreSignal({
+          text: String(norm?.text || ''),
+          isAtMe: Boolean(norm?.isAtMe) || scene === SCENES.MENTION,
+          atSomeoneElse,
+          names: [this.selfNickname(), 'Molly', '莫莉'].filter(Boolean),
+          continuesMe: msSinceMyLast <= 45000,
+          msSinceMyLast,
+        })
+        verdict.signal = signal
+        if (signal.score === 0 && verdict.yes) {
+          verdict.yes = false
+          verdict.reason = '在叫别人（signal=0）'
+          verdict.signalVetoed = true
+        }
+      }
+    } catch (err) {
+      this.logger?.('debug', `群聊信号打分失败：${err?.message || err}`)
+    }
+    return verdict
   }
 
   /**
@@ -1187,6 +1264,9 @@ export class ChatEngine {
         recentSelf: verdict?.recentSelf ?? null,
         recentOthers: verdict?.recentOthers ?? null,
         continuesMe: verdict?.continuesMe ?? null,
+        // P1-6：群聊四档信号（called/aboutMe/continuing/chatter），没有就是没打分
+        signal: verdict?.signal?.tier ?? null,
+        signalScore: verdict?.signal ? Number(verdict.signal.score) : null,
       })
       if (this.decisionLog.length > 40) this.decisionLog.splice(0, this.decisionLog.length - 40)
     } catch {}
@@ -4461,6 +4541,8 @@ export class ChatEngine {
     if (stall.hardStop) system += `\n\n${this.stallStopSection(stall.misses)}`
     // 超预算不等于降智：上下文照给全量，只是换车道（见上面的注释）。
     const messages = await this.buildMessages(conv, norm, userName, { degraded: false })
+    // P0-2：上下文快到点了就在**这次请求末尾**贴一句提醒（不写历史、不拦回复）
+    this.maybeHintCompaction({ messages, system })
 
     /*
      * 带图的轮次把输出预算抬高（2026-10-26，主人 m04893「看懂 GIF」连带发现）。
@@ -4998,9 +5080,75 @@ export class ChatEngine {
         provider,
         model,
       })
+      // 茉莉花账本（P1-5）：再记一份「可移植、带价格」的流水，与 Molly 内部预算账本解耦。
+      try {
+        const led = this.jasmineLedger?.()
+        if (led) {
+          led.record({
+            model: String(model || provider || 'unknown'),
+            purpose: channel === 'research' || channel === 'work' || channel === 'code' ? 'tool' : 'chat',
+            inTokens: prompt || 0,
+            outTokens: (completion || 0) + (reasoning || 0),
+            cachedIn: cached || 0,
+          })
+        }
+      } catch (err) {
+        this.logger?.('debug', `茉莉花账本写入失败：${err?.message || err}`)
+      }
     } catch (err) {
       // 记账失败绝不影响聊天
       this.logger('debug', `记账失败（${channel}）：${err?.message || err}`)
+    }
+  }
+
+  /**
+   * 茉莉花 token 账本（P1-5，懒创建）。
+   *
+   * 为什么不直接用 this.budget：预算账本是 Molly 自己的结算口径（credit / 日额度 /
+   * 通道配额），而这里是「给用户看的可移植账本」——按模型 × 用途 × 天聚合，
+   * 缓存命中单独一列（命中价与未命中价差 50 倍，这一列才是省钱的证据）。
+   * 价格表来自 config.jasminePrices（元/百万 token）；不配就只统计 token 不算钱。
+   */
+  jasmineLedger() {
+    try {
+      if (this._jasmineLedger) return this._jasmineLedger
+      const mod = this._jasmine
+      if (!mod || typeof mod.TokenLedger !== 'function') return null
+      const dir = path.join(String(this.config?.dataDir || this.config?.memoryDir || 'out'), 'jasmine')
+      const prices = this.config?.jasminePrices
+      this._jasmineLedger = new mod.TokenLedger({
+        file: path.join(dir, 'ledger.jsonl'),
+        prices: prices && typeof prices === 'object' ? prices : {},
+        logger: this.logger,
+      })
+      return this._jasmineLedger
+    } catch {
+      return null
+    }
+  }
+
+  /** 账本汇总（给 /state 与控制台用；60 秒内复用同一份，别每次请求都重读文件）。 */
+  jasmineLedgerSummary({ force = false } = {}) {
+    try {
+      const now = this.now()
+      const cache = this._jasmineLedgerCache
+      if (!force && cache && now - cache.at < 60_000) return cache.value
+      const led = this.jasmineLedger()
+      if (!led || typeof led.summary !== 'function') return null
+      const dayStart = new Date(now)
+      dayStart.setHours(0, 0, 0, 0)
+      const weekStart = new Date(dayStart)
+      weekStart.setDate(weekStart.getDate() - ((weekStart.getDay() + 6) % 7))
+      const value = {
+        today: led.summary({ since: dayStart.getTime(), byDay: false }),
+        week: led.summary({ since: weekStart.getTime(), byDay: false }),
+        all: led.summary({ byDay: false }),
+        byDay: led.summary({ since: now - 7 * 86400000, byDay: true }),
+      }
+      this._jasmineLedgerCache = { at: now, value }
+      return value
+    } catch {
+      return null
     }
   }
 
@@ -5340,6 +5488,298 @@ export class ChatEngine {
       gifContactSheet: (buf, opts) => gifContactSheet(buf, opts),
       // 现在时间（2026-10-26，主人 m05189-1）：拼提示词时用；走 this.now() 便于回放/单测钉时间。
       now: () => this.now(),
+      /*
+       * 茉莉花（2026-10-30）：本轮召回了哪几条记忆的 id，回传给引擎给出口核对接缝用。
+       * 记忆条目本身带 id（memory.js 里 m<base36> 那种），这里只要 id 列表。
+       */
+      noteRecalled: (ids) => {
+        this._recalledIds = Array.isArray(ids) ? ids.slice(0, 64) : []
+      },
+    }
+  }
+
+  /**
+   * 茉莉花出口核对（P0-1，2026-10-30）。
+   *
+   * 只核对、不改写、不拦发送：命中问题就记一条 trace（out/jasmine/trace.jsonl），
+   * 顺便在 /state 里留个计数。等 trace 攒出真实事故样本，再决定拦哪几类。
+   */
+  verifyOutgoing({ ev, conv, text, scene }) {
+    try {
+      if (this.config?.jasmineVerify === false) return null
+      const mod = this._jasmine
+      if (!mod) return null
+      const body = String(text || '').trim()
+      if (!body) return null
+      const selfId = String(this.selfId || '')
+      const qq = ev?.user_id != null ? String(ev.user_id) : ''
+      if (qq && selfId && qq === selfId) return null
+
+      let promises = []
+      try {
+        // memory 的公开面是 entries（web.js /memory/list 也是读它），没有 list()。
+        // 未闭合约定 = 七类里的 promise 条目；带上 qq 过滤，别拿别人的约定去核她的话。
+        const all = Array.isArray(this.memory?.entries) ? this.memory.entries : []
+        promises = all
+          .filter((e) => e && e.kind === 'promise')
+          .filter((e) => !e.qq || !qq || String(e.qq) === qq)
+          .slice(-20)
+          .map((e) => ({ id: e.id, text: e.text, status: 'open' }))
+      } catch {
+        promises = []
+      }
+
+      const recentReplies = []
+      try {
+        const hist = Array.isArray(conv?.history) ? conv.history : []
+        for (let i = hist.length - 1; i >= 0 && recentReplies.length < 8; i--) {
+          const h = hist[i]
+          if (h?.role !== 'assistant') continue
+          const t = String(h.text || '').trim()
+          if (t) recentReplies.push(t.slice(0, 160))
+        }
+      } catch {
+        /* 历史读不到就不查复读 */
+      }
+
+      const res = jasmineBridge.verifyOutgoing(mod, {
+        reply: body,
+        recalledIds: this._recalledIds || [],
+        promises,
+        recentReplies,
+      })
+      if (!res) return null
+
+      const st = this._jasmineVerify
+      st.checked++
+      st.lastAt = this.now()
+      if (!res.ok) {
+        st.flagged++
+        st.lastConstraint = res.constraint || ''
+        st.lastIssues = (res.issues || []).map((i) => `${i.dim}:${i.kind}`).slice(0, 6)
+      }
+      const dir = path.join(String(this.config?.dataDir || this.config?.memoryDir || 'out'), 'jasmine')
+      jasmineBridge.appendTrace(dir, {
+        at: Date.now(),
+        scene: scene || (ev?.message_type === 'group' ? 'group' : 'private'),
+        conv: String(conv?.key || (ev?.message_type === 'group' ? `group:${ev.group_id}` : `private:${qq}`)),
+        qq,
+        ok: Boolean(res.ok),
+        constraint: res.constraint || '',
+        issues: (res.issues || []).map((i) => ({ dim: i.dim, kind: i.kind, detail: String(i.detail || '').slice(0, 80) })),
+        total: res.scores?.total ?? null,
+        text: body.slice(0, 140),
+      })
+      return res
+    } catch {
+      // 核对层永远不能影响发送
+      return null
+    }
+  }
+
+  /**
+   * P0-2：压缩三档提醒。
+   *
+   * 只提醒、不压缩。压缩要改历史 → 前缀缓存全失效（命中价 vs 未命中差 50 倍），
+   * 为了省一点钱去重建缓存是亏的；它唯一的价值是「别让当前这轮被历史淹掉」。
+   *
+   * 三档的判断交给 jasmine（纯本地计算，零调用）：
+   *   growth   可压缩量攒够 5 万 token
+   *   pressure 占用 75%
+   *   urgent   占用 95%
+   * 可回收不足 5000 token 的不提醒（否则每轮都要重建一次缓存）。
+   * 提醒只追加在**本次请求末尾**：不写历史，不污染下一轮前缀；同一轮最多一次。
+   */
+  maybeHintCompaction({ messages, system } = {}) {
+    try {
+      if (this.config?.jasmineCompact === false) return null
+      const mod = this._jasmine
+      if (!mod || typeof mod.evaluateCompaction !== 'function' || !Array.isArray(messages)) return null
+
+      const est = mod.estimateTokens
+      let used = est(String(system || ''))
+      const perMessage = []
+      for (const m of messages) {
+        const c = m?.content
+        let t = ''
+        if (typeof c === 'string') t = c
+        else if (Array.isArray(c)) {
+          t = c
+            .map((p) => (typeof p === 'string' ? p : p && p.type === 'text' ? String(p.text || '') : ''))
+            .join('\n')
+        }
+        const n = est(t)
+        perMessage.push(n)
+        used += n
+      }
+      // 可压缩 = 除最后两条之外的历史（最后两条是这轮的现场，压了就没上下文了）
+      const compactable = perMessage.slice(0, Math.max(0, perMessage.length - 2)).reduce((a, b) => a + b, 0)
+      const prev = this._jasmineCompact || { compactable: 0 }
+      const sinceLast = Math.max(0, compactable - (Number(prev.compactable) || 0))
+
+      const limit = Number(this.config?.contextWindowTokens) || 128000
+      const verdict = mod.evaluateCompaction({
+        usedTokens: used,
+        limitTokens: limit,
+        compactableTokens: compactable,
+        sinceLastCompact: sinceLast,
+        remindedThisTurn: false,
+        minReclaim: Number(this.config?.compactMinReclaim) || 5000,
+      })
+      const tier = String(verdict?.tier || 'none')
+      if (tier === 'none') {
+        // 没提醒也记一下可压缩量，但不动 at/tier——/state 里应该看到「上一条真的发出去的提醒」
+        this._jasmineCompact = { ...this._jasmineCompact, compactable, used, limit, reclaim: verdict?.reclaim || 0 }
+        return null
+      }
+
+      const line = mod.buildReminder({ tier, reclaim: Number(verdict?.reclaim) || 0 })
+      if (!line) return null
+      messages.push({ role: 'user', content: `【系统提示·别复述这一行】${line}` })
+      this._jasmineCompact = {
+        at: this.now(),
+        tier,
+        used,
+        limit,
+        reclaim: Number(verdict?.reclaim) || 0,
+        compactable,
+      }
+      this.logger?.('info', `压缩提醒（${tier}）：约 ${used}/${limit} token，可回收 ${verdict?.reclaim || 0}`)
+      return verdict
+    } catch {
+      // 提醒层永远不能影响回复
+      return null
+    }
+  }
+
+  /**
+   * P0-3：每周一封信。
+   *
+   * 为什么单独写而不是让模型「随便总结一下」：信的骨架必须是**可追溯的事实**
+   * （哪一周、谁、几件事），措辞才归人格层。模板 + 事实卡，同一周永远同一封。
+   *
+   * 口径：
+   *   - 写「上一个完整周」，当前周不写（半周快照没有意义）；
+   *   - 先把这周的事件压成周摘要（memory.summarizeWeek，幂等），
+   *     再把摘要当事实卡喂给 jasmine.buildLetter；
+   *   - 信本身也落成一条记忆（letterEntry），以后召回得到；
+   *   - 一周只写一次：lastLetterWeek 落在 <dataDir>/jasmine/state.json。
+   */
+  async maybeWriteWeeklyLetter() {
+    try {
+      if (this.config?.jasmineLetter === false) return { skipped: 'disabled' }
+      const mod = this._jasmine
+      if (!mod || typeof mod.buildLetter !== 'function') return { skipped: 'no-jasmine' }
+      const dir = path.join(String(this.config?.dataDir || this.config?.memoryDir || 'out'), 'jasmine')
+      const weekKey = this.previousWeekMonday()
+
+      const state = jasmineBridge.readState?.(dir) || {}
+      if (String(state.lastLetterWeek || '') === weekKey) return { skipped: 'already-written', weekKey }
+
+      // 先把上周的事件压成摘要（幂等、失败不影响写信）
+      let summaries = []
+      try {
+        summaries = this.memory.summarizeWeek(weekKey) || []
+      } catch (err) {
+        this.logger?.('warn', `周信：周聚合失败（继续用原始事件）：${err?.message || err}`)
+      }
+
+      let facts = summaries
+        .map((e) => ({ who: String(e.who || ''), text: String(e.text || ''), at: Number(e.at) || 0 }))
+        .filter((f) => f.text)
+      if (!facts.length) {
+        // 没有摘要（例如这周没人说话、或聚合已做过但条目被归档）就退回原始事件采样
+        try {
+          const buckets = this.memory.eventBuckets?.(weekKey)
+          if (buckets && typeof buckets.values === 'function') {
+            const all = []
+            for (const b of buckets.values()) {
+              for (const it of b.items || []) all.push({ who: String(it.who || ''), text: String(it.text || ''), at: Number(it.at) || 0 })
+            }
+            facts = all.sort((a, b) => a.at - b.at).slice(0, 8)
+          }
+        } catch {
+          facts = []
+        }
+      }
+      if (!facts.length) return { skipped: 'no-facts', weekKey }
+
+      const letter = mod.buildLetter({ weekKey, facts, owner: '你', maxChars: 600, maxFacts: 5 })
+      try {
+        const entry = mod.letterEntry({ weekKey, text: letter.text })
+        if (entry) {
+          this.memory.entries.push(entry)
+          this.memory.save()
+        }
+      } catch (err) {
+        this.logger?.('warn', `周信：写入记忆失败：${err?.message || err}`)
+      }
+
+      const owner = String(this.config?.ownerUin || '').trim()
+      if (owner && this.client?.sendPrivateMsg) {
+        await this.client.sendPrivateMsg(owner, [{ type: 'text', data: { text: letter.text } }])
+      } else {
+        this.logger?.('warn', '周信：没有 ownerUin 或客户端，信只写进了记忆')
+      }
+
+      jasmineBridge.writeState?.(dir, { lastLetterWeek: weekKey, lastLetterAt: Date.now() })
+      jasmineBridge.appendTrace?.(dir, {
+        at: Date.now(),
+        kind: 'weekly-letter',
+        weekKey,
+        chars: letter.text.length,
+        facts: letter.used,
+        sent: Boolean(owner),
+      })
+      this.logger?.('info', `周信已写（${weekKey}，${letter.text.length} 字，${letter.used} 件事）`)
+      return { ok: true, weekKey, chars: letter.text.length, facts: letter.used }
+    } catch (err) {
+      this.logger?.('warn', `周信失败：${err?.message || err}`)
+      return { skipped: 'error', error: String(err?.message || err) }
+    }
+  }
+
+  /** 上一个完整自然周的周一（本地时区，YYYY-MM-DD）——和 memory.weekKeyOf 的口径一致。 */
+  previousWeekMonday(now = this.now()) {
+    const d = new Date(Number(now) || Date.now())
+    d.setHours(0, 0, 0, 0)
+    const dow = (d.getDay() + 6) % 7 // 周一=0
+    d.setDate(d.getDate() - dow - 7)
+    const y = d.getFullYear()
+    const m = String(d.getMonth() + 1).padStart(2, '0')
+    const day = String(d.getDate()).padStart(2, '0')
+    return `${y}-${m}-${day}`
+  }
+
+  /** 茉莉花状态（/state 与以后的控制台看板共用一份口径）。 */
+  jasmineStatus() {
+    const st = this._jasmineVerify || {}
+    let loader = {}
+    try {
+      loader = jasmineBridge.jasmineLoaderStatus?.() || {}
+    } catch {
+      loader = {}
+    }
+    let letter = {}
+    try {
+      const dir = path.join(String(this.config?.dataDir || this.config?.memoryDir || 'out'), 'jasmine')
+      const s = jasmineBridge.readState?.(dir) || {}
+      letter = { lastWeek: String(s.lastLetterWeek || ''), lastAt: Number(s.lastLetterAt) || 0 }
+    } catch {
+      letter = {}
+    }
+    return {
+      available: Boolean(this._jasmine),
+      checked: st.checked || 0,
+      flagged: st.flagged || 0,
+      lastConstraint: st.lastConstraint || '',
+      lastIssues: Array.isArray(st.lastIssues) ? st.lastIssues : [],
+      lastAt: st.lastAt || 0,
+      recalledIds: Array.isArray(this._recalledIds) ? this._recalledIds.length : 0,
+      compact: this._jasmineCompact || null,
+      letter,
+      ledger: this.jasmineLedgerSummary?.() || null,
+      loader,
     }
   }
 
@@ -5402,6 +5842,12 @@ export class ChatEngine {
         for (const [k, v] of this._recentSent) if (nowMs2 - v.at > 600000) this._recentSent.delete(k)
       }
     }
+
+    /*
+     * 茉莉花出口核对（P0-1）：发出去之前再核一遍——出处、承诺、边界、复读、迎合。
+     * 现在只记 trace 不拦话；同步执行、内部全兜底，核不出来就当没发生。
+     */
+    this.verifyOutgoing({ ev, conv, text: rawText, scene })
 
     const plan = planDelivery(reply.parts, scene, this.config, Math.random)
     const startedAt = this.now()

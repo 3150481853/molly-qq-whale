@@ -42,6 +42,12 @@ const DIRS = [
    * 目录不存在时静默跳过；SVG 是文本，照样走下面的脱敏双闸。
    */
   ['publish-assets/assets', 'assets', true],
+  /*
+   * 茉莉花记忆系统（2026-10-31）：独立记忆底座，源码在仓库根 jasmine/，
+   * 默认随 Molly 一起发布（插件通过相对路径 ../jasmine/index.mjs 动态加载）。
+   * 递归带走，目录不存在就静默跳过。
+   */
+  ['jasmine', 'jasmine', true],
 ]
 
 /** 单文件复制（源 → 目标） */

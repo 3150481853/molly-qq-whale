@@ -553,6 +553,14 @@ export class WebWidget {
       if (mem && typeof mem.status === 'function') out.memory = mem.status()
       else if (Array.isArray(mem?.entries)) out.memory = { count: mem.length, limit: Number(mem?.limit) || null }
     } catch {}
+    /*
+     * 茉莉花记忆系统（2026-10-30）：出口核对的累计计数。
+     * 核对只写 trace 不拦话，所以这里看的是「她有多少次说完之后自己都站不住脚」，
+     * 攒够样本再决定拦哪几类。模块没加载时也给一个 available:false。
+     */
+    try {
+      if (typeof e?.jasmineStatus === 'function') out.jasmine = e.jasmineStatus()
+    } catch {}
     // 今日免费积分用量。挂件上要能直接看到剩多少——
     // 用户是看着这个数字决定要不要关掉限制的。
     try {

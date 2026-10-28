@@ -58,7 +58,36 @@ function appendLog(line) {
   } catch { /* 日志失败不影响主流程 */ }
 }
 
-/** 跑一个本地脚本并等它退出，只回退出码（不抓 stdout，避免和卡巴/沙箱的管道限制打架） */function runOnce(script, args = []) {
+/** 让模型按 Molly 的人设写一句可以直接发出去的话（不含解释与引号） */
+async function askText(prompt) {
+  const p = String(prompt || '').trim();
+  if (!p) throw new Error('缺少提示词');
+  let persona = '';
+  try { persona = fs.readFileSync(PERSONA_FILE, 'utf8').slice(0, 6000); } catch { /* 读不到人设就退化成通用口吻 */ }
+  const sys = (persona || '你是 Molly，一个在 QQ 上聊天的普通人。')
+    + '\n\n【这一次的任务】下面会给你一个要求。你只需要输出**一句**可以直接发到聊天里的话：'
+    + '不要解释、不要加引号、不要 Markdown、不要提“任务/要求/提示词”、不要自称 AI。控制在 60 字以内。';
+  const r = await fetch(GATEWAY_URL, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${GATEWAY_KEY}` },
+    body: JSON.stringify({
+      model: ASK_MODEL,
+      messages: [{ role: 'system', content: sys }, { role: 'user', content: p }],
+      max_tokens: 500,
+      temperature: 0.85,
+      stream: false,
+    }),
+  });
+  if (!r.ok) throw new Error(`模型网关 HTTP ${r.status}`);
+  const j = await r.json();
+  let t = String(j?.choices?.[0]?.message?.content || '').trim();
+  t = t.replace(/^["'“”「」]+|["'“”「」]+$/g, '').trim();
+  if (!t) throw new Error('模型返回空内容（可能被思考链吃掉了）');
+  return t.length > 200 ? t.slice(0, 200) : t;
+}
+
+/** 跑一个本地脚本并等它退出，只回退出码（不抓 stdout，避免和卡巴/沙箱的管道限制打架） */
+function runOnce(script, args = []) {
   return new Promise((resolve) => {
     let child;
     try {
@@ -85,6 +114,14 @@ const CMD_KEY = process.env.MOLLY_CMD_KEY
 const STATE = process.env.MOLLY_CMD_STATE || path.join(OUT, 'cmd-state.json');
 const OTP_FILE = path.join(OUT, 'cmd-otp.json');
 const OWNER_UIN = Number(process.env.MOLLY_OWNER_UIN || 222222222);
+
+// ---------- 「让 Molly 自己说」用的模型通道 ----------
+// 走本机网关（和插件同一条链路），不经过插件代码；人设直接读 persona/core.md。
+const GATEWAY_URL = process.env.MOLLY_GATEWAY_URL || 'http://127.0.0.1:8788/v1/chat/completions';
+const GATEWAY_KEY = process.env.MOLLY_GATEWAY_KEY || 'wb-proxy-local';
+const ASK_MODEL = process.env.MOLLY_ASK_MODEL || 'deepseek-v4.1-flash';
+const PERSONA_FILE = process.env.MOLLY_PERSONA_FILE
+  || path.join(ROOT, 'plugin', 'dsh-qq-whale', 'persona', 'core.md');
 
 // ---------- 动作白名单 ----------
 // readOnly=true 的动作不需要 otp；其余必须带有效 otp
@@ -142,7 +179,159 @@ const ACTIONS = {
       return { ok: true, messageId: r?.message_id ?? null, chars: text.length };
     },
   },
+  'say-private': {
+    readOnly: false,
+    async run(args = {}) {
+      const uin = Number(args.uin);
+      const text = String(args.text || '').trim();
+      if (!Number.isInteger(uin) || uin < 10000) throw new Error('缺少合法 uin');
+      if (!text) throw new Error('缺少 text');
+      if (text.length > 200) throw new Error('text 太长（上限 200 字）');
+      const r = await sendPrivateText(uin, text);
+      // result 公开可读：只回执状态，不回显 uin 与正文
+      return { ok: true, messageId: r?.message_id ?? null, chars: text.length };
+    },
+  },
+  /** 让 Molly 自己按人设写一句，发到群里 */
+  ask: {
+    readOnly: false,
+    async run(args = {}) {
+      const groupId = Number(args.groupId);
+      if (!Number.isInteger(groupId) || groupId <= 0) throw new Error('缺少合法 groupId');
+      const text = await askText(args.prompt);
+      const r = await sendGroupText(groupId, text);
+      return { ok: true, messageId: r?.message_id ?? null, chars: text.length };
+    },
+  },
+  /** 同上，发私聊 */
+  'ask-private': {
+    readOnly: false,
+    async run(args = {}) {
+      const uin = Number(args.uin);
+      if (!Number.isInteger(uin) || uin < 10000) throw new Error('缺少合法 uin');
+      const text = await askText(args.prompt);
+      const r = await sendPrivateText(uin, text);
+      return { ok: true, messageId: r?.message_id ?? null, chars: text.length };
+    },
+  },
+  /**
+   * 上架审核：把插件卡片私信给审核人（默认主人 + mndnbd），并进本地待审队列。
+   * 注意 result 公开可读，所以只回执「通知了几个人」，不回显卡片内容。
+   */
+  review: {
+    readOnly: false,
+    async run(args = {}) {
+      const c = args.card && typeof args.card === 'object' ? args.card : {};
+      const id = String(c.id || '').trim();
+      const name = String(c.name || '').trim();
+      const summary = String(c.summary || '').trim();
+      if (!/^[a-z0-9][a-z0-9-]{1,31}$/.test(id)) throw new Error('id 需 2–32 位小写字母/数字/短横线');
+      if (!name) throw new Error('缺 name');
+      if (!summary) throw new Error('缺 summary');
+      const tier = String(c.tier || 'A').toUpperCase();
+      if (!'ABC'.includes(tier)) throw new Error('tier 只能是 A/B/C');
+      const card = {
+        id, name, summary,
+        author: String(c.author || '匿名'),
+        version: String(c.version || '0.0.0'),
+        license: String(c.license || 'MIT'),
+        tier,
+        repo: String(c.repo || ''),
+        tags: Array.isArray(c.tags) ? c.tags.slice(0, 6) : [],
+      };
+      const targets = String(process.env.MOLLY_REVIEW_TARGETS || '')
+        .split(',').map((x) => Number(String(x).trim())).filter((n) => Number.isInteger(n) && n > 10000);
+      const list = targets.length ? targets : [OWNER_UIN, 333333333];
+      const text = [
+        '【插件上架待审】',
+        `id：${card.id}`,
+        `名称：${card.name}`,
+        `版本：${card.version}`,
+        `作者：${card.author}`,
+        `许可：${card.license}`,
+        `档位：${card.tier}`,
+        `简介：${card.summary}`,
+        `仓库：${card.repo || '(无)'}`,
+        '',
+        `回复「准 ${card.id}」或「驳回 ${card.id} 理由」`,
+      ].join('\n');
+      let ok = 0; const errs = [];
+      for (const uin of list) {
+        try { await sendPrivateText(uin, text); ok++; } catch (e) { errs.push(`${uin}:${String(e?.message || e).slice(0, 30)}`); }
+      }
+      try {
+        const f = path.join(OUT, 'review-pending.json');
+        const cur = readJson(f, { items: [] });
+        cur.items = Array.isArray(cur.items) ? cur.items : [];
+        cur.items.unshift({ at: new Date().toISOString(), card, notified: ok });
+        cur.items = cur.items.slice(0, 100);
+        fs.writeFileSync(f, JSON.stringify(cur, null, 2), 'utf8');
+      } catch { /* 队列落盘失败不影响发信 */ }
+      return { ok: ok > 0, notified: ok, targets: list.length, failed: errs.length ? errs : undefined, id: card.id };
+    },
+  },
 };
+
+// ---------- 把中继里的「插件提交/审核」通知转成 QQ 私信 ----------
+const RELAY_WATCH_STATE = path.join(OUT, 'relay-watch-state.json');
+
+/** 首次运行只记基线，不倒灌历史消息 */
+async function forwardRelayNotifications() {
+  const st = readJson(RELAY_WATCH_STATE, null);
+  const since = st && Number.isFinite(Number(st.lastId)) ? Number(st.lastId) : null;
+  const url = `${BASE}/messages?since=${since ?? 0}&limit=20`;
+  const r = await fetch(url, { headers: { 'x-molly-token': TOKEN } });
+  if (!r.ok) { log(`看中继失败 HTTP ${r.status}`); return; }
+  const j = await r.json();
+  const list = j?.messages || j?.items || (Array.isArray(j) ? j : []);
+  if (!list.length) return;
+  const maxId = list.reduce((a, m) => Math.max(a, Number(m.id) || 0), since ?? 0);
+  // 服务端会回一个 lastId（当前最大 id）；用它当游标，别用「本页最大」——
+  // 否则 since=0 只拿到前 20 条，游标会停在 20，下次把 21..N 当新消息全转发一遍。
+  const cursor = Number.isFinite(Number(j?.lastId)) ? Number(j.lastId) : maxId;
+
+  if (since === null) {
+    // 基线：只记位置，不转发
+    fs.writeFileSync(RELAY_WATCH_STATE, JSON.stringify({ lastId: cursor, at: new Date().toISOString() }), 'utf8');
+    log(`中继看守建基线 lastId=${cursor}（历史消息不转发）`);
+    return;
+  }
+
+  // 收集本轮要发的事件，最后**合并成一条**发出去，避免刷屏
+  const NOTIFY_CFG = readJson(path.join(OUT, 'notify-config.json'), null) || {};
+  const muteForOwner = Array.isArray(NOTIFY_CFG.muteForOwner) ? NOTIFY_CFG.muteForOwner : ['今年的你不懂'];
+  const ownerLines = [];
+  const otherLines = [];
+  for (const m of list) {
+    if ((Number(m.id) || 0) <= since) continue;
+    const text = String(m.text || '').trim();
+    const isPluginEvent = /^\[插件(提交|审核)\]/.test(text) || String(m.from) === 'myblog';
+    if (!isPluginEvent) continue;
+    // 自己干的事不再通知自己（否则点一次提交就自己收一条），但仍告知其它审核人
+    const byMe = muteForOwner.some((name) => name && text.includes(` by ${name}`));
+    if (!byMe) ownerLines.push(text);
+    otherLines.push(text);
+  }
+
+  let forwarded = 0;
+  const pack = (lines) => {
+    const head = '【部落格来信】';
+    let body = lines.join('\n——\n');
+    if (body.length > 1200) body = `${body.slice(0, 1200)}…（还有 ${lines.length} 条未展开）`;
+    return `${head}\n${body}`;
+  };
+  for (const [uin, lines] of [[OWNER_UIN, ownerLines], [333333333, otherLines]]) {
+    if (!lines.length) continue;
+    try {
+      await sendPrivateText(uin, pack(lines));
+      forwarded++;
+    } catch (e) {
+      log(`转发失败 ${uin}：${String(e?.message || e).slice(0, 40)}`);
+    }
+  }
+  if (forwarded) appendLog(`relay-forward ${forwarded} 条目标（owner ${ownerLines.length} / 其它 ${otherLines.length}）`);
+  fs.writeFileSync(RELAY_WATCH_STATE, JSON.stringify({ lastId: cursor, at: new Date().toISOString() }), 'utf8');
+}
 
 // ---------- 一次性口令 ----------
 function issueOtp() {
@@ -150,6 +339,13 @@ function issueOtp() {
   const rec = { code, exp: Date.now() + 5 * 60 * 1000, used: false };
   fs.writeFileSync(OTP_FILE, JSON.stringify(rec), 'utf8');
   log(`一次性口令：${code}（5 分钟内有效，用一次即废）`);
+  return rec;
+}
+/** 有没有一条「还没用、还没过期」的口令；有就复用，不再重发，避免口令刷屏 */
+function peekOtp() {
+  const rec = readJson(OTP_FILE, null);
+  if (!rec || rec.used) return null;
+  if (Date.now() > rec.exp) return null;
   return rec;
 }
 function checkOtp(code) {
@@ -178,6 +374,12 @@ async function execute(cmd) {
       audit({ id: cmd.id, action, outcome: 'rejected', why: v.why });
       // 没口令 / 口令过期 → 现发一个，并且直接私信给主人（不写进公开 result）
       if (v.why === 'need-otp' || v.why === 'no-otp-issued' || v.why === 'otp-expired') {
+        // 已经有一条有效未用的口令 → 复用它，别再发新的（否则每次重试都把上一条作废）
+        const live = peekOtp();
+        if (live) {
+          const mins = Math.max(1, Math.ceil((live.exp - Date.now()) / 60000));
+          return { status: 'failed', result: `需要一次性口令：${mins} 分钟前发到你 QQ 的那条仍然有效，直接填它重发即可（不会重发新口令）` };
+        }
         const rec = issueOtp();
         let dm = 'failed';
         try {
@@ -225,6 +427,7 @@ async function tick() {
     log(`#${cmd.id} ${cmd.action} → ${res.status}（回写 HTTP ${post.status}）`);
   }
   const maxId = list.reduce((a, x) => Math.max(a, Number(x.id) || 0), Number(st.lastId) || 0);
+  try { await forwardRelayNotifications(); } catch (e) { log(`中继看守异常：${String(e?.message || e).slice(0, 60)}`); }
   if (!DRY) {
     // 每轮都落一次状态，方便外部判断「agent 还活着吗」（lastId 没变也要写 at）
     fs.writeFileSync(STATE, JSON.stringify({ lastId: maxId, at: new Date().toISOString() }), 'utf8');

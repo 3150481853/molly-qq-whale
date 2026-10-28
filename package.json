@@ -1,0 +1,35 @@
+{
+  "name": "jasmine-memory",
+  "version": "0.2.0",
+  "description": "茉莉花（Jasmine）记忆系统：双卡存储 + RRF 召回 + 出口核对 + 压缩提醒 + 周信 + token 账本，零依赖纯 Node ESM",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./store": "./src/store.mjs",
+    "./recall": "./src/recall.mjs",
+    "./decay": "./src/decay.mjs"
+  },
+  "files": [
+    "index.mjs",
+    "src/",
+    "adapters/",
+    "docs/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.mjs\""
+  },
+  "keywords": [
+    "memory",
+    "agent",
+    "llm",
+    "rrf",
+    "long-term-memory"
+  ],
+  "license": "MIT"
+}

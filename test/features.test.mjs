@@ -9,6 +9,8 @@ import {
   buildReminder,
   estimateTokens,
   buildLetter,
+  buildLetterPrompt,
+  cleanModelLetter,
   shouldWriteLetter,
   currentWeekKey,
   TokenLedger,
@@ -115,18 +117,42 @@ test('token 粗估：中文按字近似', () => {
 
 /* ------------------------------------------------------------ 每周一封信 */
 
-test('周信：有事实时按时间写进来，且有称呼', () => {
+test('周信：像日记，不像工作汇报（替主人做的事最多两条）', () => {
+  const owner = 'JNDNBD'
   const { text, used } = buildLetter({
-    weekKey: '2026-W45',
+    weekKey: '2026-10-19',
+    owner,
     facts: [
-      { who: '小明', text: '一起去看了海', at: 2 },
-      { who: '小明', text: '晚上吃了火锅', at: 1 },
+      { who: owner, text: '我帮他做过：回复一下未读消息', at: 1 },
+      { who: owner, text: '我帮他做过：发送自我介绍', at: 2 },
+      { who: owner, text: '我帮他做过：检查群里的天气', at: 3 },
+      { who: '小满', text: '今天群里聊到桂花开了', at: 4 },
+      { who: '阿澈', text: '说下周要去海边', at: 5 },
     ],
-    owner: '小明',
   })
-  assert.equal(used, 2)
-  assert.match(text, /看了海/)
-  assert.match(text, /2026-W45/)
+  assert.equal(used >= 2, true)
+  assert.doesNotMatch(text, /我帮他做过/)
+  assert.match(text, /替你/)
+  // 「替你」类句子最多两条
+  assert.ok((text.match(/替你/g) || []).length <= 2)
+  // 不能整封都是主人的事：别人的内容至少出现一次
+  assert.match(text, /桂花|海边/)
+})
+
+test('周信：不把 QQ 号写进信里', () => {
+  const { text } = buildLetter({
+    weekKey: '2026-10-19',
+    facts: [{ who: '小满', text: '向 3374357850 发送自我介绍', at: 1 }],
+  })
+  assert.doesNotMatch(text, /\d{5,}/)
+  assert.match(text, /有人/)
+})
+
+test('周信：有自己的感受句和念想', () => {
+  const { text } = buildLetter({ weekKey: '2026-10-19', facts: [{ who: '小满', text: '聊到桂花', at: 1 }] })
+  assert.ok(text.length > 120, `信太短：${text.length}`)
+  assert.ok((text.match(/。/g) || []).length >= 3)
+  assert.match(text, /下周|记到这儿|写完了/)
 })
 
 test('周信：没事实也不空信', () => {
@@ -205,4 +231,43 @@ test('信号：纯闲聊 → chatter，且默认不回', () => {
   assert.equal(r.tier, 'chatter')
   assert.equal(shouldSpeak(r.score), false)
   assert.equal(shouldSpeak(SIGNAL_WEIGHTS.aboutMe), true)
+})
+
+/* ------------------------------------------------------------ 模型写信的提示词与清洗 */
+
+test('提示词：材料里的人名会进 user，QQ 号被抹掉', () => {
+  const p = buildLetterPrompt({
+    weekKey: '2026-10-19',
+    facts: [
+      { who: '小张', text: '说他这周在赶论文', at: 1 },
+      { who: '', text: '群里有人问了 888888888 这个号', at: 2 },
+    ],
+    stats: { chores: 3, memes: 5, promises: 1, people: 2, groups: 1 },
+  })
+  assert.match(p.user, /小张/)
+  assert.doesNotMatch(p.user, /888888888/)
+  assert.match(p.user, /10 月 19 日/)
+  assert.match(p.system, /第一人称/)
+})
+
+test('提示词：没有材料也能给一份空材料提示', () => {
+  const p = buildLetterPrompt({ weekKey: '2026-10-19', facts: [] })
+  assert.match(p.user, /没什么材料/)
+})
+
+test('清洗：去掉标题/列表/加粗/长数字，保留正文', () => {
+  const raw = `# 周记\n\n- 第一件事：帮他查天气\n1. 第二件事\n**重点**：她笑了\n编号 123456789 别出现\n\n\n继续写。`
+  const text = cleanModelLetter(raw)
+  assert.doesNotMatch(text, /#/)
+  assert.doesNotMatch(text, /^[-*]/m)
+  assert.doesNotMatch(text, /123456789/)
+  assert.doesNotMatch(text, /\*\*/)
+  assert.match(text, /继续写/)
+})
+
+test('清洗：超长按句子截断，不硬切半个字', () => {
+  const raw = `${'这是一句话。'.repeat(200)}`
+  const text = cleanModelLetter(raw, { maxChars: 100 })
+  assert.ok(text.length <= 101)
+  assert.ok(text.endsWith('。'))
 })

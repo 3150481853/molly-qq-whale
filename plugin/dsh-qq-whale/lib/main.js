@@ -1,7 +1,7 @@
 /**
  * dsh-qq-whale —— 让蓝色大肥鱼住进 QQ。
  *
- * 这个插件把 QQ（经 NapCat 的 OneBot11 正向 WS）接成 DSH 的一条"人格通道"：
+ * 这个插件把 QQ（经 SnowLuma 的 OneBot 11 正向 WS）接成 DSH 的一条"人格通道"：
  * 收到的消息交给 ChatEngine，引擎用 DSH 的 ctx.llm 调模型（复用 workbuddy-ai
  * 的免费额度），按真人节奏分段发回去，并把重要的东西记进持久记忆。
  *
@@ -809,7 +809,7 @@ function _configShapeReference(Schema) {
   const s = Schema?.object ? Schema : (Schema?.default ?? null)
   if (!s || typeof s?.object !== 'function') return DEFAULTS
   return s.object({
-    onebotUrl: s.string().default(DEFAULTS.onebotUrl).description('NapCat OneBot11 正向 WS 地址'),
+    onebotUrl: s.string().default(DEFAULTS.onebotUrl).description('SnowLuma OneBot 11 正向 WS 地址'),
     onebotToken: s.string().default(DEFAULTS.onebotToken).description('OneBot access_token'),
     selfId: s.string().default(DEFAULTS.selfId).description('机器人 QQ 号'),
     modelBackend: s.union([s.const('wbai'), s.const('wb-proxy'), s.const('dsh')]).default('wbai').description('wbai=直连 WorkBuddy 免费额度（独立运行）；wb-proxy=走本地 8788 多账号池网关（抗限流，保留 wbai 回退）；dsh=走宿主 ctx.llm'),

@@ -2755,26 +2755,62 @@
     };
   }
 
+  function sleepCardReady() {
+    var card = $('#sleepCard');
+    return !!(card && card.getAttribute('data-loaded') === '1');
+  }
+
+  function setSleepSaveEnabled(on) {
+    var btn = $('#sleepSave');
+    if (btn) btn.disabled = !on;
+  }
+
   function fillSleepForm(sleep) {
     var en = $('#sleepEnabled');
     var st = $('#sleepStart');
     var ed = $('#sleepEnd');
     var hint = $('#sleepHint');
-    if (!sleep) return;
+    var card = $('#sleepCard');
+    if (!sleep || sleep.ok === false) return false;
     if (en) en.value = sleep.enabled === false ? 'false' : 'true';
     if (st && sleep.start) st.value = sleep.start;
     if (ed && sleep.end) ed.value = sleep.end;
     if (hint) hint.textContent = sleep.sleeping ? "（现在正在睡觉时间里）" : "";
+    if (card) card.setAttribute('data-loaded', '1');
+    setSleepSaveEnabled(true);
+    return true;
   }
 
-  function refreshSleep() {
+  var sleepRetryTimer = null;
+  // 读不到真实作息时，绝不能把「表单默认值」当成当前值留着：
+  // 否则主人一点保存，就把真实设置覆盖成 23:50/09:00，看起来像"自己变回默认"。
+  function refreshSleep(tries) {
+    var n = typeof tries === 'number' ? tries : 0;
     fetch('/api/sleep', { cache: 'no-store' })
       .then(function (r) { return r.json(); })
-      .then(function (j) { if (j && j.ok) fillSleepForm(j); })
-      .catch(function () {});
+      .then(function (j) {
+        if (j && j.ok) { fillSleepForm(j); return; }
+        throw new Error((j && j.error) || '读取失败');
+      })
+      .catch(function (e) {
+        var hint = $('#sleepHint');
+        if (n < 6) {
+          if (sleepRetryTimer) clearTimeout(sleepRetryTimer);
+          setSleepSaveEnabled(false);
+          if (hint) hint.textContent = '正在读取作息…（插件可能刚重载）';
+          sleepRetryTimer = setTimeout(function () { refreshSleep(n + 1); }, 800);
+          return;
+        }
+        setSleepSaveEnabled(false);
+        if (hint) hint.textContent = '读取失败：' + ((e && e.message) || e) + '，请刷新页面后再改';
+      });
   }
 
   window.__mollySaveSleep = function () {
+    if (!sleepCardReady()) {
+      toast('还没读到当前作息，先刷新页面再改（避免把设置覆盖成默认值）');
+      return;
+    }
     var body = readSleepForm();
     var btn = $('#sleepSave');
     if (btn) btn.disabled = true;
@@ -4194,6 +4230,10 @@
     if (name === 'ops') loadOpsHeartbeat();
     if (name === 'external') loadExternal();
     if (name === 'switches') loadSwitches();
+    /* 作息：进「设置」页必须现拉一次。以前只靠 loadHealth 的 then 里顺手刷，
+       启动时若 state.page 还没变成 settings 就永远不刷，表单一直是 HTML 里的
+       默认 23:50/09:00——主人一保存就把真实作息覆盖成默认值。 */
+    if (name === 'settings') refreshSleep();
     /* 扫码轮询只挂在「QQ 连接」页：离开就停，别在后台空转 */
     if (name === 'qq') enterLoginPage();
     else stopLoginPoll();

@@ -2,9 +2,9 @@
 
 > 本副本由 `tools/build-publish.mjs` 生成，**勿手改**；要改就改源仓库再重新生成。
 
-- 生成时间：2026-10-29T05:48:01.591Z
-- 文件数：**207**
-- 总体积：**3.51 MB**
+- 生成时间：2026-10-29T16:11:12.438Z
+- 文件数：**212**
+- 总体积：**3.66 MB**
 - 脱敏复检：**命中 0**
 
 ## 顶层结构
@@ -37,6 +37,7 @@
 
 ## 已就地替换成 `<REDACTED>` 的文件
 
+- plugin/dsh-qq-whale/lib/webview.js
 - tools/start-molly.ps1
 - tools/heartbeat-push.mjs
 - tools/setup-quicklogin.ps1
@@ -45,6 +46,7 @@
 - tools/scan-secrets.mjs
 - tools/build-publish.mjs
 - tools/release-carry.json
+- docs/beginner-deploy.md
 - docs/INSTALL-AND-ROLLBACK.md
 - docs/deploy.md
 - docs/g-migration-contract.md

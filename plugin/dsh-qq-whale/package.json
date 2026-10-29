@@ -1,6 +1,6 @@
 {
   "name": "dsh-qq-whale",
-  "version": "1.1.6-Hotfix.1",
+  "version": "1.1.7-preview.1",
   "description": "QQ 通道 for DeepSeek Harness — 蓝色大肥鱼住进 QQ：活人感回复、表情包斗图、会发语音，内置「茉莉花记忆系统」（OneBot 11 / SnowLuma）",
   "keywords": [
     "dsh",
@@ -17,7 +17,8 @@
     "lib",
     "persona",
     "assets",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "CREDITS.md"
   ],
   "dsh": {
     "bundle": {

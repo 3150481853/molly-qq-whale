@@ -179,8 +179,8 @@ dsh plugin --profile desktop add "github:3150481853/molly-qq-whale#path:/plugin/
 复制完确认这个路径存在（**必须看到 `lib\boot.js` 和 `cordis.patch.yml` 两个东西**）：
 
 ```
-C:\Users\你\.dsh\profiles\desktop\node_modules\dsh-qq-whale\lib\boot.js
-C:\Users\你\.dsh\profiles\desktop\node_modules\dsh-qq-whale\cordis.patch.yml
+${HOME}\.dsh\profiles\desktop\node_modules\dsh-qq-whale\lib\boot.js
+${HOME}\.dsh\profiles\desktop\node_modules\dsh-qq-whale\cordis.patch.yml
 ```
 
 > 少任何一个，插件都会被 DSH **静默跳过**（不报错、也没反应）。这是最常见的坑。
@@ -197,7 +197,7 @@ C:\Users\你\.dsh\profiles\desktop\node_modules\dsh-qq-whale\cordis.patch.yml
 .dsh\profiles\desktop\cordis.patch.yml
 ```
 
-完整路径形如 `C:\Users\你\.dsh\profiles\desktop\cordis.patch.yml`。
+完整路径形如 `${HOME}\.dsh\profiles\desktop\cordis.patch.yml`。
 **先用记事本打开，复制一份备份**（比如 `cordis.patch.yml.bak`）。
 
 ### 4.2 追加配置
@@ -225,7 +225,7 @@ C:\Users\你\.dsh\profiles\desktop\node_modules\dsh-qq-whale\cordis.patch.yml
         personaDir: 'D:/molly-qq-whale/plugin/dsh-qq-whale/persona'
         onebot:
           ws: 'ws://127.0.0.1:3001'
-          token: '你刚才在 onebot.json 里填的那串密码'
+          token: '<REDACTED>'
 ```
 
 **要改的只有这几处：**
@@ -268,7 +268,7 @@ C:\Users\你\.dsh\profiles\desktop\node_modules\dsh-qq-whale\cordis.patch.yml
         modelBackend: wbai
 ```
 
-前提：你电脑上装了 WorkBuddy 桌面端并已登录（默认路径 `D:\APP\WorkBuddy\WorkBuddy.exe`），否则会报「未找到 WorkBuddy 桌面端程序」。
+前提：你电脑上装了 WorkBuddy 桌面端并已登录（默认路径 `<REDACTED>\WorkBuddy\WorkBuddy.exe`），否则会报「未找到 WorkBuddy 桌面端程序」。
 
 > 两种都不行？那就先别急着往下走——模型没接上，后面全是白装。
 

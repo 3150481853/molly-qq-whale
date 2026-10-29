@@ -74,6 +74,15 @@ const FILES = [
   // CONTRIBUTING.md 也走 publish-assets（2026-10-20：它是在上次 build 之后手写的，
   // 没进白名单会被下一次「白名单复制」当孤儿文件删掉 —— 真发生过一次）
   ['publish-assets/CONTRIBUTING.md', 'CONTRIBUTING.md'],
+  /*
+   * 2026-10-29：第三方来源与许可证声明。`lib/webview.js` 的抓网页一层改编自
+   * QQ-A（MIT）的 `safe-fetch.js`，MIT 要求把版权声明与
+   * 许可证全文随发行版分发 —— 所以这份 CREDITS.md 必须同时出现在仓库根目录
+   * （README 旁边，人先看到的地方）和插件子目录（npm 包 files 里带 CREDITS.md）。
+   * 单一源放在 `plugin/dsh-qq-whale/CREDITS.md`，两条白名单指向同一个文件。
+   */
+  ['plugin/dsh-qq-whale/CREDITS.md', 'CREDITS.md'],
+  ['plugin/dsh-qq-whale/CREDITS.md', 'plugin/dsh-qq-whale/CREDITS.md'],
   ['tools/console-server.mjs', 'tools/console-server.mjs'],
   // 2026-10-26（部署者反馈 m03205）：大看板的「概览 / 记忆 / 表情」数据来自 127.0.0.1:19391
   // 的 sidecar，就是 panel-data.mjs。它没进发布包 → 部署方一进控制台就是
@@ -165,6 +174,7 @@ const FILES = [
 
 /** 文档白名单：只发「讲怎么装、怎么用」的，运维流水账一律不发 */
 const DOCS = [
+  'beginner-deploy.md',
   'INSTALL-AND-ROLLBACK.md',
   'console-contract.md',
   'console-crud-contract.md',

@@ -728,6 +728,16 @@ export class WebWidget {
       }
     } catch {}
     /*
+     * 上网状态（2026-10-29 新模块）。
+     *
+     * 和上面 research 那段是配套的：research 只说「查没查到」，这里说
+     * 「为什么没查到」——今天用了几次、还剩几次、三个开关各自的死活、
+     * 最近一次是哪种失败（没开 / 没配额 / 抓取失败 / 搜索失败）。
+     */
+    try {
+      if (e?.webview?.stats) out.webview = e.webview.stats()
+    } catch {}
+    /*
      * 闲逛状态（2026-10-28 主人 m00634）。
      * 看得到：今天刷了几轮、刷到几条、卡在哪、还有几条在等她点头。
      */
@@ -2636,14 +2646,79 @@ export class WebWidget {
             const r = await e.researcher?.research(verdict.query || text, {
               reason: verdict.reason,
             })
-            out.found = Boolean(r?.ok)
+            /*
+             * found 的口径必须和主链一致：engine 只在 `r.ok && r.summary` 时才把
+             * 这段背景注进她的系统提示（engine.js 约 4489 行）。以前这里只看 ok，
+             * 于是会出现「面板显示查到了、聊天里她依然不知道」的假阳性。
+             */
+            out.found = Boolean(r?.ok && r?.summary)
+            // 2026-10-29：真机上出现过「found=true 但 summary 是空」——清洗前是有的，
+            // 洗完就没了。把清洗前后的长度一起吐出来，下次一眼能看出是模型那侧的问题
+            // 还是清洗这侧的锅，不用再猜。
+            out.summaryChars = String(r?.summary || '').length
+            out.rawChars = String(r?.raw || '').length
             // task-50：research 摘要是模型/网页原文，出口前先清洗（去 markdown、去内部标记）
             out.summary = sanitizeOutbound(r?.summary || '')
+            out.cleanChars = out.summary.length
             out.error = r?.error || ''
             out.researchMs = r?.elapsed || 0
+            // 走的哪条通道、读的哪个链接、内容可不可信（网页正文算「仅供参考」）
+            out.source = String(r?.source || '')
+            out.url = String(r?.url || '')
+            out.untrusted = Boolean(r?.ok && r?.source)
           }
           out.ms = Date.now() - started
           sendJson(res, 200, out)
+        } catch (err) {
+          sendJson(res, 500, { ok: false, error: String(err?.message || err) })
+        }
+      }),
+    })
+
+    /*
+     * POST /dsh-qq-whale/web/probe —— 单独试一次「上网」，不惊动聊天链路。
+     *
+     * 为什么要有这个口子：上网是条看不见的中间步骤。判定没命中、开关关了、
+     * 配额用完了、DNS 解析失败、网页是 JS 渲染的空壳……在 QQ 里全都长成
+     * 「她不知道」。这里用 { url } / { query } / { city } 直连底层，
+     * 把实际走的通道、耗时和原始结果原样吐出来，对着面板就能定位卡在哪。
+     *
+     * body: { url?: string, query?: string, city?: string }
+     * 说明：这条是给主人排查用的，内部 skipQuota，不占当天的上网次数。
+     */
+    add({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/web/probe`,
+      ...wrap(async (req, res) => {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          return
+        }
+        const raw = await readBody(req)
+        let body
+        try {
+          body = JSON.parse(raw || '{}')
+        } catch {
+          sendJson(res, 400, { ok: false, error: 'bad json' })
+          return
+        }
+        const url = String(body?.url || '').trim()
+        const query = String(body?.query || '').trim()
+        const city = String(body?.city || '').trim()
+        if (!url && !query && !city) {
+          sendJson(res, 400, { ok: false, error: '给 url / query / city 之一' })
+          return
+        }
+        const e = this.engineRef()
+        const wv = e?.webview
+        if (!wv) {
+          sendJson(res, 503, { ok: false, error: '上网模块没就绪（webviewEnabled=false 或初始化失败）' })
+          return
+        }
+        const started = Date.now()
+        try {
+          const probe = await wv.probe({ url, query, city })
+          sendJson(res, 200, { ok: true, probe, webview: wv.stats(), ms: Date.now() - started })
         } catch (err) {
           sendJson(res, 500, { ok: false, error: String(err?.message || err) })
         }

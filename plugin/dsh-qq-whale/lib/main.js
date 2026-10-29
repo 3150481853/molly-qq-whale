@@ -520,6 +520,26 @@ export const DEFAULTS = {
   // 超时就当没查到、照常聊天。2026-10-20 主人要求放宽到 5 分钟（原 45 秒）。
   researchTimeoutSeconds: 300,
 
+  // —— 上网（2026-10-28）——
+  // 思路来自 QQ-A（MIT）第九节：
+  // 出门逛逛、回来带着出处；外面拿回来的内容一律只当资料。
+  // 实现是自研零依赖 lib/webview.js，SSRF 守卫搬自它的
+  // vendor/social-reader/safe-fetch.js（版权与全文见 THIRD-PARTY-NOTICES.md）。
+  // 没开 / 超次数 / 不在时段，一律当「没查到」处理，不报错、不拖慢聊天。
+  webviewEnabled: true,
+  webviewSearchEnabled: true,
+  webviewFetchEnabled: true,
+  webviewWeatherEnabled: true,
+  // 每天最多几次网络动作（搜索/读页/天气各算一次），上游同名默认也是 30。
+  webviewDailyLimit: 30,
+  // 允许上网的时段（HH:mm-HH:mm，跨午夜自动处理）。留空 = 全天。
+  // 上游默认 09:00-22:00 是按「角色自己闲逛」定的；Molly 这条线是回答主人问题，
+  // 半夜被问天气也得答，所以默认全天。
+  webviewHours: '',
+  webviewTimeoutSeconds: 15,
+  webviewMaxChars: 4000,
+  webviewMaxResults: 5,
+
   // —— 调试 ——
   blindMode: false,
   logLevel: 'info',
@@ -926,6 +946,16 @@ function _configShapeReference(Schema) {
     stickerDir: s.string().default(''),
     memoryDir: s.string().default(''),
     workshopDir: s.string().default(''),
+    // 上网（2026-10-28）：本地搜索/读页/天气。关掉后退回只用干活会话那条慢路。
+    webviewEnabled: s.boolean().default(DEFAULTS.webviewEnabled).description('上网模块总开关（本地搜索/读页/天气）'),
+    webviewSearchEnabled: s.boolean().default(DEFAULTS.webviewSearchEnabled).description('允许自动搜索（Bing RSS）'),
+    webviewFetchEnabled: s.boolean().default(DEFAULTS.webviewFetchEnabled).description('允许自动读网页正文（带 SSRF 守卫）'),
+    webviewWeatherEnabled: s.boolean().default(DEFAULTS.webviewWeatherEnabled).description('允许查天气（wttr.in，失败退回 open-meteo）'),
+    webviewDailyLimit: s.natural().default(DEFAULTS.webviewDailyLimit).description('每天最多上网动作次数（搜索/读页/天气各算一次）'),
+    webviewHours: s.string().default(DEFAULTS.webviewHours).description('允许上网的时段 HH:mm-HH:mm，留空=全天'),
+    webviewTimeoutSeconds: s.natural().default(DEFAULTS.webviewTimeoutSeconds).description('单个网络请求超时（秒）'),
+    webviewMaxChars: s.natural().default(DEFAULTS.webviewMaxChars).description('读网页时最多保留多少字正文'),
+    webviewMaxResults: s.natural().default(DEFAULTS.webviewMaxResults).description('一次搜索最多取几条结果'),
     stickerLearn: s.boolean().default(DEFAULTS.stickerLearn).description('偷学别人发的表情包（只认 QQ 动画表情/商城表情，需视觉模型）'),
     stickerLearnMaxFileSizeMB: s.natural().default(DEFAULTS.stickerLearnMaxFileSizeMB),
     stickerLearnMaxPerDay: s.natural().default(DEFAULTS.stickerLearnMaxPerDay),

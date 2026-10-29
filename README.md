@@ -9,20 +9,27 @@
 
 <div align="center">
 
-<img src="assets/hero-v113.svg" width="880" alt="Molly QQ Whale">
+<img src="assets/hero-v117.svg" width="880" alt="Molly QQ Whale">
 
 基于 **DeepSeek Harness** 的 QQ 通道插件：稳定的人设、长期记忆、表情包习惯、会发语音，
 以及一个能看懂她此刻在干什么的控制台。
 
-**最近版本：** `v1.1.5-A-Hotfix.1`（推荐）· 完整记录见 [docs/CHANGELOG.md](docs/CHANGELOG.md) 与 [Releases](../../releases)。
+**最近版本：** `v1.1.7-preview.1`（预览，2026-10-30）· 上一个稳定版 `v1.1.6-Hotfix.1` · 完整记录见 [docs/CHANGELOG.md](docs/CHANGELOG.md) 与 [Releases](../../releases)。
 
-> ⚠️ `v1.1.5` 与 `v1.1.5-Hotfix.1` 已被**撤回删除**（会把群里的人认错），请用 `v1.1.5-A-Hotfix.1`。
+> ⚠️ `v1.1.5` 与 `v1.1.5-Hotfix.1` 已被**撤回删除**（会把群里的人认错），请用 `v1.1.7-preview.1` 或 `v1.1.6-Hotfix.1`。
 
-**版本线（新 → 旧）：** `v1.1.5-A-Hotfix.1` · `v1.1.5-A` · `v1.1.5-Hotfix.3` · `v1.1.5-Hotfix.2` · `v1.1.3-Hotfix.3` · `v1.1.3-plus.2` · `v1.1.3` · `v1.1.0`
+**版本线（新 → 旧）：** `v1.1.7-preview.1` · `v1.1.6-Hotfix.1` · `v1.1.6` · `v1.1.6-preview.6` · `v1.1.5-A-Hotfix.1` · `v1.1.5-A` · `v1.1.5-Hotfix.3` · `v1.1.3-Hotfix.3` · `v1.1.3` · `v1.1.0`
+
+**这一版新增：**
+
+- **会自己上网**：她能搜、能读网页、能查天气（可关），外部资料只作参考、不覆盖她原本的判断。
+- **动图 12 格**：一张动图取 12 个瞬间拼成一张图；提示词钉死「这是一张动图，别数格子」。
+- **作息面板不再回默认**：控制台进设置页自动回读睡眠时间，没读到之前不允许保存。
+- **新手部署教程**：[docs/beginner-deploy.md](docs/beginner-deploy.md)，从装 Node 到能聊天，一条命令一条命令地抄。
 
 更早版本、`v1.1.5-preview.*` 与已撤回的版本，见 [CHANGELOG](docs/CHANGELOG.md)。
 
-[![license](https://img.shields.io/badge/license-MIT-1aae39?style=flat-square)](LICENSE) [![node](https://img.shields.io/badge/node-22%2B-1aae39?style=flat-square)](https://nodejs.org) [![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0075de?style=flat-square)](#环境要求) [![host](https://img.shields.io/badge/host-DeepSeek%20Harness-5645d4?style=flat-square)](#环境要求) [![QQ](https://img.shields.io/badge/QQ-OneBot%2011-0075de?style=flat-square)](#环境要求)
+[![license](https://img.shields.io/badge/license-MIT-1aae39?style=flat-square)](LICENSE) [![node](https://img.shields.io/badge/node-24.22.1%2B-1aae39?style=flat-square)](https://nodejs.org) [![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0075de?style=flat-square)](#环境要求) [![host](https://img.shields.io/badge/host-DeepSeek%20Harness-5645d4?style=flat-square)](#环境要求) [![QQ](https://img.shields.io/badge/QQ-OneBot%2011-0075de?style=flat-square)](#环境要求)
 
 </div>
 

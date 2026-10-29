@@ -428,9 +428,10 @@ export async function buildMessages(conv, norm, userName, { degraded = false } =
           // 图在前、文字在后：上游对「先看图再看问题」的识别率明显更高
           for (const im of imgs) parts.push({ type: 'image_url', image_url: { url: im.url } })
           // 动图拆过帧的话补一句说明，模型才知道这张大图是「按时间排的帧」。
-          const gifNote = imgs.some((im) => im.gifFrames > 1)
-            ? '（图中动图已拆成多帧拼成一张：每格左上角「n/N」是第几帧，按顺序看就是完整动作）'
-            : ''
+          // 2026-10-30（主人）：「她说的是『这六格』」——光解释「按顺序看」不够，
+          // 她还是会去数格子。这里把「这是一张动图」和「不许说几张/几格」写死进说明里。
+          const gifFrames = imgs.find((im) => im.gifFrames > 1)?.frames || 0
+          const gifNote = gifFrames > 1 ? gifNoteText(gifFrames) : ''
           // 纯图片消息也得带上标签，否则模型不知道这张图是谁发的
           parts.push({ type: 'text', text: label + (h.text || '[图片]') + gifNote })
           msgs.push({ role: 'user', content: parts })
@@ -442,6 +443,22 @@ export async function buildMessages(conv, norm, userName, { degraded = false } =
       }
     }
     return msgs
+}
+
+/**
+ * 动图拼图随图附带的说明。
+ *
+ * 2026-10-30（主人）：「准确来说她说的是『这六格』」——只在说明里讲「按顺序看」，
+ * 她仍然会把 3×2 的拼图读成「六张/六格」。所以这里写三件事：
+ *   1. 这是**一张动图**，不是多张图；
+ *   2. 格子上「1/N」只是先后顺序；
+ *   3. 明确禁止「这几张/这几格/几帧/拼图」这类数数的说法。
+ *
+ * 导出是为了让测试能直接断言措辞（tools/test-gif-note.mjs）。
+ */
+export function gifNoteText(frames = 12) {
+    const n = Math.max(1, Number(frames) || 1)
+    return `（这是一张动图，按时间均匀取了 ${n} 个瞬间排在同一张图里；格子左上角的「1/${n}」…「${n}/${n}」只表示先后顺序。把它当成一张动图，直接描述发生了什么动作就好：不要说「这几张」「这几格」「几帧」「拼图」，也不要逐格报数。）`
 }
 
 export function buildHistoryMessages(conv, userName = '', deps) {

@@ -625,12 +625,12 @@ export const DEFAULTS = {
   // 做法：发给模型之前把 GIF 采样成 N 帧、拼成一张带帧号的大图（lib/gif-frames.js）。
   // 依赖本机 python+Pillow（venv 里已有）；缺环境/超时自动回退原图，不耽误回复。
   gifFramesEnabled: true,
-  // 采样几帧（0 = 关掉拆帧；4~9 之间信息量与体积比较平衡）
-  gifFramesCount: 6,
-  // 拼图列数（3 列 2 行最适合「按顺序看」）
-  gifFramesColumns: 3,
-  // 每帧缩放后的宽度（像素）：320 → 拼图约 976 宽，视觉得清又不太吃 token
-  gifFrameWidth: 320,
+  // 采样几帧（0 = 关掉拆帧；2026-10-29 定稿：12 帧，配合 4 列 240px）
+  gifFramesCount: 12,
+  // 拼图列数（4 列 × 3 行；宽度 4*(240+4)+4 ≈ 980 px，不触发上游缩放）
+  gifFramesColumns: 4,
+  // 每帧缩放后的宽度（像素）：240 → 12 格拼图 ≈ 980×850，约 1.1k 视觉 token
+  gifFrameWidth: 240,
   // 留空 = 没装 Pillow 就安静回退「只发首帧」。
   gifFramesPython: '',
   // 拆帧总超时（毫秒）：单张实测 0.2–1.2 秒

@@ -31,9 +31,12 @@ import path from 'node:path'
 /** 动图拆帧的默认参数（配置键见 main.js 的 gif* 一组） */
 export const GIF_DEFAULTS = {
   enabled: true,
-  frames: 6,
-  columns: 3,
-  frameWidth: 320,
+  // 2026-10-29 定稿：12 帧 @240px、4 列（主人先要「增加帧数」，再定 12 帧）。
+  // 为什么是这组数：拼图宽度 4*(240+4)+4 = 980 px，不超过上游缩放阈值（~1280），
+  // 单格 240 宽仍能看清表情；12 格 ≈ 1.1k 视觉 token，比 9 帧 @320（≈1.4k）还便宜。
+  frames: 12,
+  columns: 4,
+  frameWidth: 240,
   timeoutMs: 9000,
   // 2026-10-26 部署可移植性：留空 = 没装 Python/Pillow 就安静回退「只发首帧」。
   python: '',

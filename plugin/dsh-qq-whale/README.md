@@ -34,7 +34,7 @@ Then add the mount patch to your profile's `cordis.patch.yml` (the package ships
 Restart the host. Installing from the repository instead of npm also works:
 
 ```bash
-dsh plugin --profile desktop add "github:222222222/molly-qq-whale#path:/plugin/dsh-qq-whale"
+dsh plugin --profile desktop add "github:3150481853/molly-qq-whale#path:/plugin/dsh-qq-whale"
 ```
 
 ## Configure

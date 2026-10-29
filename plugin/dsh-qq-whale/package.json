@@ -26,12 +26,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/222222222/molly-qq-whale.git",
+    "url": "git+https://github.com/3150481853/molly-qq-whale.git",
     "directory": "plugin/dsh-qq-whale"
   },
-  "homepage": "https://github.com/222222222/molly-qq-whale/tree/main/plugin/dsh-qq-whale#readme",
+  "homepage": "https://github.com/3150481853/molly-qq-whale/tree/main/plugin/dsh-qq-whale#readme",
   "bugs": {
-    "url": "https://github.com/222222222/molly-qq-whale/issues"
+    "url": "https://github.com/3150481853/molly-qq-whale/issues"
   },
   "publishConfig": {
     "access": "public"

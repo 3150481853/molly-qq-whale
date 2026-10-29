@@ -316,10 +316,58 @@ const CHECKS = [
 
 const mask = (s) => (String(s).length <= 8 ? `${String(s).slice(0, 2)}***` : `${String(s).slice(0, 4)}...${String(s).slice(-4)}`)
 
-function sanitize(text) {
-  let t = text
-  for (const [re, to] of REPLACEMENTS) t = t.replace(re, to)
+/* ── GitHub 地址豁免（2026-10-29） ─────────────────────────────────────────
+ *
+ * 出事的是 REPLACEMENTS 里「把主人的 QQ 号换成 222222222」那条。
+ * 主人的 QQ 号恰好就是他的 GitHub 账号名，于是那条全局替换把
+ *   https://github.com/3150481853/molly-qq-whale
+ *   git+https://github.com/3150481853/molly-qq-whale.git
+ *   github:3150481853/molly-qq-whale
+ * 一起改成了九个 2 —— 发出去的仓库地址全是 404，插件市场的下载安装命令也装不上
+ * （awesome-dsh-plugin 维护者 2026-10-28 专门来信指出，之前的 PR #9612 就是这么挂的）。
+ *
+ * 账号名出现在自己的仓库地址里本来就是公开信息（GitHub 上那个 URL 谁都能看见），
+ * 所以：地址/简写形态里的账号名不参与脱敏 —— 先把它们换成哨兵，跑完 REPLACEMENTS
+ * 再原样还原。二次扫描时同样先换成哨兵再匹配，否则 qq 规则会把合法地址也判成泄漏。
+ *
+ * 注意：下面这个常量**故意拆成两段拼**。本文件自己也要过一遍脱敏，写成整串会被
+ * 它自己的规则改成九个 2，发布副本里就变成「豁免器只认 222222222」，下轮构建直接跑歪。
+ */
+const GH_OWNER = ['3150', '481853'].join('')
+
+/** 哨兵：故意不含数字，免得被 QQ 号/端口规则二次命中。同样拆开拼 —— 整串写字面量的话，
+ *  restoreGithubUrls 会把它自己这行也还原成真账号号，然后被兜底替换成 <REDACTED>。 */
+const GH_OWNER_SENTINEL = ['@@GH', 'OWNER@@'].join('')
+
+/** 需要豁免的地址形态（先长后短，避免前缀被先吃掉）。用 RegExp 拼，账号名同样不落成整串 */
+const GH_OWNER_URL_RES = [
+  // 带域名的：https://github.com/<owner>/...、raw/codeload/objects、api.github.com/repos/<owner>
+  new RegExp(
+    `(?:https?:\/\/)?(?:github\\.com|raw\\.githubusercontent\\.com|codeload\\.github\\.com|objects\\.githubusercontent\\.com|api\\.github\\.com\/repos)\/${GH_OWNER}\\b`,
+    'g',
+  ),
+  // dsh / pnpm 的安装简写：github:<owner>/...
+  new RegExp(`github:${GH_OWNER}\\b`, 'g'),
+  // 裸 slug：`<owner>/molly-qq-whale`（前面紧邻字母数字或 ./- 时不动，避免误伤别的数字串）
+  new RegExp(`(?<![\\w.\\/-])${GH_OWNER}(?=\/)`, 'g'),
+]
+
+/** 把地址形态里的账号名换成哨兵 */
+function protectGithubUrls(text) {
+  let t = String(text)
+  for (const re of GH_OWNER_URL_RES) t = t.replace(re, (m) => m.split(GH_OWNER).join(GH_OWNER_SENTINEL))
   return t
+}
+
+/** 哨兵还原成真账号名 */
+function restoreGithubUrls(text) {
+  return String(text).split(GH_OWNER_SENTINEL).join(GH_OWNER)
+}
+
+function sanitize(text) {
+  let t = protectGithubUrls(text)
+  for (const [re, to] of REPLACEMENTS) t = t.replace(re, to)
+  return restoreGithubUrls(t)
 }
 
 /** 扫一段文本，返回命中列表（relName 只用于报告） */
@@ -327,10 +375,12 @@ function verifyText(relName, text) {
   const hits = []
   const lines = String(text).split('\n')
   lines.forEach((line, i) => {
+    // 地址形态里的 GitHub 账号名是公开信息，先换成哨兵，免得被 qq 规则判成泄漏
+    const scanned = protectGithubUrls(line)
     for (const c of CHECKS) {
       c.re.lastIndex = 0
       let m
-      while ((m = c.re.exec(line))) {
+      while ((m = c.re.exec(scanned))) {
         const v = m[1] || m[0]
         if (ALLOW.has(v)) continue
         if (/\$\{/.test(v)) continue // 已经是我们自己的占位符（${NAPCAT_TOKEN} 这种），不是泄漏

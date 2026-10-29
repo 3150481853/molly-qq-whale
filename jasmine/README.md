@@ -67,7 +67,7 @@ node --test "test/**/*.test.mjs"
 
 ## 跟 Molly 的关系
 
-茉莉花是 [Molly（dsh-qq-whale）](https://github.com/222222222/molly-qq-whale) 的记忆底座：
+茉莉花是 [Molly（dsh-qq-whale）](https://github.com/3150481853/molly-qq-whale) 的记忆底座：
 默认随 Molly 的每一次更新一起发布，同时在同一个仓库的 `jasmine` 分支上独立维护
 （本分支只放记忆系统本身，不含 QQ/DSH 相关代码），供别的 Agent 架构直接移植
 （**不依赖 DSH，也不依赖 QQ**）。

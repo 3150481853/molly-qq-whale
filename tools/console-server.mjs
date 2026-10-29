@@ -162,7 +162,24 @@ const NAPCAT = stripSlash(pick('MOLLY_NAPCAT', 'napcat', 'http://127.0.0.1:6099'
 // SnowLuma OneBot HTTP（P2 迁移后的主后端）。token 与 watchdog-config.json 的 snowluma.token 一致。
 // 注意：token 只在服务端内存里用，绝不回显给前端、绝不写日志。
 const SNOWLUMA = stripSlash(pick('MOLLY_SNOWLUMA', 'snowluma', 'http://127.0.0.1:3000'));
-const SNOWLUMA_TOKEN = String(pick('MOLLY_SNOWLUMA_TOKEN', 'snowlumaToken', '${ONEBOT_TOKEN}')).trim();
+// 2026-10-29 修：这行的默认值原先是个字面量 '${ONEBOT_TOKEN}'——全工程没有任何地方展开它，
+// 于是控制台带着这个假 token 去打 SnowLuma 的 OneBot HTTP，被 401 拒，页面就显示
+// 「QQ 客户端 未登录 / 错误 unauthorized」，而 Molly 的 WS 链路其实是通的（所以状态又是「已连接」）。
+// 现在按「环境变量 > console.json 的 snowlumaToken > watchdog-config.json 的 snowluma.token」
+// 取真 token（watchdog-config.json 才是一直在用的唯一真源）；三处都没有就留空 = 不发
+// Authorization 头，行为可预期，不再发假 token 去撞 401。
+const SNOWLUMA_TOKEN = String(
+  (() => {
+    const direct = pick('MOLLY_SNOWLUMA_TOKEN', 'snowlumaToken', '');
+    if (direct) return direct;
+    try {
+      const wd = JSON.parse(fs.readFileSync(path.join(ROOT, 'watchdog-config.json'), 'utf8'));
+      return String((wd && wd.snowluma && wd.snowluma.token) || '').trim();
+    } catch {
+      return '';
+    }
+  })(),
+).trim();
 const SNOWLUMA_WEBUI = stripSlash(pick('MOLLY_SNOWLUMA_WEBUI', 'snowlumaWebui', 'http://127.0.0.1:5099'));
 // 强制后端：空 = 每次都读 watchdog-config.json 的 backend（默认 snowluma）
 const FORCE_BACKEND = String(pick('MOLLY_BACKEND', 'backend', '')).trim();

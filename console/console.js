@@ -2917,7 +2917,7 @@
     var full = $('#chgFull');
     if (full) full.addEventListener('click', function (ev) {
       ev.preventDefault();
-      window.open('https://github.com/222222222/molly-qq-whale/blob/main/docs/CHANGELOG.md', '_blank', 'noopener');
+      window.open('https://github.com/3150481853/molly-qq-whale/blob/main/docs/CHANGELOG.md', '_blank', 'noopener');
     });
   }
 

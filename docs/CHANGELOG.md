@@ -7,6 +7,85 @@
 
 ---
 
+## 2026-10-29 · 控制台「QQ 客户端 未登录」：SnowLuma token 落到字面量 `${ONEBOT_TOKEN}`
+
+> 主人（m00844，配截图）：「顺便检查一下为什么这边显示qq未登录」。
+> 未升版本号（仍是 `1.1.6-Hotfix.1`），只改控制台服务端**取 token 的方式**，不动 OneBot 链路。
+
+**现象**：控制台「QQ 连接」页自相矛盾 —— 状态「Molly 已连接 QQ」、Molly 链路「已连接」，但 **QQ 客户端「未登录」**，下面还挂一行红字 `unauthorized`；顶栏三个灯全绿。
+
+**根因**（`tools/console-server.mjs:165`）：
+```js
+const SNOWLUMA_TOKEN = String(pick('MOLLY_SNOWLUMA_TOKEN', 'snowlumaToken', '${ONEBOT_TOKEN}')).trim()
+```
+`pick()` 只做「环境变量 → `console.json` 的 key → 字面 fallback」三选一，**从不展开 `${...}`**；`console.json` 里没有 `snowlumaToken`，`MOLLY_SNOWLUMA_TOKEN` / `ONEBOT_TOKEN` 在 User / Machine 两级都没设 ⇒ 控制台一直拿字符串 `Bearer ${ONEBOT_TOKEN}` 去打 SnowLuma，被 401 拒；OneBot 回 `retcode ≠ 0` + `message: unauthorized` ⇒ `buildSnowluma()` 走 `retcode !== 0` 分支，得到 `isLogin:false` + `loginError:'unauthorized'` ⇒ 前端 `clientReachable=true / clientLogin=false` ⇒ 渲染成「未登录」（而不是「不可达」）。Molly 自己的 WS 链路用的是另一套凭据，照样通，所以状态行还是「已连接」。
+
+**改动**（1 个文件）：
+- `tools/console-server.mjs`：token 取值链改成「`MOLLY_SNOWLUMA_TOKEN` → `console.json` 的 `snowlumaToken` → **`watchdog-config.json` 的 `snowluma.token`**（唯一真源）→ 空串」；三处都没有就**不发** `Authorization` 头，不再拿假 token 去撞 401。上方留中文注释写明这次事故。
+
+**验证**（`Invoke-WebRequest -Method POST http://127.0.0.1:3000/get_login_info`）：
+
+| 请求头 | 结果 |
+| --- | --- |
+| 不带 auth | **401** |
+| `Bearer ${ONEBOT_TOKEN}`（事故现场原样） | **401** |
+| `Bearer <watchdog-config.json 里的 token>` | **200** `{"status":"ok","retcode":0,"data":{"nickname":"Molly"}}` |
+
+改完 `--check` 语法校验 exit 0 → `Stop-Process` 旧 pid → `Start-ScheduledTask Molly-Console`（动作是 `wscript.exe tools\console-hidden.vbs`）→ 新 pid 70888 监听 19392。`/api/overview` 的 qq 块变成 `clientLogin:true`、`isLogin:true`、`loginPhase:"online"`、`coreReady:true`、`deepOk:true`、`loginError:""`、`onlineClients:[{"name":"example'sTUF","kind":"手机"}]`，页面「QQ 客户端」变绿「已登录」。
+
+**代价与退回**：无行为代价。若哪天把 token 挪到别处，把新位置加进那条取值链即可；三处都没有时表现为「不发 auth 头」，SnowLuma 若强制要 token 会直接 401（错误仍显示 unauthorized，不会静默变成假在线）。
+
+---
+
+## 2026-10-29 · 发布管线把仓库地址脱敏成 `222222222`（市场里全是 404）
+
+> 触发链：主人（m01404）「所以那个邮件讲的是啥」→ 翻出 awesome-dsh-plugin 维护者 fkysly 2026-10-28 的来信，指出 `package.json` 的 `repository.url` 与插件 README 的安装命令都指向 `222222222/molly-qq-whale`（**404**）；主人（m01432）「可以，你的改动和经验记得写进changelog和state」。
+> 未升版本号（仍是 `1.1.6-Hotfix.1`），只改发布管线的脱敏规则。
+
+**现象**：GitHub 上的 `plugin/dsh-qq-whale/package.json`（`repository.url` / `homepage` / `bugs.url`）、`plugin/dsh-qq-whale/README.md` 的安装命令、根 `README.md` 的安装命令、`jasmine/README.md`、`docs/CHANGELOG.md` 里所有 GitHub 链接，全写成 `https://github.com/222222222/molly-qq-whale` —— 点开是 404，市场里的「安装」命令也装不上。
+
+**根因**：不是笔误。主人的 QQ 号 `3150…853` 恰好就是他的 GitHub 账号名，而 `tools/build-publish.mjs` 的 `REPLACEMENTS` 里有一条**全局**替换 `[/222222222/g, '222222222']`（主人的 QQ 号 → 占位号），于是 `github.com/3150481853/…`、`github:3150481853/…` 一并被改成九个 2。**源仓库里本来就是对的**（`plugin/dsh-qq-whale/package.json:29/32/34` 等处的 URL 都指向真账号名），是构建时才被改坏 —— 所以之前手工改发布副本再推 GitHub（`4226dba6 → d9e7becb`）只是治标，下次重建又会改回去。
+
+**改动**（1 个文件 `tools/build-publish.mjs`）：
+- 新增「GitHub 地址豁免」：跑 `REPLACEMENTS` 之前，先把**地址/简写形态**里的账号名换成哨兵 `@@GH-OWNER@@`，替换完再原样还原。豁免三种形态：带域名的（`github.com` / `raw.githubusercontent.com` / `codeload.github.com` / `objects.githubusercontent.com` / `api.github.com/repos`）、`github:` 安装简写、裸 slug（`<owner>/molly-qq-whale`）。
+- `verifyText()` 同样先换哨兵再匹配，否则 `qq` 规则会把合法地址判成泄漏，触发 `<REDACTED>` 兜底把整个文件里的真账号名连坐替换。
+- `GH_OWNER` 与哨兵常量**拆成两段拼**（`['3150','481853'].join('')`）：本文件自己也要过一遍脱敏，写成整串会被它自己的规则改掉 —— 实测第一版就是这么坏的：还原步把源文件里那句哨兵常量也替换成了真账号名，再被兜底改成 `<REDACTED>`，同时把同文件里 3 处注释 URL 一起连坐。
+
+**验证**：
+- 重建：`node tools\build-publish.mjs` → **207 文件 / 3.50 MB /「第二次扫描：命中 0」/ exit 0**。
+- 发布副本里 `github.com/3150481853` + `github:3150481853` + `raw.githubusercontent.com/3150481853` 共 **13 处**（含新增的注释示例），全部是真账号名；`222222222` 只剩「占位示例号」该在的地方（配置示例、测试夹具、本文件自身的规则表）。
+- 逐处恢复：`plugin/dsh-qq-whale/package.json` 三条 URL、两处 README 安装命令、`jasmine/README.md:70`、`console/console.js:2920`、`docs/CHANGELOG.md` 里的历史 Release 链接。
+
+**代价与退回**：账号名出现在自己的仓库地址里本来就等于公开（GitHub 上那个 URL 谁都能看见），不算泄漏；`222222222` 作为占位示例号仍保留。若将来要连账号名一起藏（比如另建匿名仓库），删掉 `GH_OWNER_URL_RES` 与 `protectGithubUrls` 的两处调用即可恢复旧行为，同时得把文档里的链接改成新仓库地址。
+
+---
+
+## 2026-10-29 · 动图理解：6 帧 → 12 帧（4 列 240px）+ 钉死「这是一张动图，别数格子」
+
+> 主人（m02267）：「准确来说她说的是『这六格』，给 molly 增加帧数（格子）并添加约束词吧」。
+> 未升版本号（仍是 `1.1.6-Hotfix.1`），只改「发图给模型前」的拼图参数与随图说明。
+
+**现象**：动图会被采样成 6 帧、3 列 2 行拼成一张 PNG，每格左上角画着 `1/6`…`6/6`。她看到的是一张图，却按格子读成「六张/六格」，回复里出现「这六格…」。原先的说明只写了「按顺序看就是完整动作」，等于默认她会自己理解成一张动图。
+
+**改动**（4 个文件）：
+
+- `plugin/dsh-qq-whale/lib/gif-frames.js` `GIF_DEFAULTS`：`frames` `6` → `12`、`columns` `3` → `4`、`frameWidth` `320` → `240`（4 列 × 3 行；采样仍是按时间均匀取，不是只取开头）。
+- `plugin/dsh-qq-whale/lib/main.js` `DEFAULTS.gifFramesCount/gifFramesColumns/gifFrameWidth`：`6/3/320` → `12/4/240`（profile 里同步）。
+- `plugin/dsh-qq-whale/lib/engine-context.js`：新增导出函数 `gifNoteText(frames)`，`buildMessages()` 里改成按实际帧数生成说明，措辞为「这是一张动图，按时间均匀取了 N 个瞬间排在同一张图里；格子左上角的 1/N…N/N 只表示先后顺序。把它当成一张动图，直接描述发生了什么动作就好：不要说『这几张』『这几格』『几帧』『拼图』，也不要逐格报数。」
+- `plugin/dsh-qq-whale/lib/persona.js` 人设里补一句同样的约束（收到动图时看到的是同一张图里排开的几个瞬间，不许数几张/几格）。
+- `${HOME}\.dsh\profiles\desktop\cordis.patch.yml` 的 dsh-qq-whale 段：`gifFramesCount: 6` → `12`，并补 `gifFramesColumns: 4`、`gifFrameWidth: 240`。
+
+**验证**：
+
+- 新增 `tools/test-gif-note.mjs`：**12 通过 / 0 失败**（默认帧数 12、列数 4、单帧 240、说明含「一张动图」与 1/12…12/12、禁止数格子的四个词、帧数变化时序号跟着变、非法帧数不产生 NaN、`buildMessages` 真的调用了 `gifNoteText`、`main.js`/`persona.js`/`gif-frames.js` 三处默认值一致）。
+- `tools/test-sanitize.mjs`：**33 / 33**（人设改动没误伤既有清洗逻辑）。
+- 真机样本：`${MOLLY_ROOT}\data\qq-whale\stickers\学来的\Q版女巫_少女_挥手_眨眼_害羞_可爱.gif`（903 KB / 27 帧）→ 实际采样 **12 帧**、拼图 **980×850**、PNG 540 KB，说明里正确写出 `1/12`…`12/12`；按「面积 / 784」估算视觉 token ≈ **1.06k**（比 9 帧 @320 的 976×1114 ≈1.39k 还便宜，因为宽度压到 980 px 不触发上游缩放）。
+- 部署：三个 `lib` 文件覆盖到 `${HOME}\.dsh\profiles\desktop\node_modules\dsh-qq-whale\lib\`（SHA-256 逐一比对一致），`plugin_manager` 关开一次；重载后最新 `gen-mvsyuwue-fhiy53` 副本里已是 `frames: 12` / `columns: 4` / `frameWidth: 240`，`/state` 正常（`enabled=true`、`link=online`、`memory.count=2335`）。
+
+**代价与退回**：12 帧拼图 980×850 ≈ **1.06k 视觉 token**（比 9 帧 @320 的 ≈1.39k 更省，宽 980 px 不触发上游缩放，单格 240 px 仍看得清表情）；一轮里最多同时带 3 张图（`MAX_IMAGE_ENTRIES = 3`），最坏 ≈3.2k，占 128k 窗口约 2.5%。如果觉得太糊或太贵，把 `gifFramesCount` 改回 `6`、`gif-frames.js` 的 `frames/columns/frameWidth` 改回 `6/3/320` 即可恢复旧行为，说明措辞可保留（不影响帧数）。`python`/Pillow 缺失或超时仍会安静回退成「只发首帧」，不会丢消息。
+
+---
+
 ## 2026-10-31 · v1.1.6-Hotfix.1：周信改成「有感受」的写法 + 补一个预览接口
 
 > 主人（m02167）：「1.做，2.主要是不要念流水账，要有molly自己的感受」；发版指令（m02479）：「够了，把改动写1.1.6热修复1就行」。
@@ -856,7 +935,7 @@ git checkout -- plugin/dsh-qq-whale/lib/engine.js plugin/dsh-qq-whale/lib/engine
 
 **发布**
 
-- GitHub Release [v1.1.5-A-Hotfix.1](https://github.com/222222222/molly-qq-whale/releases/tag/v1.1.5-A-Hotfix.1)（**#424182053**，`latest`），tag → `75cf38f`，附件 `molly-qq-whale-v1.1.5-A-Hotfix.1.zip` 1,317,133 B / 177 文件，sha256 `<REDACTED>`；本版**不含语音包**（音色包仍单独发 `voice-pack-v1.2`）。
+- GitHub Release [v1.1.5-A-Hotfix.1](https://github.com/3150481853/molly-qq-whale/releases/tag/v1.1.5-A-Hotfix.1)（**#424182053**，`latest`），tag → `75cf38f`，附件 `molly-qq-whale-v1.1.5-A-Hotfix.1.zip` 1,317,133 B / 177 文件，sha256 `<REDACTED>`；本版**不含语音包**（音色包仍单独发 `voice-pack-v1.2`）。
 - 下载实测：解包 177 文件，包内 `plugin/dsh-qq-whale/package.json` = `1.1.5-A-Hotfix.1`，`lib/hash-commands.js` 含 `linkWords`，`lib/groupfun.js` 含 `requeue`；正文「本版特性」7 条与「内置状态指令」都在。
 - 打包注意：必须在**源仓库**跑 `node tools/release-assets.mjs --tags <tag>`（cwd = `qq-whale`）—— 从发布目录跑会读不到 `tools/release-assets.secrets.json`，隐私扫描退化成只用通用规则，本次实测该名单命中 7 处 / 5 文件。
 
@@ -936,7 +1015,7 @@ git checkout -- plugin/dsh-qq-whale/lib/engine.js plugin/dsh-qq-whale/lib/engine
 - 群里人特别多时，她仍可能只回一条（本版是「只接最近那条」，不是逐条引用）——主人已确认这个取舍。
 - 抽奖房间存在内存里，插件热重载/进程重启会丢那场（心跳兜底只解决「定时器被吞」，解决不了进程重启）。
 
-**发布**：GitHub Release [v1.1.5-A](https://github.com/222222222/molly-qq-whale/releases/tag/v1.1.5-A)（**#424147415**，`latest`），tag → `14bf283`，附件 `molly-qq-whale-v1.1.5-A.zip` 1,306,383 B / 177 文件，sha256 `<REDACTED>`；本版**不含语音包**。
+**发布**：GitHub Release [v1.1.5-A](https://github.com/3150481853/molly-qq-whale/releases/tag/v1.1.5-A)（**#424147415**，`latest`），tag → `14bf283`，附件 `molly-qq-whale-v1.1.5-A.zip` 1,306,383 B / 177 文件，sha256 `<REDACTED>`；本版**不含语音包**。
 
 > 附件 sha256 变更说明（2026-10-26T11:42Z）：发 `v1.1.5-A-Hotfix.1` 时误跑了一次不带 `--tags` 的 `tools/release-assets.mjs`，它把 A / Hotfix.2 / Hotfix.3 三个已发布附件按 tag 树重建重传了。**文件清单、文件内容、压缩后大小都没变**（177 文件 / 1,306,383 B），变的只是 zip 容器本身的字节，所以 sha256 从 `a971bf06…` 变成 `4c55afaf…`；release 正文里的 sha256 已被脚本自动同步成新值，与线上附件一致。下载计数被重置为 0。
 
@@ -972,7 +1051,7 @@ git checkout -- plugin/dsh-qq-whale/lib/engine.js plugin/dsh-qq-whale/lib/engine
 
 **版本**：`1.1.5-Hotfix.3`（不含语音包；语音包仍用 `voice-pack-v1.2`）。
 
-**发布**：GitHub Release [v1.1.5-Hotfix.3](https://github.com/222222222/molly-qq-whale/releases/tag/v1.1.5-Hotfix.3)（#424138530，tag → `fd82f1c`），附件 `molly-qq-whale-v1.1.5-Hotfix.3.zip` 1,305,885 B / 177 文件，sha256 `<REDACTED>`。
+**发布**：GitHub Release [v1.1.5-Hotfix.3](https://github.com/3150481853/molly-qq-whale/releases/tag/v1.1.5-Hotfix.3)（#424138530，tag → `fd82f1c`），附件 `molly-qq-whale-v1.1.5-Hotfix.3.zip` 1,305,885 B / 177 文件，sha256 `<REDACTED>`。
 > 同版本重切过两次：#424127469（10:45，1,300,624 B，sha256 `bb09e620…`）漏了本版补发的两处修复，已删除；重切后旧 tag `b7dab06`/`d80c8c6` 一并作废。
 
 ---

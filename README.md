@@ -166,13 +166,16 @@ flowchart LR
 
 ## 十分钟跑起来
 
+> **完全没装过、只想照着抄？** 直接看 [docs/beginner-deploy.md](docs/beginner-deploy.md)：
+> 那篇是写给「第一次装」的人的——每一步都写清了下载哪个文件、放到哪个目录、点哪个按钮、看到什么算成功、失败了怎么修。
+
 下面四步能让她在你自己的 QQ 里说话。卡住了先看对应的那篇文档。
 
 先把仓库放到本机（`git clone` 或下载 zip），下文假设它在 `D:\molly-qq-whale`。
 
 ### 1 · 把 QQ 接成通道
 
-装好 **SnowLuma**（OneBot 11 框架，要求 Node ≥ 22、与 QQ 同用户同权限），解压后编辑它目录里的 `config\onebot.json`，在 `networks` 里开一对本机 HTTP + WebSocket：
+装好 **SnowLuma**（OneBot 11 框架，**要求 Node ≥ 24.22.1**：Node 22 启动会直接报 `requires Node.js ^24.22.1 || >=26.12.1`；且要与 QQ 同权限，右键「以管理员身份运行」），解压后编辑它目录里的 `config\onebot.json`，在 `networks` 里开一对本机 HTTP + WebSocket：
 
 ```json
 {

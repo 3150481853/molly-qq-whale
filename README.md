@@ -175,15 +175,15 @@ flowchart LR
 ## 十分钟跑起来
 
 > **完全没装过、只想照着抄？** 直接看 [docs/beginner-deploy.md](docs/beginner-deploy.md)：
-> 那篇是写给「第一次装」的人的——每一步都写清了下载哪个文件、放到哪个目录、点哪个按钮、看到什么算成功、失败了怎么修。
+> 那篇分成「AI 代装」和「手动部署」两条路线，并先约定一个工作区（例：`D:\Molly`）：下载的 SnowLuma、仓库、数据都放进去，不往桌面和 C 盘用户目录乱放。
 
 下面四步能让她在你自己的 QQ 里说话。卡住了先看对应的那篇文档。
 
-先把仓库放到本机（`git clone` 或下载 zip），下文假设它在 `D:\molly-qq-whale`。
+先把工作区建好（例：`D:\Molly`），把仓库放进去（`git clone` 或下载 zip 解压到 `D:\Molly\molly-qq-whale`），下文都用这个路径。
 
 ### 1 · 把 QQ 接成通道
 
-装好 **SnowLuma**（OneBot 11 框架，**要求 Node ≥ 24.22.1**：Node 22 启动会直接报 `requires Node.js ^24.22.1 || >=26.12.1`；且要与 QQ 同权限，右键「以管理员身份运行」），解压后编辑它目录里的 `config\onebot.json`，在 `networks` 里开一对本机 HTTP + WebSocket：
+装好 **SnowLuma**（OneBot 11 框架，**要求 Node ≥ 24.22.1**：Node 22 启动会直接报 `requires Node.js ^24.22.1 || >=26.12.1`；且要与 QQ 同权限，右键「以管理员身份运行」），解压到 `D:\Molly\SnowLuma`。**如果解压后没有 `config\onebot.json`，先右键 `launcher.bat` 以管理员运行一次，等它生成配置后再完全关闭**，然后编辑 `config\onebot.json`，在 `networks` 里开一对本机 HTTP + WebSocket：
 
 ```json
 {
@@ -215,7 +215,7 @@ dsh plugin --profile desktop add "github:3150481853/molly-qq-whale#path:/plugin/
 装完仍需写好 `cordis.patch.yml`（见下面第 2 点）。**不想用命令行**的话，照下面的手动做法走。
 
 ```powershell
-# 假设仓库在 D:\molly-qq-whale，profile 名为 desktop（DSH 桌面版默认叫这个）
+# 假设仓库在 D:\Molly\molly-qq-whale，profile 名为 desktop（DSH 桌面版默认叫这个）
 $pdir = "$env:USERPROFILE\.dsh\profiles\desktop\node_modules"
 Copy-Item .\plugin\dsh-qq-whale $pdir -Recurse -Force
 Copy-Item .\plugin\dsh-qq-pest  $pdir -Recurse -Force   # 可选：嘴臭模式，装法同主插件
@@ -223,7 +223,7 @@ Copy-Item .\plugin\dsh-qq-pest  $pdir -Recurse -Force   # 可选：嘴臭模式�
 
 然后改 profile 里的两个文件：
 
-1. **`package.json`** —— `dependencies` 里加一行 `"dsh-qq-whale": "file:D:/molly-qq-whale/plugin/dsh-qq-whale"`，`dsh.profile.bundles` 数组末尾加 `"dsh-qq-whale"`；
+1. **`package.json`** —— `dependencies` 里加一行 `"dsh-qq-whale": "file:D:/Molly/molly-qq-whale/plugin/dsh-qq-whale"`，`dsh.profile.bundles` 数组末尾加 `"dsh-qq-whale"`；
 2. **`cordis.patch.yml`** —— 把 [config/cordis.patch.example.yml](config/cordis.patch.example.yml) 改好（QQ 号、群号、Token、目录、模型），追加到文件末尾。
 
 重启 DSH 宿主。插件只在宿主启动时合并补丁，**热重载只对 `lib/*.js` 的改动生效**。
@@ -256,7 +256,7 @@ config:
 ```powershell
 Copy-Item .\persona\core.example.md .\persona\core.md
 # 然后把 cordis.patch.yml 里的 personaDir 指向这个目录：
-# D:/molly-qq-whale/persona
+# D:/Molly/molly-qq-whale/plugin/dsh-qq-whale/persona
 ```
 
 改完重载插件就生效。示例文件里写的是**结构**，不是人 —— 照抄只会得到一个不像任何人的机器人。写法见 [docs/persona-guide.md](docs/persona-guide.md)。
@@ -274,8 +274,8 @@ node tools\console-server.mjs      # 或直接双击 .\console.cmd
 
 ```json
 {
-  "root": "D:\\molly-qq-whale",
-  "dataDir": "D:\\molly-data\\qq-whale",
+  "root": "D:\\Molly\\molly-qq-whale",
+  "dataDir": "D:\\Molly\\data",
   "nodeExe": "C:\\Program Files\\nodejs\\node.exe"
 }
 ```

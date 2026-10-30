@@ -552,6 +552,15 @@ export class WebWidget {
       const mem = e?.memory
       if (mem && typeof mem.status === 'function') out.memory = mem.status()
       else if (Array.isArray(mem?.entries)) out.memory = { count: mem.length, limit: Number(mem?.limit) || null }
+      // 本地化规则（2026-10-30）：词表不在发布包里，但运行时要让 /state 看得见。
+      if (out.memory && typeof out.memory === 'object') {
+        const words = Array.isArray(e?.config?.memoryBannedWords) ? e.config.memoryBannedWords : []
+        out.memory.localRules = {
+          bannedWords: words.length,
+          bannedWordList: words,
+          note: words.length ? '本机自定义记忆违禁词，发布包默认不含' : '未配置本地违禁词',
+        }
+      }
     } catch {}
     /*
      * 茉莉花记忆系统（2026-10-30）：出口核对的累计计数。

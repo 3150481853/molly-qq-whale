@@ -170,6 +170,8 @@ function makeEngine(owners = [OWNER]) {
   }
   client.call = async (action, params) => {
     apiCalls.push({ action, params })
+    // 好友申请反查用的「可能认识的人」接口：默认空列表，测试里按需塞 eng._doubt。
+    if (action === 'get_doubt_friends_add_request') return { data: eng._doubt || [] }
     return { ok: true }
   }
   eng.client = client
@@ -465,8 +467,126 @@ await ta('群邀请提示也不给副审批人挂称呼', async () => {
   return toApprover.text.startsWith('有人想把我拉进群')
 })
 
+/*
+ * ── 好友申请拿不到 QQ 号（2026-10-30 真机）──
+ *
+ * SnowLuma 的 friend_request 里 user_id 是 resolveUidToUin(uid, 0)，陌生人
+ * 还没进好友表时它就是 0；但 get_doubt_friends_add_request 同时返回 uid 和
+ * 真实 user_id，按 flag（uid）对回去就能把 QQ 号补出来。
+ */
+await ta('onRequest：user_id=0 时用 get_doubt 反查出 QQ 号', async () => {
+  const e = makeEngine()
+  e._doubt = [{ uid: 'u_test', user_id: 3070838421, nick: '添真', msg: '你好，我叫某某' }]
+  await e.onRequest({
+    post_type: 'request',
+    request_type: 'friend',
+    user_id: 0,
+    flag: 'u_test',
+    comment: '你好，我叫某某',
+  })
+  const ask = e._sent.find((s) => s.uid === OWNER)
+  if (!ask) throw new Error('主人没收到申请提示')
+  eq(ask.text.includes('3070838421'), true, '提示里应出现真实 QQ 号：' + ask.text)
+  eq(ask.text.includes('添真'), true, '提示里应出现反查到的昵称：' + ask.text)
+  return e.gatekeeper.pending.has('3070838421')
+})
+
+await ta('parseReplyToPending：四种「回复他」说法都能取出正文', () => {
+  const e = makeEngine()
+  eq(e.parseReplyToPending("回复他 '艹尼玛'"), '艹尼玛')
+  eq(e.parseReplyToPending('回复她「你好」'), '你好')
+  eq(e.parseReplyToPending('回复对方：在吗'), '在吗')
+  eq(e.parseReplyToPending('回复一下申请人：测试'), '测试')
+  eq(e.parseReplyToPending('帮我回复他一下'), '')
+  eq(e.parseReplyToPending('回复'), '')
+})
+
+await ta('tryDirectReplyToPending：回复他 → 发给申请人，不发回主人', async () => {
+  const e = makeEngine()
+  e.gatekeeper.pending.set('3070838421', {
+    userId: '3070838421',
+    kind: 'friend',
+    name: '添真',
+    at: Date.now(),
+    lastAt: Date.now(),
+    flag: 'u_test',
+  })
+  const handled = await e.tryDirectReplyToPending({
+    ev: { user_id: OWNER },
+    task: "回复他 '艹尼玛'",
+    key: OWNER,
+  })
+  const toApplicant = e._sent.find((s) => s.uid === '3070838421')
+  const toOwner = e._sent.find((s) => s.uid === OWNER)
+  eq(handled, true)
+  eq(toApplicant?.text, '艹尼玛', '申请人应收到正文')
+  eq(/已经私聊发给他了/.test(toOwner?.text || ''), true, '主人应只收到一条回执')
+  eq(toOwner?.text.includes('艹尼玛'), false, '回执里不该复述辱骂内容')
+  return true
+})
+
+await ta('tryDirectReplyToPending：待批只存 friend:<flag> 时先反查再发', async () => {
+  const e = makeEngine()
+  e._doubt = [{ uid: 'u_test', user_id: 3070838421, nick: '添真', msg: '你好' }]
+  e.gatekeeper.pending.set('friend:u_test', {
+    userId: 'friend:u_test',
+    kind: 'friend',
+    name: '',
+    lastText: '你好',
+    flag: 'u_test',
+    at: Date.now(),
+    lastAt: Date.now(),
+  })
+  const handled = await e.tryDirectReplyToPending({
+    ev: { user_id: OWNER },
+    task: '回复他「你好呀」',
+    key: OWNER,
+  })
+  const toApplicant = e._sent.find((s) => s.uid === '3070838421')
+  eq(handled, true)
+  eq(toApplicant?.text, '你好呀')
+  return e.gatekeeper.pending.has('3070838421')
+})
+
+await ta('tryVerdict：反查出 QQ 号后回「1」仍能通过这条申请', async () => {
+  const e = makeEngine()
+  e._doubt = [{ uid: 'u_test', user_id: 3070838421, nick: '添真', msg: '你好' }]
+  await e.onRequest({
+    post_type: 'request',
+    request_type: 'friend',
+    user_id: 0,
+    flag: 'u_test',
+    comment: '你好',
+  })
+  e.lastAskAt = Date.now()
+  const handled = await e.tryVerdict({ user_id: OWNER }, { text: '1' })
+  const approveCall = e._api.find((x) => x.action === 'set_friend_add_request')
+  eq(handled, true)
+  eq(approveCall?.params?.flag, 'u_test', '同意时要用申请原始的 flag')
+  eq(approveCall?.params?.approve, true)
+  return true
+})
+
+await ta('tryDirectReplyToPending：多个待批申请先问清楚，不瞎发', async () => {
+  const e = makeEngine()
+  const at = Date.now()
+  e.gatekeeper.pending.set('111111', { userId: '111111', kind: 'friend', name: '甲', at, lastAt: at })
+  e.gatekeeper.pending.set('222222', { userId: '222222', kind: 'friend', name: '乙', at, lastAt: at })
+  const handled = await e.tryDirectReplyToPending({
+    ev: { user_id: OWNER },
+    task: '回复他「在吗」',
+    key: OWNER,
+  })
+  const toOwner = e._sent.find((s) => s.uid === OWNER)
+  eq(handled, true)
+  eq(e._sent.some((s) => s.uid === '111111' || s.uid === '222222'), false, '不确定时不能发')
+  eq(/2 个待批好友申请/.test(toOwner?.text || ''), true)
+  return true
+})
+
 console.log(`\n${fail === 0 ? '全部通过' : '有失败'}：${pass} 通过 / ${fail} 失败`)
 try {
   fs.rmSync(dir, { recursive: true, force: true })
 } catch {}
 process.exit(fail === 0 ? 0 : 1)
+

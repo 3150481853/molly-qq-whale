@@ -7,6 +7,61 @@
 
 ---
 
+## 2026-10-30（深夜）· 记忆闸门：第三人称辈分断言；本地违禁词迁到配置
+
+**改了什么**
+
+- `lib/memory-quality.js` 新增第三人称辈分断言规则（`他是某某爸爸` / `他是XX爷爷` 这类），
+  只拦带人名的辈分断言，不误伤 `他是我爸爸` 这种正常自述；归到 `insult`，进待核实区。
+- 记忆违禁词不再硬编码在源码里：改由 `config.memoryBannedWords`（数组，默认空）提供，
+  `judge()` 按传入词表做子串匹配。发布包默认空表，**不含任何个人化词表**。
+- 本机在 `%USERPROFILE%\.dsh\profiles\desktop\cordis.patch.yml` 的 `dsh-qq-whale` 段配置了
+  本地词表（具体词条只留在本机配置，不写进仓库/发布包）。
+- `/dsh-qq-whale/state` 的 `memory.localRules` 会显示本地违禁词条数、词表和说明，
+  以后排查“为什么这条记忆被拦”不用翻配置。
+
+**验证**
+
+- `tools/test-memory-quality.mjs` **53 通过 / 0 失败**（含“词表命中/未命中/默认空表”三组）。
+- `tools/test-gatekeeper.mjs` **72 通过 / 0 失败**（好友申请修复保持）。
+- 源码与部署副本哈希一致后重载插件；`/state.memory.localRules.bannedWords` 应等于本机词表条数。
+
+**怎么退回**
+
+- 删掉 `cordis.patch.yml` 里的 `memoryBannedWords` 即恢复“无本地违禁词”；
+- 还原 `lib/memory-quality.js` / `lib/engine.js` / `lib/main.js` / `lib/web.js` 到改前备份。
+
+---
+
+## 2026-10-30（晚）· 好友申请：QQ 号反查 + 「回复他」直达申请人
+
+> 用户 m06589：好友 3070838421（「添真」）保留；她一开始只提示「QQ 号暂时拿不到，对方标识：u_xxx」，
+> 而且主人命令「回复他 …」时，话被发回了主人自己的私聊。
+
+**改了什么**
+
+- `lib/engine.js` 新增 `resolveDoubtFriend(ev)`：调 SnowLuma 的 `get_doubt_friends_add_request`，
+  按 `event.flag`（uid）反查 `user_id`，拿到真实 QQ 号后申请人提示里直接显示「昵称（QQ）」。
+- `onRequest()` 优先用反查结果登记待批；反查失败仍退回原来的 `friend:<flag>` 兜底，申请不会丢。
+- 新增 `parseReplyToPending()` / `tryDirectReplyToPending()`：主人说「回复他/她/申请人 …」时，
+  直接私聊那条待批好友申请；多个待批会先问清是哪一个，不再交给干活会话把收件人填成主人。
+- `pendingFriendForReply()` 反查成功后会把 pending 的 Map key 从 `friend:<flag>` 改成真实 QQ，
+  保证主人随后回「1」时 `tryVerdict` 还能按 key 取到这条申请。
+
+**验证**
+
+- `tools/test-gatekeeper.mjs` **72 通过 / 0 失败**（新增反查提示、四种回复句式、直达申请人、
+  多个待批先问、反查后回 1 仍能通过等 6 条）。
+- 源码与部署副本 `engine.js` SHA-256 一致：`<REDACTED>`；
+  插件关开重载后 `/dsh-qq-whale/state` = enabled=true、link=online、failed=[]。
+
+**怎么退回**
+
+- 还原 `plugin/dsh-qq-whale/lib/engine.js` 到 `engine.js.bak-friendfix-20261030`（改前备份），
+  再重载插件；本次只动了 engine.js 与测试文件。
+
+---
+
 ## 2026-10-30 · v1.1.7-preview.1：会自己上网 + 动图 12 格 + 作息面板不再回默认
 
 > 版本口径：插件 `1.1.7-preview.1`（jasmine 仍是 `0.2.0`，这一版没动记忆底座）。
@@ -1129,7 +1184,7 @@ git checkout -- plugin/dsh-qq-whale/lib/engine.js plugin/dsh-qq-whale/lib/engine
 **数据侧（本机，不进代码）**
 
 - 记忆池 1329 → 1301 条：清 26 条脏数据（引用残留 / 问句当事实 / 串号 / 截断句 / 无「叫他」的假称谓），删 3 处 `relations` 里的「他希望你叫他「什」」。
-- 关系簿 42 → 16 条印象（按主人逐条勾选）；「熊文浩 / 陈淇涠」两处真名按主人要求替换为「熊老板 / 涠老板」。
+- 关系簿 42 → 16 条印象（按主人逐条勾选）；两处真名按主人要求换成化名。
 
 ### 不包含
 

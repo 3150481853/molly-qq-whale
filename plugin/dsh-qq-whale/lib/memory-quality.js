@@ -82,6 +82,10 @@ const INSULT_PATTERNS = [
   /(?:你|您)(?:才|就)?是(?:我|他|她|俺)?(?:的)?(?:爹|爸|父亲|老子|儿子|孙子)/u,
   /(?:他|她)(?:才|就)?是(?:你|您)(?:的)?(?:爹|爸|父亲|老子|爷爷)/u,
   /(?:叫|让|喊)(?:你|您)(?:叫|喊)?(?:爹|爸|爷爷)/u,
+  // 1b. 第三人称辈分断言：「他是某某爸爸」「他是XX爷爷」
+  // 群聊里这种基本是玩笑/口嗨，模型不该当真存。
+  // 只拦带人名的（2~4 个汉字 + 辈分词），不误伤「他是我爸爸」这种正常自述。
+  /(?:他|她)是[\u4e00-\u9fff]{2,4}(?:爸爸|爹|爷爷|父亲|老子)/u,
   // 2. 直接骂人
   /傻逼|煞笔|傻b|傻叉|沙比|智障|脑残|废物|垃圾玩意|贱人|犯贱|婊子|贱货|滚蛋|去死|白痴|狗东西|杂种|畜生|孽畜/iu,
   // 3. 第三人称贬损：「他是个傻子」「你是个蠢货」
@@ -151,6 +155,12 @@ function findDuplicate({ text, who, qq, existing }) {
 
 export const RULES = [
   {
+    id: 'banned-word',
+    // 词表由本地配置 `memoryBannedWords` 提供，默认空：发布包不带任何
+    // 个人化违禁词。只做子串匹配，与记忆类别、有没有主语都无关。
+    test: (c) => c.bannedWords.some((w) => c.text.includes(w)),
+  },
+  {
     id: 'no-identity',
     // 表情包记忆没有「谁」，它们由 learnStickers 用固定模板写入，不该被这条拦
     test: (c) => !c.who && !c.qq && c.kind !== 'sticker',
@@ -189,17 +199,22 @@ export const RULES = [
  * @param {string} [input.who]  人名（插件里的 who 字段）
  * @param {string} [input.qq]   QQ 号（可选；没有就只按 who 判重）
  * @param {object[]} [input.existing] 现有记忆数组，判 duplicate 用
+ * @param {string[]} [input.bannedWords] 本地违禁词表（默认空；由 config.memoryBannedWords 传入）
  * @returns {{ok: boolean, reason: string}}
  */
 export function judge(input) {
   input = input || {}
   const text = String(input.text == null ? '' : input.text)
+  const bannedWords = (Array.isArray(input.bannedWords) ? input.bannedWords : [])
+    .map((w) => String(w == null ? '' : w).trim())
+    .filter(Boolean)
   const ctx = {
     text,
     kind: String(input.kind || 'fact'),
     who: String(input.who || '').trim(),
     qq: String(input.qq || '').trim(),
     existing: input.existing || [],
+    bannedWords,
     plain: text.trim(),
     core: coreText(text),
   }
@@ -220,6 +235,7 @@ export function explain(reason) {
   return (
     {
       'no-identity': '没有主语的记忆（who 和 qq 都空），不知道记的是谁',
+      'banned-word': '正文含本地记忆违禁词（词表由 memoryBannedWords 配置提供）',
       insult: '侮辱/占便宜的记录（骂她或拿辈分压她），放进待核实区让人看',
       'too-short': '去掉空白不到 4 个字',
       'self-talk': '模型在自言自语「这轮没什么可记的」',

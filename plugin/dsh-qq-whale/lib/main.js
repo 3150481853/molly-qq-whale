@@ -421,6 +421,9 @@ export const DEFAULTS = {
   memoryGraph: false,
   // 同 tag ≥3 条且被问过 → 自动抽象一条「关于X：…」的规律节点（默认关）。
   memoryAbstract: false,
+  // 本地记忆违禁词（2026-10-30）：只在本机配置里写，发布包默认空表，
+  // 不把主人的个人化词表带到 GitHub。
+  memoryBannedWords: [],
   // 记忆池加密（m00709 第 3 条）：整池 AES-256-GCM 落盘，memory.md 也转成 memory.md.enc。
   // 只有排查问题才该关掉——加密是主人明确要求的行为，默认开。
   memoryEncrypt: true,
@@ -918,6 +921,7 @@ function _configShapeReference(Schema) {
     memoryPoolMax: s.natural().default(DEFAULTS.memoryPoolMax),
     memoryGraph: s.boolean().default(DEFAULTS.memoryGraph).description('识海图：同一次召回命中的记忆两两连边，召回时沿边扩散两跳（关闭时行为与旧版一致）'),
     memoryAbstract: s.boolean().default(DEFAULTS.memoryAbstract).description('同 tag 攒够 3 条且被问过时，自动抽象一条「关于X：…」的规律节点（原条目不删，只降级）'),
+  memoryBannedWords: s.array(s.string()).default(DEFAULTS.memoryBannedWords).description('本地记忆违禁词：命中的记忆直接进待核实区；默认空表，词表只写在本机配置里，不进发布包'),
     memoryEncrypt: s.boolean().default(DEFAULTS.memoryEncrypt),
     memoryKeyFile: s.string().default(DEFAULTS.memoryKeyFile),
     blindMode: s.boolean().default(DEFAULTS.blindMode),

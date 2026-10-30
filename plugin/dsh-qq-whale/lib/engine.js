@@ -2040,6 +2040,135 @@ export class ChatEngine {
     if (typeof timer?.unref === 'function') timer.unref()
   }
 
+  /**
+   * 用 SnowLuma 的 `get_doubt_friends_add_request` 反查好友申请人的 QQ 号。
+   *
+   * 为什么需要它（2026-10-30 真机）：
+   *   SnowLuma 的 friend_request 事件里 `user_id` 是 `resolveUidToUin(uid, 0)`，
+   *   陌生人还没进好友表，本地 identity 缓存里没有 uid→uin 映射，事件里的
+   *   user_id 就是 0。插件以前只能把 `flag`（形如 `u_xxx`）当标识问主人，
+   *   主人看到的是一串看不懂的 uid。
+   *
+   * SnowLuma 自己有一条「可能认识的人」接口，返回的每一项同时带
+   * `uid` 和 `user_id`，正好能用 `event.flag`（就是 uid）对回去。
+   * 拿不到就返回 null，调用方继续走原来的 `friend:<flag>` 兜底，不能因为
+   * 一次反查失败就把申请吞掉。
+   */
+  async resolveDoubtFriend(ev) {
+    const flag = String(ev?.flag || '').trim()
+    if (!flag || !this.client?.callApi) return null
+    try {
+      const r = await this.client.callApi('get_doubt_friends_add_request', { count: 50 })
+      const list = Array.isArray(r)
+        ? r
+        : Array.isArray(r?.data)
+          ? r.data
+          : Array.isArray(r?.result)
+            ? r.result
+            : []
+      const items = list.filter((x) => x && typeof x === 'object')
+      if (!items.length) return null
+      const comment = String(ev?.comment || '').trim()
+      const hit =
+        items.find((x) => String(x.uid || '') === flag) ||
+        (comment ? items.find((x) => String(x.msg || x.reason || '').trim() === comment) : null)
+      const userId = String(hit?.user_id || '').trim()
+      if (!/^\d{5,15}$/.test(userId)) return null
+      return {
+        userId,
+        uid: String(hit.uid || flag),
+        name: String(hit.nick || '').trim(),
+        msg: String(hit.msg || '').trim(),
+      }
+    } catch (err) {
+      this.logger('debug', `反查好友申请 QQ 号失败：${err?.message || err}`)
+      return null
+    }
+  }
+
+  /**
+   * 「回复他/她/申请人」该发给谁。
+   *
+   * 主人收到好友申请提示后，最自然的说法是「回复他 …」，说的就是那条申请。
+   * 这条命令如果交给干活会话，它手里只有「本次命令来自主人的私聊」，
+   * 很容易把 send_private_msg 的 user_id 填成主人自己（2026-10-30 真机）。
+   *
+   * 这里只认「最近 7 天内还在待批、且能拿到真实 QQ 号」的好友申请；
+   * 拿不到 QQ 号就返回空，让原来的执行链路接手，绝不瞎猜收件人。
+   */
+  async pendingFriendForReply() {
+    const gk = this.gatekeeper
+    if (!gk?.pending) return null
+    const now = this.now()
+    const ttl = 7 * 24 * 3600 * 1000
+    const items = [...gk.pending.values()]
+      .filter((x) => x && x.kind === 'friend' && now - Number(x.lastAt || x.at || 0) <= ttl)
+      .sort((a, b) => Number(b.lastAt || b.at || 0) - Number(a.lastAt || a.at || 0))
+    for (const item of items) {
+      if (/^\d{5,15}$/.test(String(item.userId || ''))) return item
+      if (!item.flag) continue
+      const hit = await this.resolveDoubtFriend({ flag: item.flag, comment: item.lastText || '' })
+      if (!hit?.userId) continue
+      // 反查到了就落回 pending，后面同一条申请再命令她回复时不用再查一遍。
+      // Map 的 key 也必须从 friend:<flag> 换成真实 QQ：tryVerdict 是
+      // `pending.get(target)` 取条目的，只改 userId 不改 key，主人回「1」
+      // 会取到空对象、把好友申请当成普通聊天。
+      const oldKey = String(item.userId || '')
+      item.userId = hit.userId
+      item.uid = hit.uid
+      item.name = item.name || hit.name
+      item.unknownUin = false
+      if (oldKey && oldKey !== String(item.userId) && gk.pending.get(oldKey) === item) {
+        gk.pending.delete(oldKey)
+        gk.pending.set(String(item.userId), item)
+      }
+      try {
+        gk.save?.()
+      } catch {}
+      return item
+    }
+    return null
+  }
+
+  /** 从「回复他 '……'」里取出要发的话；不是这个句式就返回空串。 */
+  parseReplyToPending(task) {
+    const m = String(task || '')
+      .trim()
+      .match(/^回复\s*(?:一下)?\s*(?:他|她|对方|申请人|这个号|那个号)\s*[:：,，]?\s*([\s\S]+)$/u)
+    if (!m) return ''
+    return String(m[1] || '')
+      .trim()
+      .replace(/^[“”"'‘’「『]+/u, '')
+      .replace(/[“”"'‘’」』]+$/u, '')
+      .trim()
+  }
+
+  /**
+   * 命令快路径：主人说「回复他 …」时，直接私聊那条待批好友申请。
+   * 返回 true 表示已经处理（含「有多个申请，先问清楚」），runCommand 不再进干活会话。
+   */
+  async tryDirectReplyToPending({ ev, task, key, notify }) {
+    const text = this.parseReplyToPending(task)
+    if (!text) return false
+    const gk = this.gatekeeper
+    if (!gk?.pending) return false
+    const target = await this.pendingFriendForReply()
+    if (!target?.userId) return false
+    const say = typeof notify === 'function' ? notify : (t) => this.replyTo(key, t)
+    const friends = [...gk.pending.values()].filter(
+      (x) => x && x.kind === 'friend',
+    )
+    if (friends.length > 1) {
+      await say(`现在有 ${friends.length} 个待批好友申请，你说的是哪个？把 QQ 号带上，我再发。`)
+      return true
+    }
+    const ok = await this.replyTo(target.userId, text)
+    const who = target.name ? `${target.name}（${target.userId}）` : target.userId
+    await say(ok ? `已经私聊发给他了：${who}` : `发给 ${who} 失败了，QQ 那边没接住。`)
+    this.logger('info', `命令回复待批好友申请 ${who}：${ok ? 'ok' : 'fail'}`)
+    return true
+  }
+
   async onRequest(ev) {
     try {
       const gk = this.gatekeeper
@@ -2056,10 +2185,16 @@ export class ChatEngine {
        * 这里以前直接 `if (!target) return` —— 申请既不进待批队列，也不问主人，
        * 主人只能在 QQ「新朋友」里自己发现，于是有了「两个好友申请没发给我」。
        *
-       * flag（请求凭据）本身是好的，approveRequest 也只需要 flag，所以用
-       * `friend:<flag>` 当临时 key 照常登记 + 私聊主人，回「1」/「通过 1」照样能批。
+       * 2026-10-30 补：SnowLuma 有一个 get_doubt_friends_add_request，能把
+       * 待批申请人的 uid 和真实 QQ 号一起返回；能用它反查就别再让主人看
+       * “QQ 号暂时拿不到”的 uid。反查失败仍然退回 friend:<flag>，申请不能丢。
        */
-      const unknownUin = !target
+      let doubt = null
+      if (!target && flag === 'friend' && ev.flag) {
+        doubt = await this.resolveDoubtFriend(ev)
+        if (doubt?.userId) target = doubt.userId
+      }
+      const unknownUin = flag === 'friend' ? !/^\d{5,15}$/.test(target) : !target
       if (unknownUin && flag === 'friend' && ev.flag) {
         target = `friend:${String(ev.flag).slice(0, 64)}`
       }
@@ -2075,16 +2210,23 @@ export class ChatEngine {
         return
       }
 
-      let name = ''
+      const shownId = /^\d{5,15}$/.test(target) ? target : uid
+      let name = String(doubt?.name || '').trim()
       try {
-        name = uid && !unknownUin ? await this.displayName({ user_id: uid, sender: ev.sender || {} }) : ''
+        if (!name && shownId && !unknownUin) {
+          name = await this.displayName({ user_id: shownId, sender: ev.sender || {} })
+        }
       } catch {}
       // displayName() 在拿不到昵称时会兜底返回 QQ 号本身，于是拼出来
       // 就是「999999999（999999999）」这种蠢相（真机 m16524 截图）。
       // 名字等于号、或者整串就是纯数字号码，一律当没名字处理。
       name = String(name || '').trim()
-      if (name === uid || /^\d{5,12}$/.test(name)) name = ''
-      const who = unknownUin ? '（QQ 号暂时拿不到，对方标识：' + String(ev.flag || '?').slice(0, 24) + '）' : name ? `${name}（${uid}）` : `QQ ${uid}`
+      if (name === shownId || /^\d{5,12}$/.test(name)) name = ''
+      const who = unknownUin
+        ? '（QQ 号暂时拿不到，对方标识：' + String(ev.flag || '?').slice(0, 24) + '）'
+        : name
+          ? `${name}（${shownId}）`
+          : `QQ ${shownId}`
 
       if (!this.client || (gk.owners || []).length === 0) return
 
@@ -2128,6 +2270,7 @@ export class ChatEngine {
         count: 1,
         askedAt: 0,
         invitedBy: uid,
+        uid: doubt?.uid || String(ev.flag || ''),
         flag: ev.flag || '',
         subType: ev.sub_type || '',
         // 好友申请但 QQ 号解析不出来（user_id=0）：approve/deny 后不能写进
@@ -2169,10 +2312,12 @@ export class ChatEngine {
   async replyTo(userId, text) {
     try {
       const uin = String(userId || '')
-      if (!this.client || !uin) return
+      if (!this.client || !uin) return false
       await this.client.sendPrivateMsg(uin, [{ type: 'text', data: { text } }])
+      return true
     } catch (err) {
       this.logger('debug', `回执发给 ${userId} 失败：${err?.message || err}`)
+      return false
     }
   }
 
@@ -2811,7 +2956,14 @@ export class ChatEngine {
   remember({ kind = 'fact', who = '', qq = '', text = '', weight = 6 } = {}) {
     const t = String(text || '').trim()
     if (!t) return null
-    const verdict = judge({ text: t, kind, who, qq, existing: this.memory.entries })
+    const verdict = judge({
+      text: t,
+      kind,
+      who,
+      qq,
+      existing: this.memory.entries,
+      bannedWords: this.config.memoryBannedWords,
+    })
     if (!verdict.ok) {
       this.memoryGate.rejected += 1
       if (verdict.reason === 'duplicate') {
@@ -3968,6 +4120,13 @@ export class ChatEngine {
       if (!clean) return
       await send(buildMessage([{ type: 'text', text: clean }]))
     }
+
+    /*
+     * 「回复他 …」是对某条好友申请说的，不是对主人说的。
+     * 这里先拦下来直达申请人，省得干活会话把 send_private_msg 的 user_id
+     * 填成命令来源（2026-10-30 真机：主人让她回复申请人，她把话发回给了主人）。
+     */
+    if (await this.tryDirectReplyToPending({ ev, task, key, notify: sendText })) return
 
     /*
      * 命令执行期间，agent 自己用工具发给主人的汇报先接下来（见 installReportCapture），
@@ -7445,6 +7604,7 @@ export class ChatEngine {
       '- 聊天里出现的网络热梗/名场面/她自己造的口头禅（原样记那句梗，不要解释）',
       '',
       '不要记：寒暄、语气词、你无法确定的内容、重复的东西（同一件事只记一条）。',
+      '绝对不要记：辈分关系断言（A是B爸爸/爷爷/儿子这种，群里基本是玩笑）、侮辱性内容、骂人话。这些不是事实，是口嗨。',
       /*
        * 2026-10-22（主人反馈）：每条只记了几个字，信息量不够。
        * 原来钉「每条不超过 30 字」，模型就只写「他吐槽工作」这种空壳，

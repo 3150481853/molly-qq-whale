@@ -368,7 +368,7 @@ dsh plugin --profile desktop add "github:3150481853/molly-qq-whale#path:/plugin/
 .dsh\profiles\desktop\cordis.patch.yml
 ```
 
-完整路径形如 `C:\Users\你\.dsh\profiles\desktop\cordis.patch.yml`。
+完整路径形如 `${HOME}\.dsh\profiles\desktop\cordis.patch.yml`。
 
 **先备份**：复制一份，命名 `cordis.patch.yml.bak-日期`。
 
@@ -397,7 +397,7 @@ dsh plugin --profile desktop add "github:3150481853/molly-qq-whale#path:/plugin/
         personaDir: 'D:/Molly/molly-qq-whale/plugin/dsh-qq-whale/persona'
         onebot:
           ws: 'ws://127.0.0.1:3001'
-          token: '你刚才在 onebot.json 里填的那串密码'
+          token: '<REDACTED>'
 ```
 
 **要改的只有这几处：**
@@ -457,7 +457,7 @@ New-Item -ItemType Directory -Force `
         modelBackend: wbai
 ```
 
-前提：电脑上装了 WorkBuddy 桌面端并已登录（默认路径 `D:\APP\WorkBuddy\WorkBuddy.exe`），否则会报「未找到 WorkBuddy 桌面端程序」。
+前提：电脑上装了 WorkBuddy 桌面端并已登录（默认路径 `<REDACTED>\WorkBuddy\WorkBuddy.exe`），否则会报「未找到 WorkBuddy 桌面端程序」。
 
 > 模型没接上，后面全是白装。先在 DSH 里单独测一下 provider 能不能出字，再继续。
 

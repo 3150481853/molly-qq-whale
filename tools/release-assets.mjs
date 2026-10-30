@@ -50,6 +50,24 @@ const SECRETS_FILE = process.env.MOLLY_RELEASE_SECRETS || path.join(process.cwd(
 
 /* ── 每个版本的「本版特性」：写进 release 正文，让仓库读者一眼看到改了什么 ── */
 const RELEASE_FEATURES = {
+  'v1.1.6-Hotfix.2': [
+    '**好友申请不再丢 QQ 号**：SnowLuma 的 `friend_request` 里 `user_id` 解析不出来时是 0，Molly 以前只能提示「QQ 号暂时拿不到」；现在会用 `get_doubt_friends_add_request` 按 uid 反查真实 QQ，提示里直接显示「昵称（QQ）」',
+    '**「回复他」直达申请人**：主人说「回复他/她/申请人 …」时，Molly 直接把话私聊发给那条待批好友申请，不再交给干活会话把收件人填成主人；多个待批会先问清是哪一个',
+    '**第三人称辈分断言进待核实区**：「他是某某爸爸」「他是XX爷爷」这类不再当真入库；`他是我爸爸` 这种正常自述不误伤',
+    '**安装教程重写**：`docs/beginner-deploy.md` 分成 AI 代装 / 手动部署两条路线，统一用 `D:\\Molly` 工作区；SnowLuma 解压后没有 `config\\onebot.json` 就先跑一次 launcher，重复安装导致 CMD 每十几秒启动的排查也写进去了',
+    '本版**不含语音包**；升级直接覆盖插件包，配置不用改。完整逐条记录见仓库 `docs/CHANGELOG.md`',
+  ],
+  'v1.1.7-preview.1': [
+    '**会自己上网**：本地「搜索 / 读网页 / 天气」三通道，零三方依赖，带 SSRF 守卫和每日配额；带链接的消息不再被长度闸门毙掉。开关 `webviewEnabled`，单项可关 `webviewSearchEnabled` / `webviewFetchEnabled` / `webviewWeatherEnabled`',
+    '**动图理解 6 格 → 12 格**：4 列 × 240px，拼图 980×850 ≈1063 token；提示词钉死「这是一张动图，按时间取 12 个瞬间，别数格子」。回 6 格改 `gifFramesCount: 6` / `gifFramesColumns: 3` / `gifFrameWidth: 320`',
+    '**作息面板不再变回默认**：进设置页自动回读真实作息；没读到之前保存按钮禁用。根因是前端硬编码 `23:50 / 09:00`，一点保存就把默认值写回 `sleep-window.json`',
+    '**新手部署教程（重写版）**：`docs/beginner-deploy.md` 分成 AI 代装 / 手动部署两条路线，统一 `D:\\Molly` 工作区；SnowLuma 解压后没有 `config\\onebot.json` 就先跑 launcher，重复安装导致 CMD 闪框的排查也写进去了；Node 要求 **≥ 24.22.1**（Node 22 / 25 都不行）',
+    '**好友申请不再丢 QQ 号**：`user_id` 为 0 时按 uid 反查真实 QQ；主人说「回复他 …」直接私聊待批申请人，不再发回主人自己',
+    '**第三人称辈分断言**：「他是某某爸爸」这类进待核实区，`他是我爸爸` 这类正常自述不误伤',
+    '**SnowLuma 的 `#sl` 说明**：`#sl` 是 SnowLuma 内置状态命令，双开时自己的号也会回；本项目改用 `#molly-sl`，README 顶部已写明',
+    '**表情包数据侧**：额外导入 24 张「大肥鱼」（dsh-meme，MIT）；只动 `data/qq-whale/stickers/`，不进插件包',
+    '本版**不含语音包**；升级直接覆盖插件包，配置不用改。完整逐条记录见仓库 `docs/CHANGELOG.md` 的 `v1.1.7-preview.1` 一节',
+  ],
   'v1.1.6-Hotfix.1': [
     '**热修复（1.1.6 发布后同日）**：只动「每周一封信」的写法和插件接线，记忆模块 API、数据格式、配置项都没变。从 `v1.1.6` 升上来直接覆盖插件包',
     '**周信不再是流水账**：主人原话是「不要念流水账，要有 Molly 自己的感受」。提示词重写成「一个人坐下来写给信得过的人的私房话」——材料只挑一两件展开，写当时的反应和后来的想法；明令禁止「先…然后…接着」的日程式交代、禁止逐条汇报做过的事、禁止把数字写进信里；要求至少四处具体感受，可以写累、写烦、写没底气、写没说出的话；不要只写主人怎么吩咐她，也要写她自己的日子',

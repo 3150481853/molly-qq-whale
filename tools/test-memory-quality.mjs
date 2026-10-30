@@ -217,6 +217,45 @@ check(
   sameTextAsFact.reason,
 )
 
+console.log('\n④ 第三人称辈分断言')
+
+reject(
+  '他是某某爸爸 → insult（第三人称辈分断言）',
+  { kind: 'person', who: '某人', qq: '10001', text: '他是某某爸爸' },
+  'insult',
+)
+accept('他是我爸爸 → 放行（正常自述，不误伤）', {
+  kind: 'person',
+  who: '某人',
+  qq: '10001',
+  text: '他是我爸爸',
+})
+
+console.log('\n⑤ 本地违禁词（词表由 config.memoryBannedWords 传入）')
+
+reject(
+  'bannedWords 命中 → banned-word',
+  { kind: 'fact', who: '某人', qq: '10001', text: '他今天提到了某甲', bannedWords: ['某甲'] },
+  'banned-word',
+)
+accept('bannedWords 没命中 → 照常放行', {
+  kind: 'fact',
+  who: '某人',
+  qq: '10001',
+  text: '他今天提到了某乙',
+  bannedWords: ['某甲'],
+})
+accept('bannedWords 默认空表 → 不拦任何词', {
+  kind: 'fact',
+  who: '某人',
+  qq: '10001',
+  text: '他今天提到了某甲',
+})
+check(
+  'bannedWords 只在配置传入时生效，源码里没有硬编码词表',
+  judge({ kind: 'fact', who: '某人', qq: '10001', text: '他今天提到了某甲' }).ok === true,
+)
+
 console.log(`\n${pass} passed, ${fail} failed`)
 if (fail) {
   console.log('\n失败项：')

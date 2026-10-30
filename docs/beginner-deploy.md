@@ -121,7 +121,7 @@ D:\Molly\
 
 | 验收项 | 应该看到什么 |
 |---|---|
-| Node 版本 | `node -v` 输出 `v24.22.x` 或更高 |
+| Node 版本 | `node -v` 输出 `v24.22.x` 及以上（24 系列），或 `v26.12.x` 及以上 |
 | SnowLuma 端口 | `netstat -ano \| findstr 3001` 有 `LISTENING` |
 | SnowLuma WebUI | 浏览器能打开 `http://127.0.0.1:5099` |
 | DSH 启动 | DSH 主界面能进，插件没有加载失败 |
@@ -178,7 +178,7 @@ New-Item -ItemType Directory -Force 'D:\Molly\downloads','D:\Molly\data','D:\Mol
    - 两种都可以，**记住你选的是哪个**，后面排查要用。
 4. 装完**重新打开**一个 cmd 或 PowerShell 窗口（旧窗口不认新命令）。
 
-**版本要求：** SnowLuma 2.x 要求 **Node ≥ 24.22.1**（或 ≥ 26.12.1）。装成 Node 22 会直接看到：
+**版本要求：** SnowLuma 2.x 只认两个区间：**Node 24.22.1 及以上的 24.x**，或 **Node 26.12.1 及以上**。Node 22、Node 25 都不行（会直接看到）：
 
 ```
 error: SnowLuma requires Node.js ^24.22.1 || >=26.12.1; found v22.x.x
@@ -192,7 +192,7 @@ error: SnowLuma requires Node.js ^24.22.1 || >=26.12.1; found v22.x.x
 node -v
 ```
 
-看到 `v24.22.x` 或更高 → 成功。
+看到 `v24.22.x` 或更高的 24.x → 成功；如果装成 `v25.x`，回官网换回 24 LTS 重装。
 
 > 出错了怎么办：
 > - 报「不是内部或外部命令」→ 安装时没勾 PATH，重装一次并保持默认选项；
@@ -544,7 +544,7 @@ node tools\console-server.mjs
 
 | 软件/组件 | 安装或存放根目录 | 你以后要维护什么 | 怎么维护 |
 |---|---|---|---|
-| Node.js | `C:\Program Files\nodejs` 或 `D:\Molly\apps\nodejs` | 版本（必须 ≥ 24.22.1） | 官网下新的 24 LTS 覆盖安装；`node -v` 验证 |
+| Node.js | `C:\Program Files\nodejs` 或 `D:\Molly\apps\nodejs` | 版本（24.22.1+ 的 24.x，或 26.12.1+） | 官网下新的 24 LTS 覆盖安装；`node -v` 验证 |
 | SnowLuma | `D:\Molly\SnowLuma` | `config\`（OneBot/WebUI 密码）、QQ 登录、`logs\` | 改配置后重启；升级时保留 `config\` 和 `data\`，替换程序文件 |
 | DSH | 安装时选的目录（建议 `D:\Molly\apps\DSH`） | 程序本体、模型 provider | DSH 内更新；配置在 `%USERPROFILE%\.dsh` |
 | Molly 仓库 | `D:\Molly\molly-qq-whale` | 人设、文档、控制台前端 | 下载新版本替换代码；`data` 不要放仓库里 |

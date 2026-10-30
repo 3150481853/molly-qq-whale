@@ -183,7 +183,7 @@ flowchart LR
 
 ### 1 · 把 QQ 接成通道
 
-装好 **SnowLuma**（OneBot 11 框架，**要求 Node ≥ 24.22.1**：Node 22 启动会直接报 `requires Node.js ^24.22.1 || >=26.12.1`；且要与 QQ 同权限，右键「以管理员身份运行」），解压到 `D:\Molly\SnowLuma`。**如果解压后没有 `config\onebot.json`，先右键 `launcher.bat` 以管理员运行一次，等它生成配置后再完全关闭**，然后编辑 `config\onebot.json`，在 `networks` 里开一对本机 HTTP + WebSocket：
+装好 **SnowLuma**（OneBot 11 框架，**Node 只认 24.22.1+ 的 24.x，或 26.12.1+**：Node 22、25 启动会直接报 `requires Node.js ^24.22.1 || >=26.12.1`；且要与 QQ 同权限，右键「以管理员身份运行」），解压到 `D:\Molly\SnowLuma`。**如果解压后没有 `config\onebot.json`，先右键 `launcher.bat` 以管理员运行一次，等它生成配置后再完全关闭**，然后编辑 `config\onebot.json`，在 `networks` 里开一对本机 HTTP + WebSocket：
 
 ```json
 {

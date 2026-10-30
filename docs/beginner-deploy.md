@@ -126,7 +126,7 @@ D:\Molly\
 | SnowLuma WebUI | 浏览器能打开 `http://127.0.0.1:5099` |
 | DSH 启动 | DSH 主界面能进，插件没有加载失败 |
 | 插件存在 | `%USERPROFILE%\.dsh\profiles\desktop\node_modules\dsh-qq-whale\lib\boot.js` 存在 |
-| 插件状态 | `http://127.0.0.1:4739/dsh-qq-whale/state` 返回 JSON，`enabled` 为 `true` |
+| 插件状态 | `http://127.0.0.1:<DSH 端口>/dsh-qq-whale/state` 返回 JSON，`enabled` 为 `true` |
 | 收发消息 | 主号私聊小号说「在吗」，几秒内收到回复 |
 | 部署记录 | `D:\Molly\DEPLOY-INFO.md` 已生成，且不含密码/密钥 |
 
@@ -506,7 +506,7 @@ node tools\console-server.mjs
 | 名称 | 地址 | 密码/登录方式 | 说明 |
 |---|---|---|---|
 | SnowLuma WebUI | `http://127.0.0.1:5099` | 你第一次打开时设的密码 | 看 QQ 在线状态、扫码、改 OneBot 配置 |
-| DSH Web UI | `http://127.0.0.1:4739`（以 DSH 设置为准） | 默认无密码 | 只管本机，不要暴露公网 |
+| DSH Web UI | `http://127.0.0.1:4739`（默认，实际端口以 DSH 设置/启动日志为准，每次启动可能不同） | 默认无密码 | 只管本机，不要暴露公网 |
 | Molly 控制台 | `http://127.0.0.1:19392` | 默认无密码；设了 `MOLLY_CONSOLE_TOKEN` 才要令牌 | 需要先启动 `node tools\console-server.mjs` |
 | OneBot HTTP | `http://127.0.0.1:3000` | `onebot.json` 里的 `accessToken` | 探活/调试用 |
 | OneBot WebSocket | `ws://127.0.0.1:3001` | 同上 | Molly 插件连这个 |
@@ -527,8 +527,8 @@ node tools\console-server.mjs
 
 | 接口 | 用途 | 要不要鉴权 |
 |---|---|---|
-| `http://127.0.0.1:4739/dsh-qq-whale/state` | 插件状态总览（`enabled` / `link` / `memory` / 失败列表） | 无 |
-| `http://127.0.0.1:4739/dsh-qq-whale/sleep` | 作息窗口（`GET` 读，`POST` 写） | 无 |
+| `http://127.0.0.1:<DSH 端口>/dsh-qq-whale/state` | 插件状态总览（`enabled` / `link` / `memory` / 失败列表） | 无 |
+| `http://127.0.0.1:<DSH 端口>/dsh-qq-whale/sleep` | 作息窗口（`GET` 读，`POST` 写） | 无 |
 | `http://127.0.0.1:19392/api/health` | 控制台健康检查（版本号） | 默认无 |
 | `http://127.0.0.1:19392/api/overview` | 插件/记忆/预算总览 | 默认无 |
 | `http://127.0.0.1:19392/api/logs?source=plugin&tail=200` | 看日志（`source` 可为 `plugin` / `watchdog` / `console` / `napcat` / `heartbeat`） | 默认无 |

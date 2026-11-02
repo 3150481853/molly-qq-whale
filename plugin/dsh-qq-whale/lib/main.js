@@ -673,6 +673,19 @@ export const DEFAULTS = {
   singingPython: '',
   // 整首渲染超时（毫秒）：40 音节实测 4~20 秒
   singingTimeoutMs: 180000,
+  // —— 点歌（B 站扒音轨，2026-10-31，主人 m01736）——
+  // 曲库里没有的歌：B 站搜 → 扒 DASH 音轨 → pymss 分人声 → RVC 换成 Molly 的嗓子。
+  // 单次 70~90 秒，所以默认只做 75 秒（一段主歌+副歌），整首太慢。
+  singBiliEnabled: true,
+  // venv312（装 RVC + pymss 的那个环境）
+  singBiliPython: '',
+  singBiliScript: '',
+  singBiliMaxSec: 75,
+  singBiliTimeoutMs: 600000,
+  // 曲库里的歌（小星星/两只老虎/生日快乐）也优先走 B 站扒音轨 + RVC 变声。
+  // 内置 singing.js 是「逐字 TTS → 重采样搬音高」，共振峰跟着音高一起搬，听感不人不鬼；
+  // 扒音轨只换嗓子、音高与咬字继承源演唱。想退回内置合成设为 false。
+  singPreferBili: true,
   // —— 戳一戳回应（2026-10-23，主人 m01231；2026-10-24 主人 m01908 改成模型说一句）——
   // 被 QQ 戳一戳时的反射：反戳 / 说一句 / 被连戳多次生气。
   // 反戳与计数不花模型；「说一句」默认让模型现编（pokeUseModel），失败用 lib/poke.js 的固定文案兜底。
@@ -1005,9 +1018,15 @@ function _configShapeReference(Schema) {
     imageMaxTokens: s.natural().default(DEFAULTS.imageMaxTokens).description('带图轮次的输出 token 上限（默认 3200；思考 token 波动大，给多了不亏）'),
     imageReasoningEffort: s.string().default(DEFAULTS.imageReasoningEffort).description('带图轮次的思考强度（minimal/空串=不传）'),
     // —— 唱歌（2026-10-25，主人 m05189-2）——
-    singingEnabled: s.boolean().default(DEFAULTS.singingEnabled).description('唱歌（实验性，默认关闭）：音色未达标已下架，等训练数据够了一起换社区歌唱模型再开'),
-    singingPython: s.string().default(DEFAULTS.singingPython).description('唱歌渲染用的 Python 解释器（需 numpy；默认复用本地 ASR 的 venv）'),
+    singingEnabled: s.boolean().default(DEFAULTS.singingEnabled).description('唱歌：说「唱歌 歌名」就点歌（默认走 B 站扒音轨 + RVC 换成 Molly 音色）'),
+    singingPython: s.string().default(DEFAULTS.singingPython).description('内置合成用的 Python 解释器（仅在 singPreferBili=false 时用到，需 numpy）'),
     singingTimeoutMs: s.natural().default(DEFAULTS.singingTimeoutMs).description('整首渲染超时（毫秒，默认 180000）'),
+    singPreferBili: s.boolean().default(DEFAULTS.singPreferBili).description('曲库里的歌也优先走 B 站扒音轨 + RVC 变声（默认开；关掉就退回内置逐字合成）'),
+    singBiliEnabled: s.boolean().default(DEFAULTS.singBiliEnabled).description('点歌（B 站版）：扒 B 站音轨 → 分人声 → RVC 换成 Molly 音色，发语音前先报出处'),
+    singBiliPython: s.string().default(DEFAULTS.singBiliPython).description('跑 bili_sing.py 的 Python（venv312，装了 RVC/pymss）'),
+    singBiliScript: s.string().default(DEFAULTS.singBiliScript).description('bili_sing.py 的绝对路径'),
+    singBiliMaxSec: s.natural().default(DEFAULTS.singBiliMaxSec).description('一次只做多少秒（默认 75，0=整首）'),
+    singBiliTimeoutMs: s.natural().default(DEFAULTS.singBiliTimeoutMs).description('点歌渲染超时（毫秒，默认 600000）'),
     // —— 戳一戳回应（2026-10-23，主人 m01231）——
     pokeEnabled: s.boolean().default(DEFAULTS.pokeEnabled).description('戳一戳回应：被戳时按概率反戳/说一句，被连戳多次会生气'),
     pokeBackChance: s.number().min(0).max(1).default(DEFAULTS.pokeBackChance).description('被戳时反戳的概率（0~1，默认 0.7）'),

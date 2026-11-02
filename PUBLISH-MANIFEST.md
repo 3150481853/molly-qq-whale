@@ -2,9 +2,9 @@
 
 > 本副本由 `tools/build-publish.mjs` 生成，**勿手改**；要改就改源仓库再重新生成。
 
-- 生成时间：2026-10-30T12:13:10.088Z
-- 文件数：**212**
-- 总体积：**3.69 MB**
+- 生成时间：2026-11-02T15:52:21.421Z
+- 文件数：**213**
+- 总体积：**3.75 MB**
 - 脱敏复检：**命中 0**
 
 ## 顶层结构
@@ -37,6 +37,7 @@
 
 ## 已就地替换成 `<REDACTED>` 的文件
 
+- plugin/dsh-qq-whale/lib/memory.js
 - plugin/dsh-qq-whale/lib/webview.js
 - tools/start-molly.ps1
 - tools/heartbeat-push.mjs

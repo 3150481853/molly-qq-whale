@@ -70,9 +70,10 @@ const DEFAULT_CONFIG = {
   quickLoginRetryMinutes: 30,
   // ── 后端：'snowluma'（2026-10-22 起）还是 'napcat'（回滚用） ──────────
   //
-  // 为什么要换：NapCat 的登录态被腾讯作废后仍然「假在线」——get_status 报
-  // online:true，WebUI 也报 isLogin:true，只有真正往服务端发请求（get_csrf_token）
-  // 才会暴露。watchdog 原来只查 login-doctor 的 isLogin，等于对这类掉线完全失明。
+  // 2026-10-30 修正：原深度探测用 get_csrf_token 判断「假在线」，但该动作实际会
+  // 请求 https://ssl.ptlogin2.qq.com/jump 取网页 skey，属于外部 QQ 网页登录链路，
+  // 与机器人 OneBot 链路是否存活无关；偶发 9 秒超时会把正常的 SnowLuma 误判成掉线。
+  // 现在只以 get_login_info / get_status 这两个本地 OneBot 动作为准。
   //
   // SnowLuma 用同一套 OneBot v11 协议（HTTP 3000 / WS 3001），所以探测逻辑
   // 可以走标准动作；回滚只需把 backend 改回 'napcat'，旧代码保留。
@@ -86,8 +87,7 @@ const DEFAULT_CONFIG = {
     startScript: 'snowluma-start.ps1',
     // 抢修后等待多久再复查（秒）。QQ 启动 + hook 注入 + 登录态建立约 15~40 秒。
     repairWaitSeconds: 25,
-    // 深度探测连续失败几次才判定「假在线」（一次网络抖动不该重启 QQ）
-    deepFailThreshold: 2,
+    // 旧的 deepFailThreshold 已废弃：get_csrf_token 不再作为存活判据。
     // SnowLuma 日志目录（session closed 即时检测用；空 = 默认 ${MOLLY_ROOT}\snowluma\logs）
     logDir: '',
   },
@@ -363,10 +363,11 @@ function runLoginDoctor(args) {
 // SnowLuma 没有 NapCat 那套 WebUI（6099 + login-doctor），但它暴露标准
 // OneBot v11 HTTP（默认 127.0.0.1:3000），所以我们用标准动作探测。
 //
-// 为什么必须做 get_csrf_token（深度探测）：
-//   实测故障是「登录态被腾讯作废，但本地仍认为自己在线」——get_status 报
-//   online:true、get_login_info 也正常返回。只有真正向 QQ 服务端要 bkn
-//   （get_csrf_token）才会失败。这正是 STATE.md §4 #18 要求补的盲区。
+// 2026-10-30 修正：不再做 get_csrf_token 深度探测。
+//   该动作实际走 getSKey() -> https://ssl.ptlogin2.qq.com/jump 取网页 skey，
+//   是外部 QQ 网页登录链路，偶发 10 秒以上；会把正常的 SnowLuma 误判为掉线。
+//   SnowLuma 的存活以本地 get_login_info + get_status 为准；
+//   真实登录态失效由 SnowLuma 日志实证（session closed）兜底。
 function httpPostJson(url, payload, headers = {}, timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
     let u
@@ -424,8 +425,6 @@ async function snowlumaAction(cfg, action, params = {}, timeoutMs = 8000) {
 
 // 返回 { reachable, backend:'snowluma', status:{isLogin, loginPhase, loginError, deepOk, userId, nickname} }
 async function checkStatusSnowluma(cfg, state = {}) {
-  const threshold = Number((cfg.snowluma || {}).deepFailThreshold ?? 2)
-
   // ① 进程/端口都没了 → 连接失败
   let login
   try {
@@ -465,38 +464,15 @@ async function checkStatusSnowluma(cfg, state = {}) {
     return { reachable: true, backend: 'snowluma', status: st }
   }
 
-  // ③ 深度探测：真正向 QQ 服务端要 bkn
-  let deepErr = ''
-  try {
-    const csrf = await snowlumaAction(cfg, 'get_csrf_token', {}, 9000)
-    const d = csrf.data
-    const token = csrf.ok
-      ? (d && typeof d === 'object' ? String(d.token ?? d.bkn ?? d ?? '') : String(d ?? ''))
-      : ''
-    if (csrf.ok && token) st.deepOk = true
-    else deepErr = csrf.message || `get_csrf_token retcode=${csrf.retcode}`
-  } catch (e) {
-    deepErr = String(e?.message || e)
-  }
-
-  if (st.deepOk) {
-    state.deepFails = 0
-    st.isLogin = true
-    st.loginPhase = 'online'
-    return { reachable: true, backend: 'snowluma', status: st }
-  }
-
-  // 深度探测失败：连续 threshold 次才判掉线（一次抖动不折腾 QQ）
-  state.deepFails = Number(state.deepFails || 0) + 1
-  st.loginError = deepErr || 'get_csrf_token 失败'
-  if (state.deepFails < threshold) {
-    st.isLogin = true
-    st.loginPhase = `假在线？(${state.deepFails}/${threshold})`
-    log(`深度探测失败 ${state.deepFails}/${threshold} 次（暂不判掉线）：${st.loginError}`)
-  } else {
-    st.isLogin = false
-    st.loginPhase = '假在线（登录态已失效）'
-  }
+  // ③ 本地健康确认：get_login_info + get_status 都通过，就说明 SnowLuma 的
+  // OneBot HTTP 服务和插件链路是活的。不要再用 get_csrf_token 判活：
+  // 它走 getSKey() -> https://ssl.ptlogin2.qq.com/jump 取网页 skey，
+  // 是外部 QQ 网页登录链路，偶发 10 秒以上，与机器人是否在线无关。
+  // （2026-10-30 事故：9 秒超时连续两次把正常服务误判为掉线。）
+  state.deepFails = 0
+  st.deepOk = true
+  st.isLogin = true
+  st.loginPhase = online === true ? 'online' : 'online（get_status 未给明确状态）'
   return { reachable: true, backend: 'snowluma', status: st }
 }
 

@@ -108,6 +108,9 @@ const { gifContactSheet } = await import(sub('./gif-frames.js'))
 // 唱歌（2026-10-25，主人 m05189-2「鱼想唱歌…让鱼能唱出歌来」）：
 // 逐字 TTS + 音高搬移 + WSOLA 拉伸，见 lib/singing.js。
 const { Singer, SONGS, songNames, parseSingRequest } = await import(sub('./singing.js'))
+// 唱歌 v2（2026-10-31，主人 m01736「去 b 站扒音轨来练」）：曲库里没有的歌就走
+// 「B 站扒音轨 → 分人声 → RVC 换成 Molly 音色」，见 lib/bili-sing.js。
+const { BiliSinger } = await import(sub('./bili-sing.js'))
 // 撤回处理（2026-10-24，主人 m00480）：纯函数模块（字段解析/TTL 清理/history 剔除）。
 // 撤回带来的状态（recalled Map、计数）留在这个类里，方便 /state 观察。
 const recallUtil = await import(sub('./engine-recall.js'))
@@ -354,6 +357,21 @@ export class ChatEngine {
         },
         python: config.singingPython,
         timeoutMs: config.singingTimeoutMs,
+        logger,
+      })
+
+    /**
+     * 点歌（B 站扒音轨 → RVC 换嗓子）。曲库里没有的歌走这条，2026-10-31。
+     * 只在私聊/被 @ 时用，单次 70~90 秒，所以默认只做 75 秒。
+     */
+    this.biliSinger = config.singBiliEnabled === false
+      ? null
+      : new BiliSinger({
+        python: config.singBiliPython || '',
+        script: config.singBiliScript || '',
+        cacheDir: path.join(config.dataDir || config.memoryDir, 'sing', 'bili-cache'),
+        maxSec: config.singBiliMaxSec,
+        timeoutMs: config.singBiliTimeoutMs,
         logger,
       })
 
@@ -3315,6 +3333,25 @@ export class ChatEngine {
     const start = String(this.config.voiceQuietStart ?? '23:50').trim()
     const end = String(this.config.voiceQuietEnd ?? '09:00').trim()
     if (!start || !end) return false
+    return this.quietHit(start, end, now)
+  }
+
+  /**
+   * 唱歌静默时段（2026-10-31 主人：「把 molly 唱歌的限制同语音，十一点五十之后不唱歌，要不然电脑会吵」）。
+   * 默认直接复用语音那套时段（voiceQuietStart/voiceQuietEnd）；
+   * 想单独设就配 `singQuietStart` / `singQuietEnd` 并把 `singQuietFollowVoice` 设 false，
+   * 两个都留空 = 唱歌不限制。
+   */
+  inSingQuietHours(now = this.now()) {
+    if (this.config.singQuietFollowVoice !== false) return this.inVoiceQuietHours(now)
+    const start = String(this.config.singQuietStart ?? '').trim()
+    const end = String(this.config.singQuietEnd ?? '').trim()
+    if (!start || !end) return false
+    return this.quietHit(start, end, now)
+  }
+
+  /** 「当前时间是否落在 [start, end) 这个 HH:mm 区间」——跨午夜也支持。 */
+  quietHit(start, end, now = this.now()) {
     const parse = (s) => {
       const m = /^(\d{1,2}):(\d{2})$/.exec(s)
       if (!m) return null
@@ -3725,19 +3762,103 @@ export class ChatEngine {
    * 谱子/算法在 lib/singing.js：逐字 TTS → 量基频 → 重采样搬音高 →
    * WSOLA 拉回音符时值 → 拼小节；没有 python/嗓子时退回一句「嗓子卡住了」。
    */
-  async maybeSing({ ev, scene, text }) {
-    if (this.config.singingEnabled === false) return false
-    if (!this.singing) return false
-    if (scene !== SCENE_PRIVATE && scene !== SCENE_MENTION) return false
-    const raw = String(text || '').replace(/^(?:@我|@全体成员)\s*/u, '').trim()
-    const req = parseSingRequest(raw)
-    if (!req) return false
-    const songName = req.song && SONGS[req.song] ? req.song : ''
-    if (!songName) {
-      // 点了一首不会的：直接说会哪几首，别装唱
-      await this.sayQuick(ev, scene, `「${req.requested || '这首'}」我还不会唱，会的是：${songNames().join('、')}。`)
+  /**
+   * 回答我上一句的提问（2026-10-31，主人要的「能接话」）。
+   *   · 我问过「网易云还是 B 站」→ 回「网易云」/「B站」→ 按那边重唱
+   *   · 我问过「1/2/3 要哪个」  → 回「2」或丢个 BV 号 → 用那条重唱
+   * 十分钟内有效；对不上就当普通聊天放过去，继续走下一条链路。
+   */
+  async answerSingPending({ ev, scene, text }) {
+    const p = this.singPending
+    if (!p) return false
+    if (Date.now() - (Number(p.at) || 0) > 10 * 60 * 1000) {
+      this.singPending = null
+      return false
+    }
+    const t = String(text || '').trim()
+    if (!t) return false
+    // 静默时段连「回网易云/B站」也不接着唱（2026-10-31 主人要求唱歌同语音时段）
+    if (this.inSingQuietHours()) {
+      this.singPending = null
+      this.logger('info', '点歌续问命中静音时段，作废')
+      await this.sayQuick(ev, scene, '这个点儿不唱歌了，跟语音一样静音（23:50–09:00），白天再点我～')
       return true
     }
+    if (p.kind === 'platform') {
+      const wantNz = /网易云|网易|云音乐|云村|网抑云/i.test(t)
+      const wantBili = /b\s*站|哔哩哔哩|bilibili|破站|小破站/i.test(t)
+      if (!wantNz && !wantBili) return false
+      this.singPending = null
+      const kw = p.artist ? `${p.artist}的${p.keyword}` : p.keyword
+      const q = wantNz ? `去网易云 ${kw}` : `b站 ${kw}`
+      this.logger('info', `点歌平台选定：${wantNz ? '网易云' : 'B 站'}（${kw}）`)
+      await this.singByBili({ song: q }, { ev, scene })
+      return true
+    }
+    if (p.kind === 'choice') {
+      const bvh = t.match(/BV[0-9A-Za-z]{10}/)
+      const m = t.match(/^\s*(?:第)?([1-9])\s*(?:个|首|条)?\s*$/)
+      if (!bvh && !m) return false
+      this.singPending = null
+      const kw = bvh ? bvh[0] : String((p.options || [])[Number(m[1]) - 1] || '')
+      if (!kw) {
+        await this.sayQuick(ev, scene, '这个序号没有对应的版本，把 BV 号发我吧。')
+        return true
+      }
+      this.logger('info', `点歌版本选定：${String(kw).slice(0, 40)}`)
+      await this.singByBili({ song: kw }, { ev, scene })
+      return true
+    }
+    if (p.kind === 'artist') {
+      // 回序号，或者直接说歌手名（「周深」「要周深的」都认）
+      const opts = Array.isArray(p.options) ? p.options : []
+      const m = t.match(/^\s*(?:第)?([1-9])\s*(?:个|首|条)?\s*$/)
+      const norm = (s) => String(s || '').replace(/[\s·・,，。、（）()‘’”"']/g, '').toLowerCase()
+      const nt = norm(t.replace(/^(?:我要|要|就|换|那就|来)\s*/u, ''))
+      let pick = m ? opts[Number(m[1]) - 1] || null : null
+      if (!pick && nt) {
+        pick = opts.find((o) => norm(o.artist) && (norm(o.artist).includes(nt) || nt.includes(norm(o.artist)))) || null
+      }
+      if (!pick) return false
+      this.singPending = null
+      const q = `${pick.artist}的${p.keyword}`
+      this.logger('info', `点歌歌手选定：${pick.artist}（${p.keyword}）`)
+      await this.singByBili({ song: q }, { ev, scene })
+      return true
+    }
+    return false
+  }
+
+  async maybeSing({ ev, scene, text }) {
+    if (this.config.singingEnabled === false) return false
+    if (scene !== SCENE_PRIVATE && scene !== SCENE_MENTION) return false
+    const raw = String(text || '').replace(/^(?:@我|@全体成员)\s*/u, '').trim()
+    // 上一句我问过「网易云还是 B 站」/「要哪个版本」，这条就是回答 → 接着唱
+    if (await this.answerSingPending({ ev, scene, text: raw })) return true
+    const req = parseSingRequest(raw)
+    if (!req) return false
+    // 2026-10-31 主人：「把 molly 唱歌的限制同语音，十一点五十之后不唱歌，要不然电脑会吵」
+    // 静默时段只回一句文字，不渲染、不发语音（渲染也费 GPU，半夜风扇一样吵）。
+    if (this.inSingQuietHours()) {
+      this.logger('info', '点歌命中静音时段（同语音时段），不唱')
+      await this.sayQuick(ev, scene, '这个点儿不唱歌了，跟语音一样静音（23:50–09:00），白天再点我～')
+      return true
+    }
+    const songName = req.song && SONGS[req.song] ? req.song : ''
+    /*
+     * 2026-10-31：曲库里的歌也优先走「B 站扒音轨 + RVC 变声」（singPreferBili，默认开）。
+     * 内置 singing.js 是「逐字 TTS → 重采样搬音高」，会把共振峰一起搬走，听感不人不鬼；
+     * 扒音轨那条路只换嗓子，时间轴 / 音高曲线 / 咬字全继承源演唱，唱功和连贯性都好得多。
+     * 想退回内置合成，把 singPreferBili 设成 false 即可。
+     */
+    if (songName && this.biliSinger?.enabled && this.config.singPreferBili !== false) {
+      return this.singByBili(req, { ev, scene })
+    }
+    if (!songName) {
+      // 曲库里没有 → 去 B 站扒一段真的演唱，只把嗓子换成 Molly 的（2026-10-31）
+      return this.singByBili(req, { ev, scene })
+    }
+    if (!this.singing) return false
     try {
       const res = await this.singing.sing(songName)
       if (!res?.ok || !res.file) {
@@ -3757,6 +3878,135 @@ export class ChatEngine {
       this.logger('warn', `唱歌异常：${err?.message || err}`)
       return false
     }
+  }
+
+  /**
+   * 点歌（B 站版，2026-10-31，主人 m01736）。
+   *
+   * 曲库里没有的歌：B 站搜 → 扒 DASH 音轨 → pymss 分人声 → RVC 换成 Molly 的
+   * 嗓子 → 归一化。**先发一句出处（UP 主 / 标题 / BV 号），再发语音**——这是
+   * 主人点名要的规矩，别省。
+   *
+   * 单次要 70~90 秒，所以在动手前先回一句「等我去扒」，别让对方干等着。
+   */
+  async singByBili(req, { ev, scene }) {
+    const q = String(req.song || req.requested || '').trim()
+    if (!q) return false
+    this.singPending = null          // 新的一次点歌，旧的「等你回话」作废
+    const hit = q.match(/BV[0-9A-Za-z]{10}/)
+    const bv = hit ? hit[0] : ''
+    if (!this.biliSinger || !this.biliSinger.enabled) {
+      await this.sayQuick(ev, scene, '我这边的扒音轨工具没接好（python 或脚本路径没配上），这首先欠着。')
+      return true
+    }
+    // 2026-10-31：出片上限从 55 秒提到 110 秒后，一整首要跑 2~4 分钟（分离+RVC+混音），
+    // 原来的「一两分钟」会让人以为卡住了，改成「两三分钟」。
+    // 主人点歌时若指名了平台（「去网易云」「b站」），预告里也照着说，别骗人。
+    const wantNz = /网易云|网易|云音乐|云村|网抑云/i.test(q)
+    const where = wantNz ? '网易云' : 'B 站'
+    const cleanQ = q.replace(/^(?:去|上|在|从|用)?\s*(?:网易云|网易|云音乐|云村|网抑云|b\s*站|哔哩哔哩|bilibili|破站)\s*/i, '').trim() || q
+    await this.sayQuick(ev, scene, `《${cleanQ}》？行，等我去 ${where} 扒一段回来，两三分钟，别催。`)
+    let res = null
+    try {
+      res = await this.biliSinger.sing(q, { bv })
+    } catch (err) {
+      this.stats.singFail += 1
+      this.logger('warn', `扒音轨唱歌异常：${err?.message || err}`)
+      await this.sayQuick(ev, scene, 'B 站那边没扒下来，这首先欠着。')
+      return true
+    }
+    // 主人 2026-10-31：「默认原唱，没有就问一下」——没搜到原唱就列候选问，不自己拍脑袋
+    if (res?.needChoice) {
+      const opts = Array.isArray(res.options) ? res.options.slice(0, 3) : []
+      const kw = res.keyword || q
+      const lines = [`《${kw}》我搜了一圈，没找到原唱，只有这几个别的版本：`]
+      opts.forEach((t, i) => lines.push(`${i + 1}. ${String(t || '').slice(0, 42)}`))
+      lines.push('要哪个？说个序号（群里 @ 我），或者直接给我 BV 号；不理我就先不唱了。')
+      this.logger('info', `点歌缺原唱，改为提问：${kw}（候选 ${opts.length} 个）`)
+      this.singPending = { kind: 'choice', keyword: kw, options: opts, at: Date.now(), username: ev?.sender?.nickname || '' }
+      await this.sayQuick(ev, scene, lines.join('\n'))
+      return true
+    }
+    /*
+     * 主人 2026-11-01：「如果一首歌有好几个歌手的版本咋办」。
+     * py 侧判出「整首歌长度差 ≥30 秒的几个歌手版本」时不猜，把歌手列出来问；
+     * 他回序号或直接说歌手名就按那个歌手重跑（见 answerSingPending 的 kind='artist'）。
+     */
+    if (res?.needArtist) {
+      const kw = res.keyword || q
+      const opts = Array.isArray(res.options) ? res.options.slice(0, 3) : []
+      const clock = (sec) => (sec > 0 ? `（${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}）` : '')
+      const lines = [`《${kw}》有好几个歌手唱的版本，要谁的？`]
+      opts.forEach((o, i) => lines.push(`${i + 1}. ${String(o.artist || o.name || '').slice(0, 30)}${clock(Math.round(Number(o.dur) || 0))}`))
+      lines.push('回序号，或者直接说歌手名（群里 @ 我），回别的我就先不唱了。')
+      this.logger('info', `点歌多版本，改为提问：${kw}（${opts.length} 个歌手）`)
+      this.singPending = { kind: 'artist', keyword: kw, options: opts, at: Date.now(), username: ev?.sender?.nickname || '' }
+      await this.sayQuick(ev, scene, lines.join('\n'))
+      return true
+    }
+    /*
+     * 主人 2026-10-31：「直接让 molly 问去 B 站还是网易云音乐」。
+     * B 站挑不到原唱、而网易云那边有正主时，不擅自决定，先问一句；
+     * 他回「网易云」或「B站」就按那边重跑（见 answerSingPending）。
+     */
+    if (res?.needPlatform) {
+      const kw = res.keyword || q
+      const nz = res.netease || {}
+      // nz.dur 从 bili_sing.py 过来已经是「秒」，不要再除 1000（2026-10-31 显示成「0秒」的 bug）
+      const nzSec = Math.round(Number(nz.dur) || 0)
+      const clock = (sec) => (sec > 0 ? `（${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}）` : '')
+      const bl = res.bili || {}
+      const bSec = Math.round(Number(bl.dur) || 0)
+      const sameTitle = res.kind === 'same_title' && bl.title
+      const nzLine = nz.name
+        ? `网易云有《${nz.name}》——${String(nz.artists || '').split('/')[0]}${clock(nzSec)}`
+        : '网易云没找到正主'
+      // 同名的两首不同歌：把两边的版本都摆出来问（2026-10-31《一半一半》踩过）
+      const lines = sameTitle
+        ? [
+            `《${kw}》有两首同名的，我拿不准是哪首：`,
+            `· B 站：${String(bl.title).slice(0, 46)}${clock(bSec)}`,
+            `· ${nzLine}`,
+            '要哪个？回「网易云」或「B站」（群里 @ 我），回别的我就先不唱了。',
+          ]
+        : [
+            `《${kw}》两边都能唱：`,
+            `· ${nzLine}`,
+            `· B 站那堆视频里我认不出哪条是原唱`,
+            '去哪边？回「网易云」或「B站」（群里 @ 我），回别的我就先不唱了。',
+          ]
+      this.logger('info', `点歌要选平台：${kw}（kind=${res.kind || 'platform'}，网易云=${nz.name || '无'}）`)
+      this.singPending = {
+        kind: 'platform',
+        keyword: kw,
+        artist: res.artist || '',
+        netease: nz,
+        options: Array.isArray(res.options) ? res.options : [],
+        at: Date.now(),
+      }
+      await this.sayQuick(ev, scene, lines.join('\n'))
+      return true
+    }
+    if (!res?.ok) {
+      this.stats.singFail += 1
+      this.logger('warn', `扒音轨唱歌失败：${res?.error || '未知原因'}`)
+      await this.sayQuick(ev, scene, `没弄成（${String(res?.error || '未知原因').slice(0, 80)}），换一首吧。`)
+      return true
+    }
+    // 规矩：出处先走一条文字，语音跟在后头
+    if (res.creditLine) await this.sayQuick(ev, scene, res.creditLine)
+    let file = res.file
+    try {
+      if (res.mix && fs.existsSync(res.mix)) file = res.mix
+    } catch {
+      // 混音文件读不到就用纯人声
+    }
+    const payload = buildMessage([{ type: 'record', file }])
+    if (ev.message_type === 'group') await this.client.sendGroupMsg(ev.group_id, payload)
+    else await this.client.sendPrivateMsg(ev.user_id, payload)
+    this.stats.singSent += 1
+    this.logger('info', `扒音轨唱歌：${q}${res.bvid ? `（${res.bvid}）` : ''} ${(Number(res.seconds) || 0).toFixed(1)}s 升${res.pitchShift || 0}半音${res.cached ? '，缓存' : ''}`)
+    return true
   }
 
   /**

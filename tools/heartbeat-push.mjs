@@ -70,7 +70,10 @@ const CONSOLE = String(process.env.MOLLY_CONSOLE || cfg.consoleBase || 'http://1
   .replace(/\/+$/, '')
 
 const TIMEOUT_MS = Number(process.env.MOLLY_HEARTBEAT_TIMEOUT_MS || cfg.timeoutMs || 8000)
-const PROBE_TIMEOUT_MS = 800
+// 2026-10-31：800ms 在 DSH 正忙（模型回合/大量工具输出）时不够用，探不到宿主端口
+// 就会把 link 报成 unknown；服务器看到 link!=online 立刻判 molly-offline，
+// 于是出现“每 12 分钟掉线+恢复”的假 PushPlus。给足 5 秒，宁可心跳慢一点。
+const PROBE_TIMEOUT_MS = 5000
 
 const STATE_FILE = path.join(ROOT, 'out', 'heartbeat-state.json')
 // 控制台运维页「心跳」日志读的就是这个文件（console-server readLogTail）
@@ -224,7 +227,7 @@ function listListenPorts() {
     const timer = setTimeout(() => {
       try { ps.kill() } catch { /* ignore */ }
       finish([])
-    }, 4000)
+    }, 8000)
     ps.stdout.on('data', (b) => { out += b.toString('utf8') })
     ps.on('error', () => { clearTimeout(timer); finish([]) })
     ps.on('exit', () => {
@@ -240,7 +243,7 @@ function listListenPorts() {
 
 async function fromConsole() {
   try {
-    const r = await fetch(`${CONSOLE}/api/overview`, { signal: AbortSignal.timeout(2500) })
+    const r = await fetch(`${CONSOLE}/api/overview`, { signal: AbortSignal.timeout(4000) })
     if (!r.ok) return ''
     const d = await r.json()
     const base = d?.plugin?.base
@@ -366,11 +369,21 @@ async function main() {
   }
 
   const startedAt = Date.now()
+  const prev = readState()
   const pluginBase = await resolvePluginBase()
   log(`宿主 ${pluginBase.base || '(没探到)'} 来源=${pluginBase.source}`)
   const plugin = await readPlugin(pluginBase.base)
   const at = Date.now()
-  const link = plugin.ok ? plugin.link || 'unknown' : 'unknown'
+  // 单次探不到宿主时不立刻把上次的 online 打成 unknown：DSH 正忙时 /state
+  // 偶尔会慢过探针超时，服务器收到 unknown 会立刻推“掉登录”，下一分钟又推
+  // “回来了”。给 3 分钟宽限，超过宽限才如实报 unknown。
+  const prevAge = at - Number(prev.lastAt || 0)
+  const graceOnline =
+    !plugin.ok &&
+    prev.link === 'online' &&
+    prevAge > 0 &&
+    prevAge < 3 * 60 * 1000
+  const link = plugin.ok ? plugin.link || 'unknown' : graceOnline ? 'online' : 'unknown'
 
   const payload = {
     at,
@@ -392,7 +405,9 @@ async function main() {
           pest: plugin.pest,
           work: plugin.work,
         }
-      : { link: 'unknown', reason: plugin.reason || 'plugin unreachable' },
+      : graceOnline
+        ? { link: 'online', ready: true, stale: true, reason: plugin.reason || 'probe timeout; keeping last known online' }
+        : { link: 'unknown', reason: plugin.reason || 'plugin unreachable' },
     version: '1.0.0',
   }
 
@@ -403,7 +418,6 @@ async function main() {
 
   const res = await postJson(`${RELAY}/heartbeat`, payload, { 'x-molly-token': TOKEN })
 
-  const prev = readState()
   const next = {
     lastAt: at,
     lastLocal: nowIso(),
@@ -413,8 +427,9 @@ async function main() {
     relay: RELAY,
     host: HOST_LABEL,
     // 探到的宿主端口记下来：下次优先试它，不用再问控制台/扫端口（自愈缓存）。
-    pluginBase: pluginBase.base,
-    pluginBaseVia: pluginBase.source,
+    // 探不到时保留上一次的 base，避免一分钟的空结果把缓存清掉、下一分钟又重扫。
+    pluginBase: pluginBase.base || prev.pluginBase || '',
+    pluginBaseVia: pluginBase.source === 'none' ? prev.pluginBaseVia || 'none' : pluginBase.source,
     link,
   }
   writeState(next)

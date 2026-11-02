@@ -54,6 +54,15 @@ if ($QQOnly) {
   $WaitLoginSeconds = 12
 }
 
+# 维护标记：只在“重启 SnowLuma 但不碰 QQ”时使用。
+# 计划任务无法传参，故用 out\snowluma-restart-only.flag 让提权脚本自己跳过 QQ 关闭/启动。
+$RestartOnlyFlag = Join-Path $ROOT 'out\snowluma-restart-only.flag'
+if (Test-Path -LiteralPath $RestartOnlyFlag) {
+  $SkipQQClose = $true
+  $SkipQQStart = $true
+  Remove-Item -LiteralPath $RestartOnlyFlag -Force -ErrorAction SilentlyContinue
+}
+
 $steps = New-Object System.Collections.ArrayList
 function Log([string]$m) {
   $line = '{0} {1}' -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'), $m

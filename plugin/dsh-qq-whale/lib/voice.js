@@ -186,6 +186,10 @@ export class VoiceMaker {
     voiceName = 'zh-CN-XiaoxiaoNeural',
     rate = '-5%',
     pitch = '+15Hz',
+    speed = 1.0,
+    pauseMs = 0,
+    textSplit = '',
+    fragmentInterval = 0.15,
     timeoutMs = 20000,
     maxChars = 160,
     maxSeconds = 0,
@@ -203,6 +207,13 @@ export class VoiceMaker {
     this.voiceName = voiceName
     this.rate = rate
     this.pitch = pitch
+    // 2026-11-01：这两个以前是死配置（engine 传了，VoiceMaker 根本没接）。
+    // speed → GPT-SoVITS speed_factor（0.93 = 比默认慢 7%）；pauseMs → 句间静音毫秒。
+    this.speed = Number(speed) > 0 ? Number(speed) : 1.0
+    this.pauseMs = Number(pauseMs) > 0 ? Number(pauseMs) : 0
+    // 切分方式：'' / 'auto' = 短句整段合成（cut0，避免逗号前那个字被读重），长句 cut5。
+    this.textSplit = String(textSplit || '').trim()
+    this.fragmentInterval = Number(fragmentInterval) >= 0 ? Number(fragmentInterval) : 0.15
     this.timeoutMs = Number(timeoutMs) || 20000
     this.maxChars = Number(maxChars) || 160
     // 0 / 非正数 = 不限时长（老行为）；配了值就按秒卡（QQ 硬上限 60，默认配 58）。
@@ -382,9 +393,12 @@ export class VoiceMaker {
       ref_audio_path: this.refAudio,
       prompt_text: this.promptText,
       prompt_lang: this.promptLang || 'zh',
-      text_split_method: 'cut5',
+      // 短句整段合成：以前一律 cut5（按逗号切），切出来的每个小段都会自带句尾重音，
+      // 主人 2026-11-01 反馈「逗号前那个字读得有点重」。<=60 字用 cut0 一口气合成。
+      text_split_method: this.textSplit || (String(clean || '').length <= 60 ? 'cut0' : 'cut5'),
       batch_size: 1,
-      speed_factor: 1.0,
+      speed_factor: this.speed,
+      fragment_interval: this.pauseMs > 0 ? this.pauseMs / 1000 : this.fragmentInterval,
       media_type: 'wav',
       streaming_mode: false,
     }

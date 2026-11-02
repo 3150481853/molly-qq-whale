@@ -71,7 +71,17 @@ export function parseSingRequest(text) {
   if (!raw) return null
   const m = /^(?:麻烦|请|给我|快)?\s*(?:唱歌|唱一首|唱一个|唱个|唱一段|来一首|来一个|来段|唱)\s*([\s\S]*)$/u.exec(raw)
   if (!m) return null
-  const rest = String(m[1] || '').replace(/^[了个一首段,，。.、\s]+/u, '').replace(/[。！!？?]+$/u, '').trim()
+  /*
+   * 2026-10-31 修：「唱歌 一半一半」被吃成「半一半」。
+   * 原来这里把开头所有「了个一首段」都当量词剥掉，歌名本身以「一」开头就中招。
+   * 现在只剥真正的量词（个/首/段/次/遍，可带一二两，如「一首」「个别」），
+   * 光秃秃的一个「一」保留给歌名。
+   */
+  const rest = String(m[1] || '')
+    .replace(/^(?:[个]{1}|[一二两]?[首段个次遍])\s*/u, '')
+    .replace(/^[了,，。.、\s]+/u, '')
+    .replace(/[。！!？?]+$/u, '')
+    .trim()
   const songName = rest.replace(/^歌\s*/u, '').trim()
   if (!songName) return { song: SONGS.小星星 ? '小星星' : songNames()[0], requested: '' }
   if (SONGS[songName]) return { song: songName, requested: songName }

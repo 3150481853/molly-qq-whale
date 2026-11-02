@@ -2107,6 +2107,125 @@ export class WebWidget {
     })
 
     /*
+     * POST /dsh-qq-whale/sing/test（2026-10-31，验收用）—— 从 QQ 外面验一遍点歌链路。
+     *
+     * 为什么要有：点歌 = B 站搜 → 扒 DASH 音轨 → pymss 分人声 → RVC 换嗓子 → 先发出处
+     * 再发语音，单次 30~90 秒；靠去 QQ 里喊一嗓子验收又慢又容易打断别人，还分不清
+     * 是「链路坏了」还是「消息没进来」。
+     *
+     * body: {
+     *   dryRun?: true（默认）—— 只跑流水线，一个字都不往 QQ 发
+     *   song?: '小星星'      ← dryRun 时直接跑 BiliSinger（会先搜 B 站）
+     *   bv?: 'BV1xx...'      ← 指定 BV，跳过搜索
+     *   text?: '唱歌 小星星' ← dryRun=false 时喂 maybeSing，整条链路含发言一起跑
+     *   groupId?, userId?
+     * }
+     */
+    add({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/sing/test`,
+      ...wrap(async (req, res) => {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          return
+        }
+        const raw = await readBody(req)
+        let body
+        try {
+          body = JSON.parse(raw || '{}')
+        } catch {
+          sendJson(res, 400, { ok: false, error: 'bad json' })
+          return
+        }
+        const e = this.engineRef()
+        if (!e) {
+          sendJson(res, 503, { ok: false, error: 'engine 还没就绪' })
+          return
+        }
+        const bs = e.biliSinger
+        const info = {
+          enabled: Boolean(bs?.enabled),
+          preferBili: e.config?.singPreferBili !== false,
+          singingEnabled: e.config?.singingEnabled !== false,
+          python: e.config?.singBiliPython || '',
+          script: e.config?.singBiliScript || '',
+          maxSec: e.config?.singBiliMaxSec ?? null,
+          timeoutMs: e.config?.singBiliTimeoutMs ?? null,
+        }
+        const dryRun = body?.dryRun !== false
+
+        if (dryRun) {
+          const song = String(body?.song || '').trim()
+          const bv = String(body?.bv || '').trim()
+          if (!song && !bv) {
+            sendJson(res, 400, { ok: false, dryRun: true, info, error: 'dryRun 需要 song 或 bv' })
+            return
+          }
+          if (!bs?.enabled) {
+            sendJson(res, 200, {
+              ok: false, dryRun: true, info,
+              error: 'BiliSinger 没启用（python 或脚本路径没配上）',
+            })
+            return
+          }
+          const started = Date.now()
+          try {
+            const r = await bs.sing(song || bv, { bv })
+            sendJson(res, 200, {
+              ok: Boolean(r?.ok), dryRun: true, info, result: r || null,
+              ms: Date.now() - started, at: new Date().toISOString(),
+            })
+          } catch (err) {
+            sendJson(res, 200, {
+              ok: false, dryRun: true, info,
+              error: String(err?.stack || err?.message || err),
+              ms: Date.now() - started,
+            })
+          }
+          return
+        }
+
+        const text = String(body?.text || '').trim() || (body?.song ? `唱歌 ${body.song}` : '')
+        if (!text) {
+          sendJson(res, 400, { ok: false, error: 'dryRun=false 时需要 text 或 song' })
+          return
+        }
+        const selfId = String(e.selfId || e.config?.selfId || '')
+        const groupId = body?.groupId ? String(body.groupId) : ''
+        const userId = String(body?.userId || e.config?.ownerUin || '')
+        const ev = {
+          post_type: 'message',
+          message_type: groupId ? 'group' : 'private',
+          time: Math.floor(Date.now() / 1000),
+          self_id: selfId,
+          user_id: userId,
+          raw_message: text,
+          message: text,
+          message_id: 'sing-test-' + Date.now(),
+        }
+        if (groupId) ev.group_id = groupId
+        const started = Date.now()
+        try {
+          const handled = await e.maybeSing({
+            ev,
+            scene: groupId ? 'group_mention' : 'private',
+            text,
+          })
+          sendJson(res, 200, {
+            ok: true, dryRun: false, info, handled: Boolean(handled),
+            ms: Date.now() - started, ev,
+          })
+        } catch (err) {
+          sendJson(res, 200, {
+            ok: false, dryRun: false, info,
+            error: String(err?.stack || err?.message || err),
+            ms: Date.now() - started,
+          })
+        }
+      }),
+    })
+
+    /*
      * POST /dsh-qq-whale/chat/simulate —— 空跑一轮「决策 + 生成」，**不发送**。
      *
      * 为什么要有：2026-10-21 晚「@ 了不回」事故里，决策日志明明是 yes，

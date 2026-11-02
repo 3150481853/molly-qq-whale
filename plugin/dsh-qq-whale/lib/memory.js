@@ -569,6 +569,14 @@ export class MemoryStore {
       // P2-5：老账本没有 lastCompactionAt → 0（「没压过」），不报错、不回写老文件
       this.lastCompactionAt = Math.max(0, Number(index.lastCompactionAt) || 0)
       this.loadShards()
+      /*
+       * 加载即自检（2026-11-02）：旧版 conflicts() 误标了 952 条 supersededBy，
+       * 全靠人记得跑清理脚本是等不到的——实测清理完两分钟就被旧进程 save() 覆盖回去了。
+       * 所以把复核放进装载流程：每次启动顺手摘掉失效标记，没问题就零写入。
+       */
+      this.healSupersededOnLoad()
+      // 相对日期补写（MH01）：老条目里只有「明天」没有日期，装载时按 at 补一次
+      this.healRelativeDatesOnLoad()
       return
     }
     this.loadLegacy()
@@ -806,7 +814,14 @@ export class MemoryStore {
     // 周聚合时用它填 coveredUntil（「这条记忆覆盖到哪条消息」）。
     messageId = '',
   } = {}) {
-    const t = String(text || '').trim()
+    /*
+     * 相对日期归一（2026-11-02 molly-bench 加难卷 MH01）。
+     * 库里 240 条（5.6%）正文只有「明天/上周三/后天」这类相对词，没有任何日期锚：
+     * 问「他说『明天』再排查，那天是哪天」，条目本身答不出来。她自己的周信里都在问
+     * 「你说明天再排查。结果这个『明天』我好像等了好几天」。
+     * 所以在**入库**这一步按条目自己的写入时间折算成绝对日期。
+     */
+    const t = normalizeRelativeDates(String(text || '').trim(), Date.now())
     if (!t) return null
     const k = normalizeKind(kind)
     const src = normalizeSource(source)
@@ -833,7 +848,7 @@ export class MemoryStore {
     // 「他喜欢猫」和「他其实不喜欢猫」字面相似度只有 0.2，根本进不了 findDuplicate
     // 的门槛，靠 dup 命中后再判冲突等于永远判不到（2026-10-27 自测第 4/7 组就是这么挂的）。
     // 所以这里单独扫一遍：意思相反的修正两条都留，旧的打 supersededBy、召回降权。
-    const conflictEntry = this.findConflict({ who: name, qq: q, text: t })
+    const conflictEntry = this.findConflict({ who: name, qq: q, text: t, kind: k })
     const conflicting = !!conflictEntry
     if (dup && !conflicting) {
       const prev = dup.entry
@@ -860,6 +875,43 @@ export class MemoryStore {
       this.mergedCount += 1
       this.save()
       return prev
+    }
+    /*
+     * 同题合并（2026-11-02 主人 m01658）。走到这里说明「字面不像」，
+     * 但可能「意思像」——同一场八点之约被说了几十遍，每遍措辞都不同。
+     * 不新建条目，只把老条目往前挪一天、加一点权重、记一次「又被提起」。
+     *
+     * 为什么不覆盖正文（不像上面的 findDuplicate 合并分支那样 `prev.text = t`）：
+     * 同题的两句话细节不同（「校门口见真章」vs「端锅过来」），谁替换谁都会丢细节。
+     * 保留最早那条（通常是信息最全的原句），后来者只贡献「还在这件事上」的信号。
+     *
+     * 冲突（改口）时不合并：`conflicting` 表示这是对旧说法的更正，必须留成新条目。
+     *
+     * **默认关闭**（`MOLLY_TOPIC_MERGE=1` 才开）。原因写在这里，别再试第二次：
+     * 沙箱 4548 条语料上，开与不开的四档成绩完全一致（14/14/13/14，MH02 的 d15 都是
+     * 「金条根本没进候选池」）——这个改动没有任何实测收益，却会永久改变写入行为。
+     * 按「没有量到的收益不进生产」的规矩，先留成开关 + 迁移工具。
+     * 反直觉的结论：把 210 条「八点」折叠成 20 条，并没有让 MH02 的金条被召回，
+     * 因为它的失败点不在拥挤，而在**候选池阶段就漏了**（金条 rank=0）。
+     */
+    if (!conflicting && TOPIC_MERGE_ON) {
+      const topic = this.findSameTopic({ who: name, qq: q, text: t, kind: k })
+      if (topic) {
+        const prev = topic.entry
+        prev.lastActiveDay = this.activeDays
+        prev.at = Date.now()
+        prev.weight = Math.min(WEIGHT_MAX, Math.max(clampWeight(prev.weight), w) + TOPIC_MERGE_WEIGHT_GAIN)
+        prev.repeats = (Number(prev.repeats) || 1) + 1
+        if (q && !normalizeQq(prev.qq)) prev.qq = q
+        if (name && !prev.who) prev.who = name
+        this.topicMerged = (Number(this.topicMerged) || 0) + 1
+        this.save()
+        this.logger(
+          'debug',
+          `同题合并（${topic.score.toFixed(2)} / ${topic.shared} 词），未写入：${t.slice(0, 24)}`,
+        )
+        return { ...prev, skipped: true, sameTopic: true }
+      }
     }
     const entry = {
       id: `m${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
@@ -931,6 +983,93 @@ export class MemoryStore {
   }
 
   /**
+   * 找「同一个人 + 同一件事，但换了说法」的老条目（2026-11-02 主人 m01658）。
+   *
+   * 和 findDuplicate 的分工：
+   *   - findDuplicate 认「字面像」（trigram ≥ 0.7）——同一句话被重复说；
+   *   - findSameTopic 认「意思像」（2-gram 实词包含度 ≥ 0.85 且共享 ≥ 5 词）——
+   *     同一件事被不同句子说了几十遍。生产里 210 条「白饭鱼 + 八点」大多属于后者，
+   *     字面重合只有 0.2~0.4，旧阈值一条都合不进去。
+   *
+   * 限定窗口（默认 3 天）：八点之约和十天后的八点之约是两件事，
+   * 同题合并只负责「同一场活动被反复抽条」，不负责跨月归并。
+   *
+   * @param {{who?: string, qq?: string, text?: string, kind?: string, at?: number}} probe
+   * @returns {{entry: object, score: number, shared: number}|null}
+   */
+  findSameTopic({ who = '', qq = '', text = '', kind = '', at = Date.now() } = {}) {
+    const k = normalizeKind(kind)
+    if (TOPIC_MERGE_SKIP_KINDS.has(k)) return null
+    const probe = { who: String(who || '').trim(), qq: normalizeQq(qq) }
+    const tar = contentKeywords(text)
+    if (tar.size < TOPIC_MERGE_SHARED) return null
+    let best = null
+    for (const e of this.entries) {
+      if (e.mergedInto) continue
+      if (normalizeKind(e.kind) !== k) continue
+      if (!sameIdentity(probe, e)) continue
+      if (Math.abs(Number(at) - Number(e.at || 0)) > TOPIC_MERGE_WINDOW_MS) continue
+      const cur = contentKeywords(e.text)
+      if (cur.size < TOPIC_MERGE_SHARED) continue
+      let shared = 0
+      for (const w of tar) if (cur.has(w)) shared++
+      if (shared < TOPIC_MERGE_SHARED) continue
+      const score = shared / Math.min(tar.size, cur.size)
+      if (score < TOPIC_MERGE_SIMILARITY) continue
+      if (!best || score > best.score) best = { entry: e, score, shared }
+    }
+    return best
+  }
+
+  /**
+   * 存量迁移：把历史上已经被反复抽条的「同题条目」折叠回最早那条。
+   *
+   * 为什么不删：被折叠的条目只是打 `mergedInto`，正文留在盘上（可回滚、可审计），
+   * recall 用 `active` 把它们排除在召回和 IDF 统计之外。
+   * 默认 dryRun，`---apply` 才落盘。
+   */
+  mergeSameTopics({ dryRun = true, windowMs = TOPIC_MERGE_WINDOW_MS } = {}) {
+    const list = [...this.entries].sort((a, b) => Number(a.at || 0) - Number(b.at || 0))
+    const keys = new Map(list.map((e) => [e.id, contentKeywords(e.text)]))
+    const heads = []
+    const items = []
+    for (const e of list) {
+      const k = normalizeKind(e.kind)
+      const cur = keys.get(e.id)
+      let head = null
+      let bestScore = 0
+      if (!TOPIC_MERGE_SKIP_KINDS.has(k) && cur.size >= TOPIC_MERGE_SHARED) {
+        for (const h of heads) {
+          if (normalizeKind(h.kind) !== k) continue
+          if (Number(e.at || 0) - Number(h.at || 0) > windowMs) continue
+          if (!sameIdentity(e, h)) continue
+          const hk = keys.get(h.id)
+          if (hk.size < TOPIC_MERGE_SHARED) continue
+          let shared = 0
+          for (const w of cur) if (hk.has(w)) shared++
+          if (shared < TOPIC_MERGE_SHARED) continue
+          const score = shared / Math.min(cur.size, hk.size)
+          if (score >= TOPIC_MERGE_SIMILARITY && score > bestScore) {
+            head = h
+            bestScore = score
+          }
+        }
+      }
+      if (!head) {
+        heads.push(e)
+        continue
+      }
+      items.push({ id: e.id, into: head.id, score: Number(bestScore.toFixed(2)), text: String(e.text || '').slice(0, 40) })
+      if (!dryRun) {
+        e.mergedInto = head.id
+        e.mergedAt = Date.now()
+      }
+    }
+    if (!dryRun && items.length) this.save()
+    return { dryRun, merged: items.length, items }
+  }
+
+  /**
    * 找「同一个人 + 说的同一件事 + 意思相反」的老条目。
    *
    * 和 findDuplicate 分开是有原因的：修正句的**字面相似度往往很低**
@@ -943,14 +1082,21 @@ export class MemoryStore {
    * @param {{who?: string, qq?: string, text?: string}} probe
    * @returns {object|null}
    */
-  findConflict({ who = '', qq = '', text = '' } = {}) {
+  findConflict({ who = '', qq = '', text = '', kind = '' } = {}) {
     const q = normalizeQq(qq)
     const name = String(who || '').trim()
+    /*
+     * 表情包不是"说法"，不会被推翻（2026-11-02 复查：剩下 13 条全是 meme 互相取代）。
+     * 「面无表情」里的"无"被当成否定词，「学到了表情包：蓝发_面无表情」就被判成
+     * 和「学到了表情包：蓝发_半睁眼」改口——两张图而已，谁也不取代谁。
+     */
+    if (normalizeKind(kind) === 'meme') return null
     if (!normalizeForDup(text)) return null
     let best = null
     let bestScore = 0
     for (const e of this.entries) {
       if (e.supersededBy) continue // 已经被更正的不用再更正一次
+      if (e.kind === 'meme') continue
       if (!sameIdentity({ who: name, qq: q }, e)) continue
       if (!conflicts(e.text, text)) continue
       const n = sharedKeywordCount(e.text, text)
@@ -960,6 +1106,88 @@ export class MemoryStore {
       }
     }
     return best
+  }
+
+  /**
+   * 复核所有「被更正」标记（2026-11-02 molly-bench 发现 4 的存量清理）。
+   *
+   * 旧版 conflicts() 会把「都在讲猫」的两条长叙述判成改口，历史库里的错误标记
+   * 不会因为判定规则改了而自己消失，必须复核一遍：
+   *   - 取代者已经不存在 → 摘掉标记（取代链断了，降权没有意义）；
+   *   - 按新规则两条已不构成改口 → 摘掉标记。
+   * 默认 dryRun，先看清单再动手。
+   *
+   * @param {{dryRun?: boolean}} [options]
+   * @returns {{checked: number, cleared: number, items: object[]}}
+   */
+  repairSuperseded({ dryRun = true } = {}) {
+    const byId = new Map(this.entries.map((e) => [e.id, e]))
+    const items = []
+    for (const e of this.entries) {
+      if (!e.supersededBy) continue
+      const successor = byId.get(e.supersededBy)
+      let reason = ''
+      if (!successor) reason = '取代者已不存在'
+      else if (!conflicts(successor.text, e.text)) reason = '按新规则不算改口'
+      if (!reason) continue
+      items.push({
+        id: e.id,
+        who: e.who,
+        kind: e.kind,
+        text: String(e.text || '').slice(0, 50),
+        successor: String((successor && successor.text) || '').slice(0, 50),
+        reason,
+      })
+      if (!dryRun) {
+        delete e.supersededBy
+        delete e.supersededAt
+      }
+    }
+    if (!dryRun && items.length) this.save()
+    return { checked: this.entries.filter((e) => e.supersededBy).length, cleared: items.length, items }
+  }
+
+  /**
+   * 装载时自检「被更正」标记（2026-11-02）。
+   *
+   * 只在确实有标记时才跑；没有任何标记就是一次 `Array.some` 的开销，不写盘。
+   * 不能抛：记忆自检失败绝不该连带插件起不来。
+   */
+  healSupersededOnLoad() {
+    if (this.broken || !this.entries.length) return
+    if (!this.entries.some((e) => e.supersededBy)) return
+    try {
+      const res = this.repairSuperseded({ dryRun: false })
+      if (res.cleared) this.logger('info', `记忆自检：摘除 ${res.cleared} 条失效的「被更正」标记`)
+    } catch (err) {
+      this.logger('warn', `记忆自检失败（不影响读写）: ${err && err.message}`)
+    }
+  }
+
+  /**
+   * 相对日期补写（2026-11-02 molly-bench 加难卷 MH01）。
+   *
+   * 入库时已经会归一（add()），但老条目是归一之前写的：240 条正文只有
+   * 「明天/上周三/后天」，没有日期锚。问「那天是哪天」时条目自己答不出来。
+   * 这里按每条自己的 at 补一次，补过的不再动（幂等），改完 save 一次。
+   */
+  healRelativeDatesOnLoad() {
+    if (this.broken || !this.entries.length) return 0
+    let fixed = 0
+    for (const e of this.entries) {
+      const before = String(e.text || '')
+      if (!before) continue
+      const after = normalizeRelativeDates(before, e.at || Date.now())
+      if (after !== before) {
+        e.text = after
+        fixed += 1
+      }
+    }
+    if (fixed) {
+      this.logger('info', `相对日期补写 ${fixed} 条（「明天」→「明天（10月21日）」）`)
+      this.save()
+    }
+    return fixed
   }
 
   /**
@@ -1123,6 +1351,18 @@ export class MemoryStore {
     // 一天只写一次账本；不写的话重启会退回旧的活跃天数，衰减就白算了
     if (!this.broken) this.save()
     return true
+  }
+
+  /**
+   * 装载条目向量（2026-11-02，向量第二路的存储侧）。
+   *
+   * key = 条目 id，value = 已归一化的 Float32Array（余弦 = 点积，省一次开方）。
+   * 缺向量的条目不会丢——recall 里它们排在向量臂尾部，仍按老权重次序走。
+   * 传 null / 空表 = 关掉向量臂，行为与这次改动之前一致。
+   */
+  setVectors(map) {
+    this.vectors = map instanceof Map ? map : new Map(Object.entries(map || {}))
+    return this.vectors.size
   }
 
   /**
@@ -1794,12 +2034,21 @@ export class MemoryStore {
    * 最后有相关性阈值：query 非空时，一分没命中的条目直接不返回。
    * 宁可"想不起来"也别答非所问——这正是用户最烦的那种失忆。
    */
-  recall({ who = '', qq = '', query = '', limit = MEMORY_WINDOW.contextLimit, charBudget = MEMORY_WINDOW.charBudget } = {}) {
+  recall({
+    who = '',
+    qq = '',
+    query = '',
+    queryVector = null,
+    limit = MEMORY_WINDOW.contextLimit,
+    charBudget = MEMORY_WINDOW.charBudget,
+  } = {}) {
     this.touchActivity()
     const q = String(query || '').toLowerCase().trim()
     const words = tokenize(q)
     const qqStr = normalizeQq(qq)
     const name = String(who || '').trim()
+    // 名字切出来的词（「白饭鱼」→ 白饭/饭鱼）：身份命中后这些词不再重复计分，见下面 scored
+    const nameWords = new Set(name ? tokenize(name) : [])
 
     /*
      * 身份匹配（2026-10-19 用户需求：「who 是名字，qq 是唯一身份」）。
@@ -1826,17 +2075,30 @@ export class MemoryStore {
       return { qqHit, sameName, nameContains, differentPerson }
     }
 
+    /*
+     * 「取代者」还活着才算降权（2026-11-02 molly-bench 发现 4）。
+     * 旧条目被打了 supersededBy 之后，若那条新条目后来被裁剪/归档/迁移掉了，
+     * 标记还挂在身上，于是一条本该恢复的记忆被永久打压——取代链断了，降权却还在。
+     */
+    const liveIds = new Set(this.entries.map((e) => e.id))
+    /*
+     * 同题合并后的「活跃条目」（2026-11-02 主人 m01658）：被折叠的条目只是打了 mergedInto，
+     * 正文留在盘上，但既不参与召回、也不参与 IDF 统计——否则几十条转述会把「八点」这个词
+     * 的 df 打满，让真正的关键内容变成「到处都有 = 不值钱」。
+     */
+    const active = this.entries.filter((e) => !(e.mergedInto && liveIds.has(e.mergedInto)))
+
     // 词频统计，用来算 IDF
     const df = new Map()
     if (words.length) {
-      for (const e of this.entries) {
+      for (const e of active) {
         const t = e.text.toLowerCase()
         for (const w of words) {
           if (contains(t, w)) df.set(w, (df.get(w) || 0) + 1)
         }
       }
     }
-    const N = Math.max(1, this.entries.length)
+    const N = Math.max(1, active.length)
     const idf = (w) => {
       const d = df.get(w) || 0
       if (d === 0) return 0
@@ -1850,7 +2112,14 @@ export class MemoryStore {
      */
     const wantMeme = /梗/.test(q)
 
-    const scored = this.entries.map((e) => {
+    /*
+     * 「取代者」还活着才算降权（2026-11-02 molly-bench 发现 4）。
+     * 旧条目被打了 supersededBy 之后，若那条新条目后来被裁剪/归档/迁移掉了，
+     * 标记还挂在身上，于是一条本该恢复的记忆被永久打压——取代链断了，降权却还在。
+     * （`liveIds` / `active` 已在上面算过，这里不再重复声明。）
+     */
+
+    const scored = active.map((e) => {
       const id = identity(e)
       /*
        * 2026-10-27 P0-2（对齐白守 hybrid-search.ts 的 RRF 思路）：两路信号**分开存**。
@@ -1867,6 +2136,16 @@ export class MemoryStore {
       if (id.qqHit) kw += 4 // 硬身份，比名字更值钱
       else if (id.sameName) kw += 2 // 熟人优先，但不再压过相关性
       else if (id.nameContains) kw += 1
+      /*
+       * 跨人串味（2026-11-02 molly-bench 发现 3）：
+       * recall 原来**只有身份加分、没有身份硬闸**，「明确是别人」的条目照样能挤进这个人的上下文。
+       * 小卷里问 <REDACTED>「他不喜欢什么表情包」，陌生人「他喜欢奶龙」那条就躺在旁边，
+       * 模型完全可能照着那句答反。这里分两档：
+       *   - 正文里压根没提当前这个人 → 关键词路几乎清零，不许占语义名额；
+       *   - 正文提到了这个人（关系类记忆，如「茶茶跟他说过…」）→ 两路打半折，仍可被捞。
+       */
+      const crossPerson = id.differentPerson
+      const mentionsTarget = crossPerson && Boolean(name) && String(e.text).includes(name)
       let hit = false
       let strongHit = false
       /*
@@ -1887,7 +2166,16 @@ export class MemoryStore {
       let kwStrong = false
       if (words.length) {
         const t = e.text.toLowerCase()
+        /*
+         * 名字本身不再重复计分（2026-11-02 MH02）：
+         * 「白饭鱼说：[引用 @Molly：…八点见…]」这类转述条目正文里带着说话人名字，
+         * 于是问「白饭鱼……八点……」时它们靠「白饭/饭鱼」两个字躺赢，
+         * 把真正记着事实的那条（正文写「他跟 Molly、晚星斗嘴定下赌约」）挤到第 49 名。
+         * 身份分（qqHit +4）已经算过一次「这是本人」，正文里的名字不该再赚一次。
+         */
+        const identitySelf = id.qqHit || id.sameName
         for (const w of words) {
+          if (identitySelf && nameWords.has(w)) continue
           if (!contains(t, w)) continue
           hit = true
           const base = w.length >= 3 ? 3 : w.length === 2 ? 2 : 1
@@ -1906,12 +2194,33 @@ export class MemoryStore {
        * 一个都对不上而被下面那层过滤整片丢掉——人明明有记忆，却被判成"想不起来"。
        */
       if (id.qqHit || id.sameName) strongHit = true
+      // 跨人条目：不许占关键词语义名额（正文里提到了这个人时放行一半，见上面注释）
+      if (crossPerson) {
+        if (mentionsTarget) kw *= 0.5
+        else {
+          kw *= CROSS_PERSON_KW_PENALTY
+          kwStrong = false
+          strongHit = false
+        }
+      }
+      /*
+       * 全群摘要（who 为空的 event）在点名问某人时**不进候选池**（2026-11-02 MH03）。
+       * 只降分不够：一条 800 字的周信谁的事都写，问「示例成员F的真名」时它靠「真名」两个字
+       * 就能挤进 top——里面那句「熊老板悄悄跟我说了真名」足以让模型拿别人的真名顶上。
+       * 泛问（没点名）时它照旧参与，当背景用。
+       */
+      if (!e.who && e.kind === 'event' && (name || qqStr)) {
+        kw *= GROUP_WIDE_EVENT_PENALTY
+        kwStrong = false
+        strongHit = false
+      }
       if (wantMeme && e.kind === 'meme') kw += 3 // 问梗时梗优先
       // 越新越值钱，但只值一点点，避免"全是刚说的废话"
       const ageDays = (Date.now() - e.at) / 86400000
       kw += Math.max(0, 2 - ageDays / 30) * 0.3
       // 权重一路用**有效权重**（衰减 + 命中之后的值），让「久不联系」真的变淡
       let w = effectiveWeight(e, this.activeDays)
+      if (crossPerson) w *= 0.5 // 别人的事只在真没别的可捞时才轮得到
       const raw = kw + w * 0.15 // 老公式，仅留作对账
       /*
        * 被更正过的条目（supersededBy，2026-10-27 三级去重引入）：
@@ -1919,7 +2228,7 @@ export class MemoryStore {
        * 但不能再跟新结论平起平坐地挤进提示词——否则模型看到两句相反的，
        * 只能靠语气猜哪句算数。这里只降权不删除，两路都降。
        */
-      if (e.supersededBy) {
+      if (e.supersededBy && liveIds.has(e.supersededBy)) {
         kw *= SUPERSEDED_PENALTY
         w *= SUPERSEDED_PENALTY
       }
@@ -1974,7 +2283,7 @@ export class MemoryStore {
           const i = kinds.indexOf(e.kind)
           return i < 0 ? 99 : i
         }
-        const fallback = this.entries
+        const fallback = active
           .filter((e) => {
             const id = identity(e)
             return (id.qqHit || id.sameName || !e.who) && kinds.includes(e.kind)
@@ -2005,17 +2314,93 @@ export class MemoryStore {
      * 同分时「最近被提起过」的优先（lastActiveDay 大者在前），再不稳就按记录时间。
      * 名次与两路分数都留在 this.lastRecall 里，`/state` 的 memory.status() 能对账。
      */
+    /*
+     * 向量侧的候选补充（2026-11-02，molly-bench MC06 暴露的第二个问题）。
+     *
+     * 上面那道闸门只看「词」，于是「他住哪个城市？」这种问句永远进不了池子——
+     * 记忆里写的是「他在广州」，两个字都对不上，RRF 再怎么排也没用：**候选生成阶段就丢了**。
+     * 所以有 queryVector 时，额外按余弦把「这个人自己的」前 VECTOR_CANDIDATES 条拉进池子，
+     * 让它们在 RRF 里和关键词候选一起竞争，而不是直接当答案。
+     *
+     * 只取同一个人的：群聊里问 A 的事，不能因为 B 也聊过相似的句子就把 B 的记忆拉进来。
+     * 跨人条目只有在正文里真的点了这个人的名字时才放行（跟 recall 里跨人降权同一套判断）。
+     */
+    const scoredById = new Map(scored.map((x) => [x.e.id, x]))
+    const poolIds = new Set(pool.map((x) => x.e.id))
+    const vectorExtras = new Map() // id → 余弦，用于 lastRecall 对账
+    if (queryVector && this.vectors && this.vectors.size) {
+      const cand = []
+      for (const e of active) {
+        const v = this.vectors.get(e.id)
+        if (!v) continue
+        const id = identity(e)
+        if ((qqStr || name) && id.differentPerson && !(name && String(e.text).includes(name))) continue
+        cand.push({ e, s: cosineSimilarity(queryVector, v) || 0 })
+      }
+      cand.sort((a, b) => b.s - a.s)
+      for (const { e, s } of cand.slice(0, VECTOR_CANDIDATES)) {
+        if (poolIds.has(e.id)) {
+          vectorExtras.set(e.id, s)
+          continue
+        }
+        const base = scoredById.get(e.id)
+        if (!base) continue
+        base.viaVector = true
+        poolIds.add(e.id)
+        vectorExtras.set(e.id, s)
+        pool.push(base)
+      }
+      this.logger?.('debug', `向量补充候选 ${vectorExtras.size} 条（池子 ${pool.length}）`)
+    }
+
     const byKeyword = [...pool].sort(compareKeywordArm)
     const byWeight = [...pool].sort(compareWeightArm)
+
+    /*
+     * 第二路的三种形态（2026-11-02，molly-bench 发现 MC06「他人在广州」永远召不回）：
+     *
+     *   1. 有 queryVector + 条目向量（this.vectors）→ 用余弦相似度排序；
+     *      没向量覆盖的条目按原权重次序接在后面，保证「路」永远覆盖整个池子。
+     *   2. 没有 queryVector → 退回老办法：用「有效权重」当第二路。
+     *
+     * 为什么不把余弦分直接加到 kw 上：kw 是词频尺度（0~十几），余弦是 0~1，
+     * 相加等于让词频说话、余弦只当噪声。RRF 只吃名次，天然免疫尺度不一致。
+     */
+    let bySecond = byWeight
+    let secondArm = 'weight'
+    const vecScores = new Map()
+    if (queryVector && this.vectors && this.vectors.size) {
+      const withVec = []
+      const withoutVec = []
+      for (const x of pool) {
+        const v = this.vectors.get(x.e.id)
+        const s = v ? cosineSimilarity(queryVector, v) : null
+        if (s === null) {
+          withoutVec.push(x)
+        } else {
+          vecScores.set(x.e.id, s)
+          withVec.push({ x, s })
+        }
+      }
+      if (withVec.length) {
+        withVec.sort((a, b) => b.s - a.s || compareRecency(a.x, b.x))
+        bySecond = [...withVec.map((v) => v.x), ...withoutVec.sort(compareWeightArm)]
+        secondArm = 'vector'
+      }
+    }
+
     const rankKeyword = new Map()
     const rankWeight = new Map()
+    const rankSecond = new Map()
     byKeyword.forEach((x, i) => rankKeyword.set(x, i))
     byWeight.forEach((x, i) => rankWeight.set(x, i))
+    bySecond.forEach((x, i) => rankSecond.set(x, i))
     for (const x of pool) {
       const rk = rankKeyword.get(x)
       const rw = rankWeight.get(x)
-      x.rank = { keyword: rk + 1, weight: rw + 1 }
-      x.rrf = RRF_KEYWORD_WEIGHT / (rk + RRF_K) + RRF_WEIGHT_ARM_WEIGHT / (rw + RRF_K)
+      const rs = rankSecond.get(x)
+      x.rank = { keyword: rk + 1, weight: rw + 1, second: rs + 1 }
+      x.rrf = RRF_KEYWORD_WEIGHT / (rk + RRF_K) + RRF_WEIGHT_ARM_WEIGHT / (rs + RRF_K)
     }
     pool.sort((a, b) => b.rrf - a.rrf || compareRecency(a, b))
     /*
@@ -2039,16 +2424,19 @@ export class MemoryStore {
       query: q,
       candidates: pool.length,
       words,
+      secondArm,
       at: Date.now(),
-      top: pool.slice(0, 5).map((x) => ({
+      top: pool.slice(0, this.recallTopLimit || 5).map((x) => ({
         id: x.e.id,
         kind: x.e.kind,
         rrf: Number(x.rrf.toFixed(6)),
         rankKeyword: x.rank.keyword,
-        rankWeight: x.rank.weight,
+        rankWeight: x.rank.second,
         kw: Number(x.kw.toFixed(3)),
         w: Number(x.w.toFixed(2)),
         raw: Number(x.raw.toFixed(3)),
+        // 向量第二路给了多少余弦（undefined = 这一轮没用向量）
+        cos: vecScores.has(x.e.id) ? Number(vecScores.get(x.e.id).toFixed(3)) : undefined,
         // 图扩散加了多少（0 = 没用上图；两开关都关时这里恒为 0）
         graph: Number((x.graphBoost || 0).toFixed(6)),
       })),
@@ -2081,11 +2469,19 @@ export class MemoryStore {
     if (!Number.isFinite(cap) || cap <= 0) return list
     const out = []
     let used = 0
+    /*
+     * 记账按「实际会渲染的字数」算（2026-11-02 molly-bench 发现）：contextFor 会把单条截到
+     * `MEMORY_WINDOW.entryChars`，但这里原来按原长扣预算——一条 1000 字的流水账会吃掉
+     * 四条配额，而它在上下文里只占 240 字，剩下的钱全扔了，真答案被挤出去。
+     * 顺手把 `break` 改成 `continue`：超长条目不该挡住排在它后面的短条目。
+     */
+    const perEntryCap = MEMORY_WINDOW.entryChars
     for (const e of list) {
       const len = String(e?.text ?? '').length
-      if (out.length && used + len > cap) break
+      const cost = Math.min(len, perEntryCap)
+      if (out.length && used + cost > cap) continue
       out.push(e)
-      used += len
+      used += cost
     }
     return out
   }
@@ -2265,6 +2661,87 @@ function contains(text, w) {
 }
 
 /**
+ * 余弦相似度（2026-11-02，向量第二路）。
+ *
+ * 前提：两侧都已 L2 归一化（BGE 编码后立刻 normalize），所以余弦 = 点积。
+ * 不做归一化兜底是故意的——每轮对 4000 多条算一次开方，纯属浪费；
+ * 若哪天真传了未归一化的向量，分数会 >1 但**名次**仍然对（同乘一个常数不影响排序）。
+ */
+function cosineSimilarity(a, b) {
+  if (!a || !b || !a.length || !b.length) return null
+  const n = Math.min(a.length, b.length)
+  let s = 0
+  for (let i = 0; i < n; i += 1) s += a[i] * b[i]
+  return s
+}
+
+/**
+ * 相对日期归一（2026-11-02 molly-bench 加难卷 MH01）。
+ *
+ * 记忆写的是「打算明天再排查」，三个月后被问「那天是哪天」就没人答得出来——
+ * 库里有 240 条（5.6%）正文只有相对词，没有一个日期锚。
+ * 这里按条目自己的写入时间（at）折算成绝对日期，追加在括号里：
+ *   「打算明天再排查」→「打算明天（10月21日）再排查」
+ * 已经带括号日期的不再加工，保证反复调用是幂等的。
+ *
+ * @param {string} text 正文
+ * @param {number} at 条目写入时间（ms）
+ * @returns {string}
+ */
+const RELATIVE_DAY_OFFSET = { 今天: 0, 今日: 0, 明天: 1, 明日: 1, 昨天: -1, 昨日: -1, 前天: -2, 后天: 2 }
+const WEEKDAY_INDEX = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 日: 7, 天: 7 }
+
+function fmtMonthDay(ms) {
+  const d = new Date(ms)
+  return `${d.getMonth() + 1}月${d.getDate()}日`
+}
+
+export function normalizeRelativeDates(text, at) {
+  let out = String(text || '')
+  if (!out) return out
+  const base = Number(at) || Date.now()
+  /*
+   * 凌晨（0–5 点）说的「明天」，口语里指的是**天亮后的这一天**，不是日历意义上的明天。
+   * 例：2026-10-21 00:49「打算明天再排查」= 当天白天，不是 10-22。
+   * 不加这条，时间锚会整体偏一天——比没有日期更糟，因为它看起来是对的。
+   */
+  const hour = new Date(base).getHours()
+  /*
+   * 幂等要**逐处判断**，不能整句跳过：一条记忆里常同时有
+   * 「今天（10月24日）…明天再说」，整句跳过会让后半句永远补不上，
+   * 而且每次装载都重新判断一次（实测 7 条被反复重写）。
+   */
+  const alreadyDated = (rest) => /^（\d{1,2}月\d{1,2}日/.test(rest)
+  /*
+   * 历史遗留：早期版本的幂等判断认不出「（10月19日那一周）」，每次装载都再补一遍，
+   * 生产里有 7 条被补成了「（10月19日那一周）」×5。这里先把相邻重复的括号合并掉，
+   * 再往下走——归一函数自己修自己，不需要额外的迁移脚本。
+   */
+  out = out.replace(/(（\d{1,2}月\d{1,2}日[^）]{0,8}）)\1+/g, '$1')
+  out = out.replace(/(今天|今日|明天|明日|昨天|昨日|前天|后天)/g, (m, _g, offset, full) => {
+    if (alreadyDated(full.slice(offset + m.length))) return m
+    let offsetDays = RELATIVE_DAY_OFFSET[m]
+    if ((m === '明天' || m === '明日') && hour < 5) offsetDays = 0
+    if ((m === '昨天' || m === '昨日') && hour < 5) offsetDays = -2
+    return `${m}（${fmtMonthDay(base + offsetDays * 86400000)}）`
+  })
+  // 「上周三」「下周一」「这周」：以周一为一周起点换算
+  out = out.replace(/(上|下|本|这)周([一二三四五六日天])?/g, (m, dir, wd, offset, full) => {
+    if (alreadyDated(full.slice(offset + m.length))) return m
+    const shift = dir === '上' ? -1 : dir === '下' ? 1 : 0
+    const d = new Date(base)
+    const weekday = d.getDay() === 0 ? 7 : d.getDay() // 周日记成 7
+    const monday = base - (weekday - 1) * 86400000
+    if (wd) {
+      const target = WEEKDAY_INDEX[wd]
+      return `${m}（${fmtMonthDay(monday + (shift * 7 + target - 1) * 86400000)}）`
+    }
+    return `${m}（${fmtMonthDay(monday + shift * 7)}那一周）`
+  })
+  return out
+}
+
+/**
  * 把一句话切成检索词。
  *
  * 中文没有空格，"我家猫叫啥" 直接 includes 匹配不到 "猫叫锅贴"。
@@ -2277,7 +2754,7 @@ function tokenize(q) {
   const out = new Set()
   // 停用词：句子里出现但跟记忆无关的高频虚词，留着重罚
   const stop = new Set(['什么', '怎么', '为什', '是不', '不是', '有没', '没有', '我的', '你的', '他叫', '她叫'])
-  for (const chunk of q.split(/[^\p{Script=Han}a-z0-9]+/u)) {
+  for (const chunk of q.toLowerCase().split(/[^\p{Script=Han}a-z0-9]+/u)) {
     if (!chunk) continue
     if (/\p{Script=Han}/u.test(chunk)) {
       if (chunk.length === 1) out.add(chunk)
@@ -2371,6 +2848,54 @@ const DUP_SKIP_SIMILARITY = 0.92
 const DUP_MERGE_SIMILARITY = 0.7
 /** 被更正过的条目在召回时的降权系数（只降权，不删除） */
 const SUPERSEDED_PENALTY = 0.4
+/**
+ * 「明确是别人」的条目在关键词路上的系数（2026-11-02 molly-bench 发现 3）。
+ * 不给硬闸是因为群聊里存在关系类记忆（正文会提到当前这个人），那种靠 0.5 的半折放行；
+ * 剩下正文里根本没提这个人的，压到 0.05 ≈ 不许占语义名额。
+ */
+const CROSS_PERSON_KW_PENALTY = 0.05
+/*
+ * 同题合并（2026-11-02 主人 m01658：「研究写入侧的『同题合并』」）。
+ *
+ * 实测动机：MH02（「白饭鱼最后把八点见面地点定在哪」）在 d15 掉出窗口，
+ * 根因不是遗忘，是**拥挤**——单是「白饭鱼 + 含八点」就有 210 条，全库含「八点」481 条。
+ * 10-28 晚上那一桩「明早八点见真章」被逐句抽成了几十条记录，谁问都只能捞到最新那几条。
+ *
+ * 阈值来自沙箱 4546 条语料的实测（`${MOLLY_ROOT}\out\_xhh2\p-dup3.mjs`）：
+ *   包含度 ≥ 0.80 → 3377 对；≥ 0.85 → 935 对；两档的金条（10 个考点的锚条目）**零牵连**。
+ * 取 0.85 是保守值：宁可少合，不能把「八点算账」和「八点端锅」合成一条把细节吞掉。
+ *
+ * 表情包和称谓不参与：表情包名字差一个字就是另一张图（`气鼓鼓_叉` vs `暴怒_举起电击枪`，
+ * 包含度 0.80 但它们不是同一件事）；称谓本来就是一人一条，合并没有收益。
+ */
+const TOPIC_MERGE_SIMILARITY = 0.95
+const TOPIC_MERGE_SHARED = 5
+const TOPIC_MERGE_WINDOW_MS = 1 * 86400000
+const TOPIC_MERGE_SKIP_KINDS = new Set(['meme', 'address'])
+/** 同题合并时给老条目加的那点权重（同一件事被反复提起 ≈ 更重要，但不该更新鲜） */
+const TOPIC_MERGE_WEIGHT_GAIN = 0.2
+/**
+ * 同题合并的总开关，默认关。
+ * 打开才改变写入行为（`MOLLY_TOPIC_MERGE=1`）；关着时 findSameTopic/mergeSameTopics 仍可手工调用做诊断。
+ */
+const TOPIC_MERGE_ON = process.env.MOLLY_TOPIC_MERGE === '1'
+/*
+ * 全局事件（周信一类 who 为空的 event）在「点名问某人」时的折扣（2026-11-02 MH03）。
+ * 一条 800 字的周信谁的事都写，问「示例成员F的真名叫什么」时它排第三，
+ * 里面那句「熊老板悄悄跟我说了真名」就足以让模型拿别人的真名顶上。
+ * 周信是「全群摘要」，可以在泛问时当背景，但不该当某个人的主证据。
+ */
+const GROUP_WIDE_EVENT_PENALTY = 0.35
+
+/**
+ * 向量补充候选的条数（2026-11-02，molly-bench MC06）。
+ *
+ * 为什么需要它：关键词闸门是「候选生成」这一层的硬闸，问句和记忆正文一个词都不重合时
+ * （「他住哪个城市？」vs「他在广州」），条目根本进不了池子，后面的 RRF 再准也无从下手。
+ * 12 = MEMORY_WINDOW.queryLimit：和关键词臂的候选预算对齐，两路贡献相当，
+ * 不至于让向量把池子撑成「谁都能进来」。
+ */
+const VECTOR_CANDIDATES = 12
 
 /**
  * RRF（Reciprocal Rank Fusion）融合排序的三个旋钮（P0-2，2026-10-27）。
@@ -2470,13 +2995,85 @@ function sharedKeywordCount(a, b) {
 }
 
 /**
+ * 否定词是不是**紧贴着**这个词出现的（0~3 字之内）。
+ *
+ * 2026-11-02 改造（molly-bench 发现 4）：原来 hasNegation 扫全文，
+ * 于是任何一条长叙述里只要出现一个「不/别/没」，整条就被算成"否定句"，
+ * 再碰上另一条同样长的叙述共享两个二字词，就被判成"改口"。
+ * 真实案例：白饭鱼「猫叫锅底，脸圆、爱打哈欠、睡觉爱贴着人」被
+ * 「他深夜困得不行，说自己跟图里打哈欠的猫一个样…睡了睡了」取代——
+ * 两条都在讲猫，可一个说名字，一个说困，八竿子打不着，却永久降权。
+ */
+function negatedNear(text, keyword) {
+  const t = String(text || '')
+  const k = String(keyword || '')
+  if (!t || !k) return false
+  /*
+   * 固定搭配里的「无/没」不是否定：面无表情、无语、没毛病、没什么、不得了。
+   * 不加这层，「面无表情」会把「表情」判成被否定，两张表情包描述就被当成互相改口
+   * （2026-11-02 复查剩下的 13 条误标，全是这么来的）。
+   */
+  const idiom = /面无表情|无语|没毛病|没什么|没事|没错|不得了|无所谓|非主流/g
+  let idx = t.indexOf(k)
+  while (idx >= 0) {
+    const before = t.slice(Math.max(0, idx - 3), idx)
+    if (/(?:不|别|没|未|无|非|not|never)\s*$/i.test(before)) {
+      idiom.lastIndex = 0
+      let hit = false
+      let m
+      while ((m = idiom.exec(t))) {
+        // 命中「固定搭配」且关键词正好落在这个搭配里 → 不算否定
+        if (m.index <= idx && idx + k.length <= m.index + m[0].length) {
+          hit = true
+          break
+        }
+      }
+      if (!hit) return true
+    }
+    idx = t.indexOf(k, idx + 1)
+  }
+  return false
+}
+
+/**
+ * 只留「实词」：两字以上的 2-gram/整词（单字太泛，长文本里必然撞一大片）。
+ *
+ * 2026-11-02（同题合并）：先把 `[引用 @某人：…]` / `[图片]` 这类方括号块抹掉。
+ * 群聊转述的格式是「白饭鱼说：[引用 @茶茶：焦的归我] 焦的归你」，方括号里是**别人**的原话，
+ * 拿它算同题会把「他复述谁」也当成话题本身，几百条转述会互相粘成一片。
+ */
+function contentKeywords(text) {
+  const s = String(text ?? '').replace(/\[[^\]]*\]/gu, ' ')
+  return new Set(tokenize(s).filter((w) => w.length >= 2))
+}
+
+/**
  * 两条记忆是不是「意思相反」。
- * 判定条件：一边否定、一边不否定，且共享至少两个实词。
- * 只用于去重时决定「不许合并」，不用来删东西。
+ *
+ * 判据（2026-11-02 收紧，原版见 git 历史里那句「一边否定一边不否定 + 共享两个实词」）：
+ *   1. 共享至少两个实词；
+ *   2. 共享词要占**短边**的三分之一以上——长叙述天然共享一堆二字词，比例不够就是"都在说话"，
+ *      不是"说同一件事"；
+ *   3. 否定必须**紧贴**某个共享词出现，且只有一边有。
+ * 宁可漏判（两条相反的都留着）也不乱判（把一条真事实永久降权）。
  */
 function conflicts(prevText, nextText) {
-  const a = hasNegation(prevText)
-  const b = hasNegation(nextText)
-  if (a === b) return false
-  return sharedKeywordCount(prevText, nextText) >= 2
+  // 原始转述/引用不是「主张」，谈不上改口：群聊里的话一旦被原样记下来，
+  // 「别」「不」几乎是每三句一个，拿它判否定一定误伤（promise 类全是这种）。
+  if (looksLikeQuote(prevText) || looksLikeQuote(nextText)) return false
+  const A = contentKeywords(prevText)
+  const B = contentKeywords(nextText)
+  if (!A.size || !B.size) return false
+  const shared = [...A].filter((w) => B.has(w))
+  if (shared.length < 2) return false
+  if (shared.length / Math.min(A.size, B.size) < 0.34) return false
+  const a = shared.some((w) => negatedNear(prevText, w))
+  const b = shared.some((w) => negatedNear(nextText, w))
+  return a !== b
+}
+
+/** 「X说：…」「含 @引用」这类是聊天原文，不是抽出来的主张 */
+function looksLikeQuote(text) {
+  const t = String(text || '')
+  return /^[^，。！？\n]{0,14}说[：:]/.test(t) || t.includes('[引用 @')
 }

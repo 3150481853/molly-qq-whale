@@ -218,6 +218,7 @@ function splitForQQ(text, maxLen = 180) {
 
 import fs from 'node:fs'
 import { clockParts, inClockWindow, parseHHMM } from './clock.js'
+import { createSidecar } from './sidecar.js'
 
 export class ChatEngine {
   constructor({ ctx, logger, config, client, llm }) {
@@ -276,6 +277,28 @@ export class ChatEngine {
           ? null
           : { keyFile: String(config.memoryKeyFile || '').trim() || undefined },
     })
+
+    /*
+     * 本地嵌入 + 交叉编码器重排（2026-11-03）。
+     *
+     * 由来：评论区 @IX维亚济马 说「Qwen embedding 可以配合 reranker 构成检索基线」，
+     * @shuun 说「现在没有比向量更直接好用的」。沙箱实测（`${MOLLY_ROOT}\out\_xhh3\tune-blend.py`）：
+     *   纯粗排 可答 48/56｜纯重排 48/56（MC06 广州 23→4、MH01 明天 16→1，但 MC08 掉出）
+     *   RRF 融合 0.8/0.2 → 可答 52/56、金条进前 5 40/56。
+     * 所以两条都接：向量进候选生成与第二路，重排只跑前 40 条并与粗排融合。
+     *
+     * 依赖一个本机 python sidecar（tools/embed-server.py，默认 127.0.0.1:8791）。
+     * 它没起、崩了、超时——每一次调用都返回 null，recall 退回纯关键词路径，
+     * 行为与接之前完全一致。`MOLLY_EMBED_OFF=1` 一刀切关掉。
+     */
+    this.sidecar = createSidecar({ logger })
+    this.memory.setEmbedder((text) => this.sidecar.embed(text))
+    this.memory.setReranker((query, texts) => this.sidecar.rerank(query, texts))
+    try {
+      this.sidecar.ensure()
+    } catch (err) {
+      logger('warn', `嵌入 sidecar 初始化失败（不影响聊天）：${err?.message || err}`)
+    }
 
     /*
      * 茉莉花核对接缝（2026-10-30，主人 P0-1「出口核对」）。

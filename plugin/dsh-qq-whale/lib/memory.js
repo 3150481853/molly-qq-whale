@@ -577,6 +577,8 @@ export class MemoryStore {
       this.healSupersededOnLoad()
       // 相对日期补写（MH01）：老条目里只有「明天」没有日期，装载时按 at 补一次
       this.healRelativeDatesOnLoad()
+      // 语气补写 + 过期计划打标（2026-11-03 评论区：计划不等于已发生）
+      this.healTenseOnLoad()
       return
     }
     this.loadLegacy()
@@ -824,6 +826,8 @@ export class MemoryStore {
     const t = normalizeRelativeDates(String(text || '').trim(), Date.now())
     if (!t) return null
     const k = normalizeKind(kind)
+    // 计划 / 已发生分开（见 detectTense 的注释）：写路径不加模型调用，纯词面判断
+    const tenseInfo = TENSE_ON ? detectTense(t, k, Date.now()) : { tense: '', dueAt: 0 }
     const src = normalizeSource(source)
     if (src === 'assistant' && (k === 'fact' || k === 'person')) {
       this.logger('warn', `拒绝写入：助手自述不能写成 ${k}（${t.slice(0, 24)}）`)
@@ -934,6 +938,9 @@ export class MemoryStore {
       at: Date.now(),
       // P2-5：只有调用方真的给了消息 id 才写这个字段（老条目没有它 → 老数据零改动）
       ...(String(messageId ?? '').trim() ? { messageId: String(messageId).trim() } : {}),
+      // 语气与到期：只有判出来才写，没判出来保持老条目形状（不影响老数据）
+      ...(tenseInfo.tense ? { tense: tenseInfo.tense } : {}),
+      ...(tenseInfo.tense === 'plan' && tenseInfo.dueAt ? { dueAt: tenseInfo.dueAt } : {}),
     }
     this.entries.push(entry)
     if (conflicting && conflictEntry) {
@@ -1191,6 +1198,63 @@ export class MemoryStore {
   }
 
   /**
+   * 过期未兑现的计划打标（2026-11-03，评论区 @shuun 指出的「明天不代表已经发生」）。
+   *
+   * 只认 `tense === 'plan'` 且带 `dueAt` 的条目；过了到期时间再宽容
+   * `graceMs`（默认半天）还没被标成 fulfilled 的，打 `unfulfilled`。
+   * **不删、不改正文**：计划本身是真实信息（「他答应过端锅来」），
+   * 只是在读的时候降权，并且不再冒充「已经发生」。
+   *
+   * @param {{now?: number, graceMs?: number, dryRun?: boolean}} [options]
+   * @returns {{count: number, dryRun: boolean}}
+   */
+  sweepPlans({ now = Date.now(), graceMs = PLAN_GRACE_MS, dryRun = false } = {}) {
+    if (!TENSE_ON || this.broken || !this.entries.length) return { count: 0, dryRun }
+    let count = 0
+    for (const e of this.entries) {
+      if (e.tense !== 'plan' || !e.dueAt || e.unfulfilled || e.fulfilledAt) continue
+      if (now < Number(e.dueAt) + graceMs) continue
+      count += 1
+      if (dryRun) continue
+      e.unfulfilled = true
+      e.unfulfilledAt = now
+      // 降权但不删：欠账类问题仍然要能问到
+      e.weight = clampWeight(Math.max(WEIGHT_MIN, (Number(e.weight) || WEIGHT_DEFAULT) - 0.5))
+    }
+    if (count && !dryRun) {
+      this.logger('info', `计划过期未兑现 ${count} 条（降权保留，仍可问「还欠着什么」）`)
+      this.save()
+    }
+    return { count, dryRun }
+  }
+
+  /**
+   * 装载时补写语气（`tense` / `dueAt`），再扫一遍过期计划。
+   *
+   * 老条目没有这两个字段，靠这里按自己的 `at` 补一次（幂等：已判过的不再动）。
+   * 只写「判出来的」，判不出来保持原样——宁可少标，不要给每条记忆瞎贴标签。
+   */
+  healTenseOnLoad() {
+    if (!TENSE_ON || this.broken || !this.entries.length) return 0
+    let filled = 0
+    for (const e of this.entries) {
+      if (e.tense !== undefined) continue
+      const info = detectTense(e.text, e.kind, e.at || Date.now())
+      if (!info.tense) continue
+      e.tense = info.tense
+      if (info.tense === 'plan' && info.dueAt) e.dueAt = info.dueAt
+      filled += 1
+    }
+    const dry = this.sweepPlans({ dryRun: true })
+    if (filled || dry.count) {
+      this.logger('info', `语气补写 ${filled} 条；过期计划 ${dry.count} 条`)
+      this.sweepPlans({})
+      this.save()
+    }
+    return filled
+  }
+
+  /**
    * 全量去重（迁移时跑一次；也留给控制台/工具手动跑）。
    * 规则与 add() 完全一致：同一个人 + 文本相似 → 只留一条，**新的覆盖旧的**。
    * @param {{threshold?: number}} [options]
@@ -1363,6 +1427,28 @@ export class MemoryStore {
   setVectors(map) {
     this.vectors = map instanceof Map ? map : new Map(Object.entries(map || {}))
     return this.vectors.size
+  }
+
+  /**
+   * 接外部重排器（本地 sidecar 的 /rerank）。
+   *
+   * 约定：`fn(query, texts) => number[]`，分数越大越相关；**必须是同步函数**——
+   * recall() 是同步的，调用链（engine-context → contextFor → recall）里没有 await 的位置。
+   * 所以外面用 execFileSync 调 curl，最长 1.5 秒；超时/异常在这里一律吞掉并退回粗排。
+   */
+  setReranker(fn) {
+    this.reranker = typeof fn === 'function' ? fn : null
+    return Boolean(this.reranker)
+  }
+
+  /**
+   * 接外部嵌入器（本地 sidecar 的 /embed）。
+   * 约定：`fn(text) => Float32Array | null`，已 L2 归一化；同样必须同步。
+   * 没接的时候 recall 走纯关键词，行为与 2026-11-02 之前完全一致。
+   */
+  setEmbedder(fn) {
+    this.embedder = typeof fn === 'function' ? fn : null
+    return Boolean(this.embedder)
   }
 
   /**
@@ -2044,6 +2130,31 @@ export class MemoryStore {
   } = {}) {
     this.touchActivity()
     const q = String(query || '').toLowerCase().trim()
+    /*
+     * 没传向量、但外面接好了嵌入器（本地 sidecar）时，这里自己补一次。
+     * 放在最前面：候选生成阶段就要用向量，晚补等于没补（MC06 就是这么丢的）。
+     */
+    if (!queryVector && this.embedder && q) {
+      /*
+       * 同一句话一轮里会被问两遍（contextFor 一次、engine-context 的关键词召回再一次），
+       * 每条查询多花 100ms 没必要——按文本缓存，最多 128 条，FIFO 淘汰。
+       */
+      if (!this._vecCache) this._vecCache = new Map()
+      if (this._vecCache.has(q)) {
+        queryVector = this._vecCache.get(q)
+      } else {
+        try {
+          queryVector = this.embedder(q) || null
+          if (queryVector) {
+            this._vecCache.set(q, queryVector)
+            if (this._vecCache.size > 128) this._vecCache.delete(this._vecCache.keys().next().value)
+          }
+        } catch (err) {
+          queryVector = null
+          this.logger?.('warn', `取查询向量失败，退回关键词：${err?.message || err}`)
+        }
+      }
+    }
     const words = tokenize(q)
     const qqStr = normalizeQq(qq)
     const name = String(who || '').trim()
@@ -2213,6 +2324,14 @@ export class MemoryStore {
         kw *= GROUP_WIDE_EVENT_PENALTY
         kwStrong = false
         strongHit = false
+      }
+      /*
+       * 过期未兑现的计划（2026-11-03，评论区 @shuun）。
+       * 「明天八点端锅过来」只是打算，不能当「他端过了」。到点没兑现的降权一半，
+       * 但保留可召回——问「他还欠你什么」要答得出来。
+       */
+      if (TENSE_ON && e.unfulfilled) {
+        kw *= UNFULFILLED_PENALTY
       }
       if (wantMeme && e.kind === 'meme') kw += 3 // 问梗时梗优先
       // 越新越值钱，但只值一点点，避免"全是刚说的废话"
@@ -2418,6 +2537,55 @@ export class MemoryStore {
           x.rrf += b
         }
         pool.sort((a, b) => b.rrf - a.rrf || compareRecency(a, b))
+      }
+    }
+    /*
+     * 交叉编码器重排（2026-11-03，评论区 @IX维亚济马：「Qwen embedding 作为召回方案，
+     * 可以配合 reranker 构成检索基线」——他说得对，我们原来只有粗排）。
+     *
+     * 沙箱实测（4578 条语料 / 14 考点 × 4 档，脚本 `${MOLLY_ROOT}\out\_xhh3\tune-blend.py`）：
+     *   纯粗排            可答 48/56，金条进前 5 38/56
+     *   纯重排            可答 48/56，金条进前 5 42/56（MC06「他住哪」23→4、MH01 16→1，
+     *                     但 MC08「只会三首歌」4→13 掉出窗口——重排会把同义但更泛的条目顶上来）
+     *   **RRF 融合 0.8/0.2** 可答 52/56，金条进前 5 40/56  ← 两个指标都涨，取这组
+     *
+     * 只重排前 RERANK_POOL 条：全池 200 条要 3.5 秒，40 条约 0.7 秒，群聊等不起。
+     * 任何异常（sidecar 没起、超时、长度对不上）都**静默退回粗排**，绝不让聊天卡住。
+     */
+    if (RERANK_ON && this.reranker && pool.length > 1) {
+      const head = pool.slice(0, RERANK_POOL)
+      // 同一轮里 contextFor 与 engine-context 会用同一句话召回两次，重排结果按「问题+头部 id」缓存一次
+      const sig = `${q}|${head.map((x) => x.e.id).join(',')}`
+      if (!this._rerankCache) this._rerankCache = new Map()
+      try {
+        let scores = this._rerankCache.get(sig)
+        if (!scores) {
+          scores = this.reranker(
+            q,
+            head.map((x) => String(x.e.text || '').slice(0, 300)),
+          )
+          if (Array.isArray(scores) && scores.length === head.length) {
+            this._rerankCache.set(sig, scores)
+            if (this._rerankCache.size > 32) this._rerankCache.delete(this._rerankCache.keys().next().value)
+          }
+        }
+        if (Array.isArray(scores) && scores.length === head.length && scores.every(Number.isFinite)) {
+          const order = head.map((_, i) => i).sort((a, b) => scores[b] - scores[a])
+          const rankOf = new Map()
+          order.forEach((i, pos) => rankOf.set(i, pos + 1))
+          const blended = head.map((x, i) => ({
+            x,
+            s:
+              RERANK_W * (1 / (RERANK_K + rankOf.get(i))) +
+              (1 - RERANK_W) * (1 / (RERANK_K + i + 1)),
+          }))
+          blended.sort((a, b) => b.s - a.s)
+          pool = [...blended.map((b) => b.x), ...pool.slice(head.length)]
+          this.lastRecallRerank = true
+        }
+      } catch (err) {
+        this.lastRecallRerank = false
+        this.logger?.('warn', `重排失败，退回粗排：${err?.message || err}`)
       }
     }
     this.lastRecall = {
@@ -2742,6 +2910,58 @@ export function normalizeRelativeDates(text, at) {
 }
 
 /**
+ * 判断一句话是「计划」还是「已经发生」，并给计划算一个到期时间。
+ *
+ * 场景来源：评论区 @shuun（2026-11-03）——「只说『明天』不代表这件事已经发生」。
+ * 例：「他打算明天再排查」是计划，「他昨天排查了」是事实；计划没兑现要给个说法，
+ * 否则库里那条永远算"有效"。
+ *
+ * 判定只靠词面信号，不做语义推断（没有模型调用，写路径上不能加延迟）：
+ *   - 许诺类（promise）一律算计划；
+ *   - 出现「明天/明早/后天/下周/等会」这类未来词 → 计划；
+ *   - 出现「打算/准备/约好/答应」且没有过去标记 → 计划；
+ *   - 出现「已经/刚刚/昨天/当时/后来」这类过去词 → 已发生；
+ *   - 都没提 → 不表态（''），保持旧行为。
+ */
+export function detectTense(text, kind, at = Date.now()) {
+  const s = String(text || '')
+  if (!s) return { tense: '', dueAt: 0 }
+  const base = Number(at) || Date.now()
+  const hour = new Date(base).getHours()
+  const k = normalizeKind(kind)
+  const future = /(明天|明日|明早|明晚|后天|大后天|下周|下个|下次|等会|会儿|待会|回头)/.test(s)
+  /*
+   * 只用**明确的计划动词**，不放裸「要」「得」「会」：
+   * 实测放开裸「要」会把「他要对我家鱼崽作甚」这种问句也标成计划（1660/4577），
+   * 标签一多就没人信；宁可漏标，不要给每条记忆瞎贴。
+   */
+  const planVerb = /(打算|准备|计划|约好|约定|说好|定下|答应|想着|商量)/.test(s)
+  const past = /(已经|曾经|刚刚|刚才|昨天|昨日|前天|上周|上次|当时|后来|结果|了|过)/.test(s)
+  if (k === 'promise') return { tense: 'plan', dueAt: dueAtFrom(s, base, hour) }
+  if (future) return { tense: 'plan', dueAt: dueAtFrom(s, base, hour) }
+  if (planVerb && !past) return { tense: 'plan', dueAt: dueAtFrom(s, base, hour) }
+  if (past) return { tense: 'past', dueAt: 0 }
+  return { tense: '', dueAt: 0 }
+}
+
+/**
+ * 从正文里取第一个未来时间词，算成「那天结束」的时间戳。
+ * 凌晨 0–5 点的「明天」按天亮后当天算，跟 normalizeRelativeDates 保持同一口径。
+ */
+function dueAtFrom(s, base, hour) {
+  const m = /(明天|明日|明早|明晚|后天|大后天|下周|下个|等会|待会|会儿)/.exec(String(s || ''))
+  if (!m) return 0
+  let days = 0
+  if (m[1] === '明天' || m[1] === '明日' || m[1] === '明早' || m[1] === '明晚') days = hour < 5 ? 0 : 1
+  else if (m[1] === '后天') days = 2
+  else if (m[1] === '大后天') days = 3
+  else if (m[1] === '下周' || m[1] === '下个') days = 7
+  const due = new Date(base + days * 86400000)
+  due.setHours(23, 59, 0, 0)
+  return due.getTime()
+}
+
+/**
  * 把一句话切成检索词。
  *
  * 中文没有空格，"我家猫叫啥" 直接 includes 匹配不到 "猫叫锅贴"。
@@ -2886,6 +3106,33 @@ const TOPIC_MERGE_ON = process.env.MOLLY_TOPIC_MERGE === '1'
  * 周信是「全群摘要」，可以在泛问时当背景，但不该当某个人的主证据。
  */
 const GROUP_WIDE_EVENT_PENALTY = 0.35
+/*
+ * 计划与已发生要分开（2026-11-03，评论区 @shuun 指出）。
+ *
+ * 他原话：「只说『明天』不代表这件事已经发生，结果你就把它记录到明天的事项里，
+ * 感觉这是一个明显的错误。」——对。我们上一轮只把「明天」换成了「明天（10月21日）」，
+ * 却没标这句是**打算**还是**已经发生**。于是「他打算明天排查」和「他昨天排查了」
+ * 在库里长得一样；计划没兑现（八点没去成）也永远不会被证伪。
+ *
+ * 现在入库时打 `tense: 'plan' | 'past'`，计划条目再记 `dueAt`；过了到期时间
+ * （`PLAN_GRACE_MS`）还没被兑现标记的，打 `unfulfilled` 并降权——**不删**：
+ * 问「他还欠你什么」要能问到，问「他今早做了什么」不该由它来答。
+ */
+const UNFULFILLED_PENALTY = 0.5
+/** 计划到期后给多久的宽限（半天，够她把「去过了」这类后续记下来） */
+const PLAN_GRACE_MS = 12 * 3600 * 1000
+/** 开关：`MOLLY_TENSE=0` 可整条关掉（回滚用） */
+const TENSE_ON = process.env.MOLLY_TENSE !== '0'
+/*
+ * 交叉编码器重排（2026-11-03，评论区 @IX维亚济马 指出我们没有 rerank）。
+ * 参数来自沙箱实测：只重排前 40 条（全池 200 条要 3.5s，40 条 0.7s），
+ * 与粗排做 RRF 融合，重排占 0.8——纯重排会把 MC08 那种「同义更泛」的条目顶上来，融合能压住。
+ */
+const RERANK_POOL = 40
+const RERANK_W = 0.8
+const RERANK_K = 60
+/** `MOLLY_RERANK=0` 关掉重排（sidecar 没起时也会自动退回粗排，这条是给回滚留的） */
+const RERANK_ON = process.env.MOLLY_RERANK !== '0'
 
 /**
  * 向量补充候选的条数（2026-11-02，molly-bench MC06）。

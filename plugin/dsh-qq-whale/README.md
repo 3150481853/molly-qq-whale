@@ -68,6 +68,12 @@ Only `onebot.ws` is really required to start talking. Everything else has a defa
 - DeepSeek Harness with the plugin host (`@deepseek-ai/dsh-*` 0.2.x is what this release was tested against).
 - Node.js 20+ (the host's own runtime is fine).
 - A QQ account driven by [SnowLuma](https://github.com/snowluma/snowluma)'s OneBot 11 backend — this plugin does not log into QQ by itself.
+- **Optional** for the vector + reranker upgrade: Python 3.10+ with `torch` and `transformers`, plus two local models (`bge-small-zh-v1.5` ≈92MB, `bge-reranker-base` ≈1.1GB). Without them recall falls back to keyword-only and nothing breaks.
+  ```bash
+  python tools/embed-server.py --port 8791 --models /path/to/models   # 需要 <models>/bge-small-zh-v1.5 与 <models>/bge-reranker-base
+  ```
+  The plugin tries to start this service itself; `MOLLY_EMBED_OFF=1` disables it entirely.
+- **Memory tuning notes:** see [`docs/MEMORY-OPTIMIZATION.md`](docs/MEMORY-OPTIMIZATION.md) — every lesson there came from a real failure (relative-date normalization at 0–5 a.m., "plan vs happened", why a reranker can't rescue a candidate that never entered the pool, why two processes writing the same shards silently overwrite each other, and so on).
 
 **No npm dependencies.** This package uses Node built-ins only, deliberately: a plugin installed into someone's host should not drag a dependency tree into it.
 

@@ -57,6 +57,11 @@ const FILES = [
    * 不登记的话「按仓库装插件」只有客户端、没有服务端，回忆会一直退回纯关键词。
    */
   ['tools/embed-server.py', 'tools/embed-server.py'],
+  /*
+   * 记忆系统「优化注意事项」（2026-11-03）：踩过的坑汇总，部署者照做能少走弯路。
+   * docs/ 不属于任何 DIRS 白名单，必须逐条登记，否则下一次白名单复制的「孤儿清理」会把它删掉。
+   */
+  ['plugin/dsh-qq-whale/docs/MEMORY-OPTIMIZATION.md', 'plugin/dsh-qq-whale/docs/MEMORY-OPTIMIZATION.md'],
   ['plugin/dsh-qq-whale/package.json', 'plugin/dsh-qq-whale/package.json'],
   // 插件自带的挂载补丁：package.json 的 dsh.bundle.patch 指向它，
   // 缺了它「按仓库装插件」只装代码、不挂载（2026-10-21 补进白名单）

@@ -161,6 +161,17 @@ flowchart LR
 
 > 规则原文与历次实操记录在仓库 `docs/STATE.md` §10，发布流程（构建、脱敏、tag、Release、附件）见 §9。
 
+## 记忆系统 0.3（2026-11-03）
+
+这一版只动记忆，其余部分与 1.1.7-preview.1 一致。**全部改动都可以关掉**：`MOLLY_EMBED_OFF=1` 退回纯关键词，`MOLLY_TENSE=0` 关掉计划判定。
+
+- **向量 + 交叉编码器重排**：本地 `bge-small-zh-v1.5` + `bge-reranker-base`，粗排前 40 条送重排再与粗排 RRF 融合。服务不通、模型没装、torch 缺失时**自动退回关键词**，不阻塞聊天。
+- **相对日期归一**：入库即写「明天（10月21日）」；凌晨 0–5 点的「明天」按天亮后当天算。
+- **计划 ≠ 已发生**：条目带 `tense`，过期未兑现的降权但**不删**。
+- **改口判定收紧**：引用转述不算改口、否定词必须紧贴、表情包不参与——存量 952 条（22.5%）误标「已被取代」已清零。
+- **自测卷**：`tools/molly-bench/`，14 题 × 4 个时间档，可复现（生产语料 4578 条实测：四档 13/14；朴素 sqlite + fts5 对照 8/7/6/6）。
+- **文档**：给 AI 的 [`AGENTS.md`](AGENTS.md)，给人的 [`docs/MEMORY-OPTIMIZATION.md`](plugin/dsh-qq-whale/docs/MEMORY-OPTIMIZATION.md)。完整变更见 [`CHANGELOG.md`](CHANGELOG.md)。
+
 ## 环境要求
 
 | 你需要 | 说明 |

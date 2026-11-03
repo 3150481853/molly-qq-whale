@@ -67,6 +67,8 @@ const FILES = [
    * 人类向在 docs/MEMORY-OPTIMIZATION.md，两份分开维护，不要互相合并。
    */
   ['publish-assets/AGENTS.md', 'AGENTS.md'],
+  // 2026-11-03：记忆系统 0.3 的更新记录，与 README 的版本段互为索引
+  ['publish-assets/CHANGELOG.md', 'CHANGELOG.md'],
   ['plugin/dsh-qq-whale/package.json', 'plugin/dsh-qq-whale/package.json'],
   // 插件自带的挂载补丁：package.json 的 dsh.bundle.patch 指向它，
   // 缺了它「按仓库装插件」只装代码、不挂载（2026-10-21 补进白名单）

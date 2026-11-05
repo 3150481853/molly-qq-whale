@@ -316,13 +316,19 @@ node tools\console-server.mjs      # 或直接双击 .\console.cmd
 - **15 个页面**：总览 · 会话与消息 · 记忆 · 待核实 · 表情包 · 发言开关 · 预算 · 干活 · 守护 · 运维 · 外部服务 · 通道（SnowLuma）· 登录 · 执行块 · 设置
 - **关于页**：版本、构建号、数据量、开发者联系方式；「检查更新」比对前后端构建号，号不一样会自动刷新。
 <p align="center">
-  <img src="assets/shot-palette.png" width="440" alt="命令面板"> <img src="assets/shot-settings.png" width="440" alt="偏好设置 · 储存与占用">
+  <img src="assets/shot-palette.png" width="620" alt="命令面板">
   <br>
-  <sub>左：`Ctrl+K` 命令面板，按页面和操作分类搜 · 右：偏好设置里的「储存与占用」，看得到四组进程各占多少</sub>
+  <sub><code>Ctrl+K</code> 命令面板 · 按「页面」和「操作」两组搜，回车直接执行或跳转</sub>
 </p>
 
 <p align="center">
-  <img src="assets/shot-about.png" width="780" alt="关于页">
+  <img src="assets/shot-settings.png" width="620" alt="偏好设置 · 储存与占用">
+  <br>
+  <sub>偏好设置 → 储存与占用 · 四组进程各占多少、重排怎么加载、一键回收多少内存</sub>
+</p>
+
+<p align="center">
+  <img src="assets/shot-about.png" width="620" alt="关于页">
   <br>
   <sub>关于页 · 版本、构建号、记忆与表情的数量、开发者联系方式</sub>
 </p>

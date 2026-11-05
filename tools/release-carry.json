@@ -187,5 +187,12 @@
         "sha256": "<REDACTED>",
         "bytes": 3141393,
         "files": 278
+    },
+    "v1.1.8-preview.1": {
+        "at": "2026-11-05T13:23:01.336Z",
+        "version": "1.1.8-preview.1",
+        "sha256": "<REDACTED>",
+        "bytes": 3151925,
+        "files": 280
     }
 }

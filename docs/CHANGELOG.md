@@ -35,6 +35,34 @@
 - 只回退称谓：把 `engine-context.js` 里「# 现在跟你说话的是谁」整段删掉即可，其余互不依赖。
 
 ---
+## 2026-11-05 · 茉莉花（Jasmine）0.4.0：记忆底座独立成包 + 自带控制台
+
+茉莉花记忆系统从这一版起**单独成一个包**（仓库 <https://github.com/3150481853/jasmine-memory>，标签 `jasmine-v0.4.0`），不再只是 Molly 里的一个模块。
+
+**新东西**
+
+- **`jasmine-controller` 控制台**：零依赖本地网页，只读 `JasmineStore`，三页 —— 记忆库（指标 / 七类分布 / 左索引 / 列表）、曲线（权重分布与衰减）、数据（本库 / 导入 / 维护 / 原始账）。
+- 解压即用：`jasmine-controller-0.4.0.zip`（82,624 B / 20 文件），双击 `start.bat` 或 `node controller/server.mjs --dir ./data/memory --port 19430 --open`。
+- 与 Molly 互通：Molly 控制台的「茉莉花记忆系统」页是同一套界面的宿主版本，记忆卡格式一致，`/api/import` 可直接吃 Molly 的导出（要带 `{ bundle, dryRun: false }`）。
+
+**修掉的两个真问题**
+
+- 导入 Molly 的导出后「活跃天」永远不涨：导出里只有条目、没有 `meta`，`activeDayKey` 为空 → `touchActiveDay()` 一直判「同一天」。导入结束时回填 `store.meta.activeDayKey = store.dayKeyOf()`。
+- 数据页显示「活跃天 10 ()」：界面无脑拼括号 → 有 key 才拼。
+
+**验证**
+
+- 真实数据：Molly 5,436 条 → 导入 5,601 条（1 条空正文跳过），`count=5601` / `activeDays=10` / 平均权重 `5.7`。
+- `node --test "test/**/*.test.mjs"` = **47 pass / 0 fail**。
+- 附件 sha256 `<REDACTED>`。
+
+**在哪下载**
+
+- Molly 仓库的 release：<https://github.com/3150481853/molly-qq-whale/releases/tag/jasmine-v0.4.0>（附件同上）。
+- 独立仓库的 release：<https://github.com/3150481853/jasmine-memory/releases/tag/v0.4.0>。
+
+---
+
 ## 2026-11-05 · v1.1.7 正式版：玻璃化界面、Jasmine 记忆、桌面应用
 
 > 完整清单见 `docs/RELEASE-1.1.7.md`（按「外观 / 功能 / 后端 / 桌面 / 记忆内核 / 插件」六块拆开，含验收数据）。

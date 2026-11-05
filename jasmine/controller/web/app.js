@@ -534,7 +534,7 @@
       ['条数 / 上限', st.count + ' / ' + st.limit],
       ['归档簿', st.archiveCount + ' 条（超过 ' + st.archiveLimitDays + ' 活跃天的陈旧条目）'],
       ['字符数', String(st.chars)],
-      ['活跃天', st.activeDays + '（' + st.activeDayKey + '）'],
+      ['活跃天', st.activeDays + (st.activeDayKey ? '（' + st.activeDayKey + '）' : '')],
       ['上次压缩', st.lastCompactionAt ? fmtTime(st.lastCompactionAt) : '还没压缩过'],
       ['类型分布', KIND_LIST.map(function (k) { return k.label + ' ' + (st.counts[k.id] || 0); }).join(' · ')],
       ['库文件', st.broken ? '<span style="color:var(--danger)">读盘有问题</span>' : '正常']

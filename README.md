@@ -177,7 +177,12 @@ flowchart LR
 
 > 规则原文与历次实操记录在仓库 `docs/STATE.md` §10，发布流程（构建、脱敏、tag、Release、附件）见 §9。
 
-## Jasmine 0.3（茉莉花记忆系统，2026-11-03）
+## Jasmine 0.4（茉莉花记忆系统 + 独立控制台）
+
+> **从 0.4.0 起，记忆底座单独成包**：仓库 <https://github.com/3150481853/jasmine-memory>，release <https://github.com/3150481853/jasmine-memory/releases/tag/v0.4.0>。
+> 附件 `jasmine-controller-0.4.0.zip`（81 KB，47/47 用例通过）解压即用：`node controller/server.mjs --dir ./data/memory --port 19430 --open`，
+> 就是同一套界面的独立版（记忆库 / 曲线 / 数据三页），数据源换成你自己的 `jasmine.json`。
+> 两边记忆卡格式完全一致，可整包导出导入；Molly 控制台里的记忆页是它的宿主版本。
 
 这一版只动记忆，其余部分与 1.1.7 一致。**全部改动都可以关掉**：`MOLLY_EMBED_OFF=1` 退回纯关键词，`MOLLY_TENSE=0` 关掉计划判定。
 

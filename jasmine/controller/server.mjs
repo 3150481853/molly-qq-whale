@@ -452,6 +452,9 @@ function importPayload(body) {
     const maxDay = store.entries.reduce((m, e) => Math.max(m, Math.max(0, Math.round(Number(e.lastActiveDay) || 0))), 0)
     if (maxDay > 0) store.meta.activeDays = maxDay
   }
+  // 只有条目、没有 meta 的导出会把 activeDayKey 留空：补成今天，
+  // 否则第一次写入时 touchActiveDay 认为「同一天」，活跃天永远不往上走。
+  if (!store.meta.activeDayKey) store.meta.activeDayKey = store.dayKeyOf()
   store.save()
   saveArchiveFile()
   store.appendRaw({

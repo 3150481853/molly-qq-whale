@@ -33,6 +33,7 @@ public partial class MainWindow : Window
     private Process? _ownedBackend;
     private CancellationTokenSource? _connectionAttempt;
     private bool _webReady;
+    private bool _webSuspended;
     private bool _allowClose;
     private bool _shuttingDown;
     private string _diagnostics = "尚未开始连接。";
@@ -176,7 +177,64 @@ public partial class MainWindow : Window
         // 再调一次 DwmSetWindowAttribute(SYSTEMBACKDROP_TYPE)（哪怕先清成 NONE 再设回 3）
         // 都会让整窗变成不透明的暖白 #FBFBFA —— DWM 只在窗口首次显示时贴材料，
         // 重设反而把材料打掉。最大化/还原本身不会丢材料，圆角单独更新就够了。
+        // 2026-11-05「储存与占用」：最小化时把 WebView2 挂起（Chromium 会把闲置渲染进程的
+        // 内存还给系统），恢复时再 Resume。开关读 <后端目录>\out\mem-config.json 的
+        // suspendOnMinimize（读不到就按 true 处理，这是纯收益项）。
+        try { UpdateWebViewSuspend(WindowState == WindowState.Minimized); }
+        catch (Exception ex) { WindowGlass.Log("  suspend toggle failed: " + ex.Message); }
         WindowGlass.Log($"  state-changed -> {WindowState}（不重贴玻璃）");
+    }
+
+    /// <summary>
+    /// 读取控制台「储存与占用」里写的策略。文件不存在 / 解析失败一律当 true。
+    /// </summary>
+    private bool SuspendOnMinimize()
+    {
+        try
+        {
+            var path = Path.Combine(_backendDirectory, "out", "mem-config.json");
+            if (!File.Exists(path)) return true;
+            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            return !(doc.RootElement.TryGetProperty("suspendOnMinimize", out var v)
+                     && v.ValueKind == JsonValueKind.False);
+        }
+        catch
+        {
+            return true;
+        }
+    }
+
+    private async void UpdateWebViewSuspend(bool minimize)
+    {
+        if (!_webReady || WebView.CoreWebView2 is null) return;
+        var core = WebView.CoreWebView2;
+        if (minimize)
+        {
+            if (_webSuspended || !SuspendOnMinimize()) return;
+            _webSuspended = true;
+            try
+            {
+                await core.TrySuspendAsync();
+                WindowGlass.Log("  webview2 suspended（最小化）");
+            }
+            catch (Exception ex)
+            {
+                _webSuspended = false;
+                WindowGlass.Log("  webview2 suspend failed: " + ex.Message);
+            }
+            return;
+        }
+        if (!_webSuspended) return;
+        _webSuspended = false;
+        try
+        {
+            core.Resume();
+            WindowGlass.Log("  webview2 resumed（还原）");
+        }
+        catch (Exception ex)
+        {
+            WindowGlass.Log("  webview2 resume failed: " + ex.Message);
+        }
     }
 
     private void TitleBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)

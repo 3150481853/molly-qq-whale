@@ -764,6 +764,9 @@ function copyDirRecursive(fromRel, toRel) {
   for (const e of fs.readdirSync(path.join(SRC, fromRel), { withFileTypes: true })) {
     const rel = `${fromRel}/${e.name}`
     const dstRel = `${toRel}/${e.name}`
+    // .git / node_modules 是本地版本库与依赖，不是发布内容。
+    // 2026-11-05 修：jasmine/ 递归复制时把 jasmine/.git/index 当二进制带进了副本。
+    if (e.name === '.git' || e.name === 'node_modules') continue
     if (e.isDirectory()) {
       copyDirRecursive(rel, dstRel)
       continue

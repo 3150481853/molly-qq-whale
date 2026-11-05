@@ -2,9 +2,9 @@
 
 > 本副本由 `tools/build-publish.mjs` 生成，**勿手改**；要改就改源仓库再重新生成。
 
-- 生成时间：2026-11-05T07:23:11.864Z
-- 文件数：**247**
-- 总体积：**4.41 MB**
+- 生成时间：2026-11-05T10:05:46.461Z
+- 文件数：**252**
+- 总体积：**5.25 MB**
 - 脱敏复检：**命中 0**
 
 ## 顶层结构
@@ -39,10 +39,6 @@
 
 - plugin/dsh-qq-whale/lib/memory.js
 - plugin/dsh-qq-whale/lib/webview.js
-- jasmine/.git/logs/HEAD
-- jasmine/.git/logs/refs/heads/main
-- jasmine/.git/refs/heads/main
-- jasmine/.git/refs/tags/v0.4.0
 - desktop/app.manifest
 - docs/RELEASE-1.1.7.md
 - docs/desktop-app.md

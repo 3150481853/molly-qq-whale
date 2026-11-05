@@ -379,6 +379,43 @@
           </div>
           <label class="glass-setting" for="glassEnabled"><span><b>导航与顶栏磨砂</b><small>轻微透出背景，正文保持清晰；低性能设备可关闭。</small></span><input type="checkbox" id="glassEnabled"><i aria-hidden="true"></i></label>
         </div>
+        <div class="card card-block" id="memCard">
+          <h2 class="card-title">储存与占用</h2>
+          <p class="card-sub">给别的部署者用：按这台机器的内存调策略，改完立刻写进 <span class="mono">out\mem-config.json</span>。内存宽裕就保持默认——默认值不牺牲任何功能。</p>
+          <div class="mem-table" id="memTable"><div class="mem-item is-muted"><span>正在读取…</span><b>—</b></div></div>
+          <div class="row-actions mem-row">
+            <label class="mem-field">重排
+              <select class="input" id="memRerankMode">
+                <option value="lazy">按需（空闲卸载）</option>
+                <option value="always">常驻</option>
+              </select>
+            </label>
+            <label class="mem-field">重排空闲卸载
+              <select class="input" id="memRerankIdle">
+                <option value="0">不卸载</option>
+                <option value="5">5 分钟</option>
+                <option value="10">10 分钟</option>
+                <option value="30">30 分钟</option>
+              </select>
+            </label>
+            <label class="mem-field">语音空闲退出
+              <select class="input" id="memSovitsIdle">
+                <option value="0">不退出</option>
+                <option value="10">10 分钟</option>
+                <option value="30">30 分钟</option>
+                <option value="60">60 分钟</option>
+              </select>
+            </label>
+          </div>
+          <div class="mem-toggles">
+            <label class="glass-setting" for="memGuard"><span><b>内存守卫</b><small>系统内存紧张时先卸载重排，免得整机卡住。</small></span><input type="checkbox" id="memGuard"><i aria-hidden="true"></i></label>
+            <label class="glass-setting" for="memSuspend"><span><b>最小化时挂起窗口</b><small>桌面应用最小化时暂停网页渲染，恢复首帧会多几百毫秒。</small></span><input type="checkbox" id="memSuspend"><i aria-hidden="true"></i></label>
+          </div>
+          <div class="row-actions" style="margin-top:12px">
+            <button class="btn btn-primary" id="memTrim" type="button">立即回收</button>
+            <span class="card-sub" id="memHint" style="margin:0"></span>
+          </div>
+        </div>
         <div class="card card-block" id="sleepCard">
           <h2 class="card-title">作息时间（北京时间）</h2>
           <p class="card-sub">这段时间里她在睡觉：群里不掺和，私聊/@ 被叫醒才会短回一句。时间按北京时间算，改完立即生效（不用重启）。</p>

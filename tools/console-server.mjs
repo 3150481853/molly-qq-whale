@@ -2061,6 +2061,147 @@ function stopMollyProcesses() {
   return { killed, notRunning, failed };
 }
 
+// ── 储存与占用（2026-11-05）────────────────────────────────────────────────
+// 为什么单独一份配置：这些是「按这台机器的内存调策略」，不是功能开关。
+// 控制台、Python 侧车（embed-server.py）、桌面壳三方都读同一个 out\mem-config.json，
+// 免得各写各的口径 —— 谁改了都在同一个地方看见。
+const MEM_CONFIG_FILE = path.join(OUT, 'mem-config.json');
+const MEM_DEFAULTS = Object.freeze({
+  rerankMode: 'lazy',      // always | lazy：重排是否常驻
+  rerankIdleMin: 5,        // lazy 下空闲多少分钟卸载重排（0 = 不卸载）
+  sovitsIdleMin: 10,       // 语音服务空闲多少分钟退出（0 = 不退出）
+  guard: true,             // 内存守卫：紧张时先卸载重排
+  suspendOnMinimize: true, // 桌面窗口最小化时挂起 WebView2
+});
+const MEM_WATCH = [
+  { key: 'shell', label: '桌面外壳 + WebView2', names: ['Molly.exe', 'msedgewebview2.exe'] },
+  { key: 'console', label: '控制台后端', names: ['molly-console.exe'] },
+  { key: 'embed', label: '嵌入 / 重排', names: ['pythonw.exe'] },
+  { key: 'voice', label: '语音服务（SoVITS）', names: ['python.exe'] },
+];
+
+function readMemConfig() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(MEM_CONFIG_FILE, 'utf8'));
+    const merged = { ...MEM_DEFAULTS };
+    for (const k of Object.keys(MEM_DEFAULTS)) if (raw && raw[k] !== undefined) merged[k] = raw[k];
+    return merged;
+  } catch {
+    return { ...MEM_DEFAULTS };
+  }
+}
+
+function writeMemConfig(patch) {
+  const next = { ...readMemConfig() };
+  if (!patch || typeof patch !== 'object') return next;
+  if (patch.rerankMode === 'always' || patch.rerankMode === 'lazy') next.rerankMode = patch.rerankMode;
+  for (const k of ['rerankIdleMin', 'sovitsIdleMin']) {
+    const n = Number(patch[k]);
+    if (Number.isFinite(n) && n >= 0 && n <= 240) next[k] = Math.round(n);
+  }
+  for (const k of ['guard', 'suspendOnMinimize']) {
+    if (typeof patch[k] === 'boolean') next[k] = patch[k];
+  }
+  try {
+    fs.mkdirSync(path.dirname(MEM_CONFIG_FILE), { recursive: true });
+    fs.writeFileSync(MEM_CONFIG_FILE, JSON.stringify(next, null, 2) + '\n', 'utf8');
+  } catch (err) { /* 写不进去就只在内存里生效，下一次读会退回默认 */ }
+  return next;
+}
+
+// 进程内存分组：一次 CIM 查询拿到 pid / 父 pid / 命令行，再按「归属谁」归类。
+// 为什么不用 tasklist 按名字累加：msedgewebview2.exe、python.exe 全机都有，
+// 按名字相加会把别的软件的 WebView2、别的 Python 也算进 Molly —— 数字就不诚实了。
+// 这里按进程树归属：Molly.exe 的整棵子树算外壳（扣除后端子进程），
+// molly-console.exe 的子树算后端，pythonw + embed-server 算侧车，GPT-SoVITS 算语音。
+function sampleMemory() {
+  const empty = {
+    at: Date.now(),
+    groups: MEM_WATCH.map((g) => ({ key: g.key, label: g.label, count: 0, mb: 0 })),
+    totalMb: 0,
+  };
+  if (process.platform !== 'win32') return empty;
+  let list = [];
+  try {
+    const ps = spawnSync('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-Command',
+      'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,WorkingSetSize,CommandLine | ConvertTo-Json -Compress',
+    ], { encoding: 'utf8', timeout: 15000, windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
+    const raw = String((ps && ps.stdout) || '').trim();
+    if (!raw) return empty;
+    const parsed = JSON.parse(raw);
+    list = Array.isArray(parsed) ? parsed : [parsed];
+  } catch {
+    return empty;
+  }
+  const procs = list.map((p) => ({
+    pid: Number(p.ProcessId) || 0,
+    ppid: Number(p.ParentProcessId) || 0,
+    name: String(p.Name || '').toLowerCase(),
+    cmd: String(p.CommandLine || ''),
+    mb: Math.round((Number(p.WorkingSetSize) || 0) / 1048576),
+  })).filter((p) => p.pid);
+  const byPid = new Map(procs.map((p) => [p.pid, p]));
+  const childrenOf = new Map();
+  for (const p of procs) {
+    if (!childrenOf.has(p.ppid)) childrenOf.set(p.ppid, []);
+    childrenOf.get(p.ppid).push(p.pid);
+  }
+  function subtree(rootPid) {
+    const seen = new Set();
+    const stack = [rootPid];
+    while (stack.length) {
+      const pid = stack.pop();
+      if (!pid || seen.has(pid)) continue;
+      seen.add(pid);
+      for (const c of (childrenOf.get(pid) || [])) stack.push(c);
+    }
+    return seen;
+  }
+  function sumOf(set) {
+    let mb = 0;
+    let count = 0;
+    for (const pid of set) {
+      const p = byPid.get(pid);
+      if (p) { mb += p.mb; count += 1; }
+    }
+    return { mb, count };
+  }
+  const add = (pred) => {
+    const set = new Set();
+    for (const p of procs) if (pred(p)) for (const x of subtree(p.pid)) set.add(x);
+    return set;
+  };
+  const consolePids = add((p) => p.name === 'molly-console.exe');
+  const shellPids = add((p) => p.name === 'molly.exe');
+  for (const pid of consolePids) shellPids.delete(pid);
+  const embedPids = add((p) => p.name === 'pythonw.exe' && /embed-server/i.test(p.cmd));
+  const voicePids = add((p) => p.name === 'python.exe' && /gpt-sovits|api_v2|infer\.py|\brvc\b/i.test(p.cmd));
+
+  const sets = { shell: shellPids, console: consolePids, embed: embedPids, voice: voicePids };
+  let totalMb = 0;
+  const groups = MEM_WATCH.map((g) => {
+    const s = sumOf(sets[g.key] || new Set());
+    totalMb += s.mb;
+    return { key: g.key, label: g.label, count: s.count, mb: s.mb };
+  });
+  return { at: Date.now(), groups, totalMb };
+}
+
+// 侧车（8791）的调用口：连不上不算错，只回报 reached:false —— 控制台不能因为侧车没起就打不开
+async function embedCall(endpoint, body, ms = 20_000) {
+  try {
+    const r = await fetchJson('http://127.0.0.1:8791' + endpoint, {
+      method: body ? 'POST' : 'GET',
+      body: body ? JSON.stringify(body) : undefined,
+    }, ms);
+    if (!r || r.status !== 200) return { reached: false, status: r ? r.status : 0 };
+    return { reached: true, ...(r.data || {}) };
+  } catch (err) {
+    return { reached: false, error: errText(err) };
+  }
+}
+
 // ── 动作表 ──────────────────────────────────────────────────────────────────
 const ACTIONS = {
   'plugin/toggle': async (body) => {
@@ -2355,6 +2496,44 @@ const ACTIONS = {
       };
     }
     return runPowerShell([], 240_000);
+  },
+
+  // ── 储存与占用：读策略 / 改策略 / 立即回收 ─────────────────────────────────
+  // 只读或只动「内存里能重新加载的东西」，不碰记忆文件，所以都不进 DESTRUCTIVE。
+
+  'mem/status': async () => {
+    const mem = sampleMemory();
+    const embed = await embedCall('/stats', null, 4000);
+    return { ok: true, data: { config: readMemConfig(), mem, embed, configPath: MEM_CONFIG_FILE } };
+  },
+
+  'mem/config': async (body) => {
+    const config = writeMemConfig(body || {});
+    // 侧车在跑就顺手热推一次；没跑也不报错，它下次启动会自己读同一个文件
+    const sidecar = await embedCall('/config', {
+      rerankMode: config.rerankMode,
+      rerankIdleMin: config.rerankMode === 'always' ? 0 : config.rerankIdleMin,
+    }, 5000);
+    return { ok: true, data: { config, configPath: MEM_CONFIG_FILE, sidecar } };
+  },
+
+  'mem/trim': async () => {
+    const before = sampleMemory();
+    // 重排和嵌入都能按需重新加载（/embed、/rerank 进来时自己 load），所以一口气全卸
+    const r = await embedCall('/unload', { rerank: true, embed: true }, 60_000);
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    const after = sampleMemory();
+    return {
+      ok: true,
+      data: {
+        before,
+        after,
+        freedMb: Math.max(0, before.totalMb - after.totalMb),
+        unloaded: r.reached ? (r.unloaded || []) : [],
+        reached: !!r.reached,
+        error: r.reached ? undefined : (r.error || '嵌入服务没在跑，暂时没有可回收的内存'),
+      },
+    };
   },
 
   // ── CRUD 8 条（契约 §3）：全部透传插件，代理层只做本地参数校验 ──────────────

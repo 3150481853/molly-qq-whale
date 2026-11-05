@@ -14,13 +14,21 @@
 基于 **DeepSeek Harness** 的 QQ 通道插件：稳定的人设、长期记忆、表情包习惯、会发语音，
 以及一个能看懂她此刻在干什么的控制台。
 
-**最近版本：** `v1.1.7-preview.1`（预览，2026-10-30）· 上一个稳定版 `v1.1.6-Hotfix.1` · 完整记录见 [docs/CHANGELOG.md](docs/CHANGELOG.md) 与 [Releases](../../releases)。
+**最近版本：** `v1.1.7`（正式版，2026-11-05）· 上一个稳定版 `v1.1.6-Hotfix.1` · 完整记录见 [docs/CHANGELOG.md](docs/CHANGELOG.md) 与 [Releases](../../releases)。
 
-> ⚠️ `v1.1.5` 与 `v1.1.5-Hotfix.1` 已被**撤回删除**（会把群里的人认错），请用 `v1.1.7-preview.1` 或 `v1.1.6-Hotfix.1`。
+> ⚠️ `v1.1.5` 与 `v1.1.5-Hotfix.1` 已被**撤回删除**（会把群里的人认错），请用 `v1.1.7` 或 `v1.1.6-Hotfix.1`。
 
-**版本线（新 → 旧）：** `v1.1.7-preview.1` · `v1.1.6-Hotfix.1` · `v1.1.6` · `v1.1.6-preview.6` · `v1.1.5-A-Hotfix.1` · `v1.1.5-A` · `v1.1.5-Hotfix.3` · `v1.1.3-Hotfix.3` · `v1.1.3` · `v1.1.0`
+**版本线（新 → 旧）：** `v1.1.7` · `v1.1.7-preview.1` · `v1.1.6-Hotfix.1` · `v1.1.6` · `v1.1.6-preview.6` · `v1.1.5-A-Hotfix.1` · `v1.1.5-A` · `v1.1.5-Hotfix.3` · `v1.1.3-Hotfix.3` · `v1.1.3` · `v1.1.0`
 
-**这一版新增：**
+**v1.1.7 正式版新增：**
+
+- **桌面应用**：WPF + WebView2 的独立窗口，跟着你自己的壁纸做磨砂（不是网页套壳），`desktop\build.ps1` 一条命令出单文件 exe。
+- **Jasmine 记忆页**：三栏（筛选 / 列表 / 详情），支持按日期看某一天、按时间正倒序、按权重正倒序；正在掉权的条目直接写 `w6→5.5`，不用自己算。
+- **命令面板**：`Ctrl+K` 按页面和操作分类搜索，回车直达；对动作的搜索会跳到对应卡片，还是要你点确认才执行。
+- **储存与占用**（偏好设置里）：显示四组进程各占多少，重排改成按需加载、空闲 5 分钟自动卸，实测回收约 620 MB，给内存小的机器用。
+- **关于页**：版本、构建号、记忆与表情数量、开发者联系方式一眼看完。
+
+preview.1 里已经有的：
 
 - **会自己上网**：她能搜、能读网页、能查天气（可关），外部资料只作参考、不覆盖她原本的判断。
 - **动图 12 格**：一张动图取 12 个瞬间拼成一张图；提示词钉死「这是一张动图，别数格子」。
@@ -29,9 +37,17 @@
 
 更早版本、`v1.1.5-preview.*` 与已撤回的版本，见 [CHANGELOG](docs/CHANGELOG.md)。
 
+> **Releases 里的 zip 是源码包（约 1.9 MB），不含 exe 与模型。** 155 MB 的 `Molly.exe` 由 `desktop\build.ps1` 自己编（要 .NET SDK），向量/重排模型按 [docs/](docs/) 说明自己下 —— 仓库不放二进制，克隆和下载都轻。
+
 [![license](https://img.shields.io/badge/license-MIT-1aae39?style=flat-square)](LICENSE) [![node](https://img.shields.io/badge/node-24.22.1%2B-1aae39?style=flat-square)](https://nodejs.org) [![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0075de?style=flat-square)](#环境要求) [![host](https://img.shields.io/badge/host-DeepSeek%20Harness-5645d4?style=flat-square)](#环境要求) [![QQ](https://img.shields.io/badge/QQ-OneBot%2011-0075de?style=flat-square)](#环境要求)
 
 </div>
+
+<p align="center">
+  <img src="assets/shot-overview.png" width="900" alt="Molly 控制台总览">
+  <br>
+  <sub>总览 · 她此刻在不在线、今天花了多少积分、守护最近一次巡检是什么时候</sub>
+</p>
 
 > [!IMPORTANT]
 > 这是**一套框架，不是一个角色**。仓库里没有她的人设、记忆或聊天记录 ——
@@ -163,7 +179,13 @@ flowchart LR
 
 ## Jasmine 0.3（茉莉花记忆系统，2026-11-03）
 
-这一版只动记忆，其余部分与 1.1.7-preview.1 一致。**全部改动都可以关掉**：`MOLLY_EMBED_OFF=1` 退回纯关键词，`MOLLY_TENSE=0` 关掉计划判定。
+这一版只动记忆，其余部分与 1.1.7 一致。**全部改动都可以关掉**：`MOLLY_EMBED_OFF=1` 退回纯关键词，`MOLLY_TENSE=0` 关掉计划判定。
+
+<p align="center">
+  <img src="assets/shot-jasmine.png" width="900" alt="茉莉花记忆系统">
+  <br>
+  <sub>记忆页 · 左边按类型和人物筛，中间按日期/时间/权重排，右边看一条记忆的来龙去脉</sub>
+</p>
 
 - **向量 + 交叉编码器重排**：本地 `bge-small-zh-v1.5` + `bge-reranker-base`，粗排前 40 条送重排再与粗排 RRF 融合。服务不通、模型没装、torch 缺失时**自动退回关键词**，不阻塞聊天。
 - **相对日期归一**：入库即写「明天（10月21日）」；凌晨 0–5 点的「明天」按天亮后当天算。
@@ -292,6 +314,19 @@ node tools\console-server.mjs      # 或直接双击 .\console.cmd
 ```
 
 - **15 个页面**：总览 · 会话与消息 · 记忆 · 待核实 · 表情包 · 发言开关 · 预算 · 干活 · 守护 · 运维 · 外部服务 · 通道（SnowLuma）· 登录 · 执行块 · 设置
+- **关于页**：版本、构建号、数据量、开发者联系方式；「检查更新」比对前后端构建号，号不一样会自动刷新。
+<p align="center">
+  <img src="assets/shot-palette.png" width="440" alt="命令面板"> <img src="assets/shot-settings.png" width="440" alt="偏好设置 · 储存与占用">
+  <br>
+  <sub>左：`Ctrl+K` 命令面板，按页面和操作分类搜 · 右：偏好设置里的「储存与占用」，看得到四组进程各占多少</sub>
+</p>
+
+<p align="center">
+  <img src="assets/shot-about.png" width="780" alt="关于页">
+  <br>
+  <sub>关于页 · 版本、构建号、记忆与表情的数量、开发者联系方式</sub>
+</p>
+
 - 只监听 `127.0.0.1`；宿主端口每次重启都会换，服务端自己探。
 - 打包成单文件 exe 见 [docs/deploy.md](docs/deploy.md)。
 

@@ -177,3 +177,6 @@ const ROOT = pick('MOLLY_ROOT', 'root', IS_SEA ? (findWorkspaceRoot(EXE_DIR) || 
 2026-11-05 之后桌面只留快捷方式 `Molly 控制台.lnk`（`TargetPath=${MOLLY_ROOT}\qq-whale\dist\desktop\Molly.exe`、`WorkingDirectory=${MOLLY_ROOT}\qq-whale\dist\desktop`、`IconLocation=<exe>,0`），桌面上的 155 MB 独立副本已删除——快捷方式永远跟着 `dist\desktop` 的更新走，不会再出现「复制过去就失效」的情况。
 
 仍保留指针兜底：万一以后又把 `Molly.exe` 复制到别处（U 盘、临时目录），只要 `%LOCALAPPDATA%\Molly\Desktop\install-dir.txt` 还在，它照样能找到真后端。
+## 储存与占用（2026-11-05）
+
+偏好设置 → 储存与占用 可以看四组进程实际占了多少，并调三个策略：重排按需加载（默认开，空闲 5 分钟自动卸掉，实测回收约 620 MB）、语音服务空闲退出（默认 10 分钟，本机没启用）、内存守卫（系统紧张时先卸重排）。还有「最小化时挂起窗口」——它省的是 CPU 与电量，**不省内存**，别指望它降占用。配置写在 `<后端目录>\out\mem-config.json`，桌面壳和侧车启动时都会读它。

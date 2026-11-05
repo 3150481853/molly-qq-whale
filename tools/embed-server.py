@@ -24,6 +24,7 @@
 """
 
 import argparse
+import gc
 import json
 import os
 import sys
@@ -218,14 +219,53 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, {"ok": False, "error": f"bad json: {exc}"})
             return
         try:
-            if self.path.startswith("/embed"):
+            if self.path.startswith("/config"):
+                # 2026-11-05 控制台改完配置就地推过来，不用重启侧车
+                global RERANK_IDLE_MIN
+                mode = body.get("rerankMode")
+                val = body.get("rerankIdleMin")
+                if mode == "always":
+                    RERANK_IDLE_MIN = 0
+                elif isinstance(val, (int, float)):
+                    RERANK_IDLE_MIN = max(0, int(val))
+                self._send(200, {"ok": True, "rerank_idle_min": RERANK_IDLE_MIN, "rerank": bool(_state["rerank"])})
+            elif self.path.startswith("/unload"):
+                # 2026-11-05 控制台「储存与占用 → 立即回收」：把还能按需重载的模型放掉。
+                # embed 放掉后 /embed 会 503（插件的召回会静默退回关键词），所以默认只卸重排，
+                # 只有显式传 embed:true（主人点「立即回收」）才连嵌入一起放。
+                unloaded = []
+                with _state["lock"]:
+                    if body.get("rerank", True) and _state["rerank"]:
+                        _state["rerank"] = None
+                        unloaded.append("rerank")
+                    if body.get("embed", False) and _state["embed"]:
+                        _state["embed"] = None
+                        unloaded.append("embed")
+                gc.collect()
+                try:
+                    import torch  # noqa: PLC0415  (放到这里，没装 torch 也不影响其余功能)
+                    torch.cuda.empty_cache()
+                except Exception:  # noqa: BLE001
+                    pass
+                print(f"[unload] {','.join(unloaded) or 'nothing'}", flush=True)
+                log_event("unload", items=unloaded)
+                self._send(200, {"ok": True, "unloaded": unloaded})
+            elif self.path.startswith("/embed"):
                 texts = [str(t) for t in body.get("texts") or []]
                 if not texts:
                     self._send(400, {"ok": False, "error": "texts 不能为空"})
                     return
                 if not _state["embed"]:
-                    self._send(503, {"ok": False, "error": "embedding 未就绪"})
-                    return
+                    # 2026-11-05 懒加载：控制台「立即回收」会连嵌入一起放掉，
+                    # 下一次召回在这里重新装回来（2~4 秒），别让嵌入再也起不来。
+                    epath = _state.get("embed_path") or ""
+                    if not epath or not os.path.isdir(epath):
+                        self._send(503, {"ok": False, "error": "embedding 未就绪（也没有可加载的模型目录）"})
+                        return
+                    print(f"[embed] 懒加载 {epath}", flush=True)
+                    log_event("embed_load", path=epath)
+                    with _state["lock"]:
+                        _state["embed"] = load_embed(epath)
                 with _state["lock"]:
                     vecs = embed(texts, bool(body.get("query")))
                 _state["hits"] += 1
@@ -244,8 +284,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, {"vectors": vecs, "dim": len(vecs[0]) if vecs else 0})
             elif self.path.startswith("/rerank"):
                 if not _state["rerank"]:
-                    self._send(503, {"ok": False, "error": "reranker 未加载"})
-                    return
+                    # 2026-11-05 懒加载：控制台「储存与占用」可以把重排卸掉省 1.2~1.5 GB，
+                    # 下次真有召回请求时在这里重新装回来（第一次会慢 3~8 秒，之后照旧）。
+                    path = _state.get("rerank_path") or ""
+                    if not path or not os.path.isdir(path):
+                        self._send(503, {"ok": False, "error": "reranker 未加载（也没有可加载的模型目录）"})
+                        return
+                    print(f"[rerank] 懒加载 {path}", flush=True)
+                    log_event("rerank_load", path=path)
+                    with _state["lock"]:
+                        _state["rerank"] = load_rerank(path)
                 query = str(body.get("query") or "")
                 texts = [str(t)[:400] for t in body.get("texts") or []]
                 if not query or not texts:
@@ -261,6 +309,7 @@ class Handler(BaseHTTPRequestHandler):
                 _state["rerank_ms"] += _ms
                 _state["rerank_max_ms"] = max(_state["rerank_max_ms"], _ms)
                 _state["last_kind"] = "rerank"
+                _state["rerank_last_at"] = time.time()
                 _state["last_ms"] = _ms
                 _state["last_q"] = query[:40]
                 log_event("rerank", n=len(texts), ms=_ms, query=query[:40])
@@ -277,6 +326,21 @@ class Handler(BaseHTTPRequestHandler):
 def idle_watchdog(server):
     while True:
         time.sleep(60)
+        # 2026-11-05：可选的重排空闲卸载（默认关，RERANK_IDLE_MIN=0）。
+        # 为什么单独一条：重排只有召回时才用，闲置时白占 1.2~1.5 GB；
+        # 但第一次再召回要重新加载（3~8 秒），所以只给内存紧张的部署者开。
+        if RERANK_IDLE_MIN and _state["rerank"]:
+            idle_min = (time.time() - _state.get("rerank_last_at", _state["started_at"])) / 60.0
+            if idle_min > RERANK_IDLE_MIN:
+                with _state["lock"]:
+                    _state["rerank"] = None
+                gc.collect()
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:  # noqa: BLE001
+                    pass
+                print(f"[rerank] 空闲 {idle_min:.0f} 分钟，已卸载", flush=True)
+                log_event("rerank_unload", idle_min=round(idle_min, 1))
         if IDLE_EXIT_MIN and (time.time() - _state["last"]) > IDLE_EXIT_MIN * 60:
             print(f"[idle] 空闲超过 {IDLE_EXIT_MIN} 分钟，退出", flush=True)
             threading.Thread(target=server.shutdown, daemon=True).start()
@@ -300,13 +364,31 @@ def main():
     ap.add_argument("--embed-name", default="bge-small-zh-v1.5")
     ap.add_argument("--rerank-name", default="bge-reranker-base")
     ap.add_argument("--idle-exit-min", type=int, default=30)
+    ap.add_argument("--rerank-idle-min", type=int, default=0,
+                    help="重排空闲多少分钟就卸载（0=不卸载；内存紧张时给 5~10）")
     ap.add_argument("--no-rerank", action="store_true")
     # 2026-11-03 主人要接控制台：日志默认落到数据目录，JSONL 一行一个事件
     ap.add_argument("--log", default=r"${MOLLY_ROOT}\data\qq-whale\embed-server.log.jsonl")
     args = ap.parse_args()
     IDLE_EXIT_MIN = args.idle_exit_min
+    RERANK_IDLE_MIN = max(0, args.rerank_idle_min)
     LOG_PATH = args.log or ""
     _state["models_dir"] = args.models
+    # 2026-11-05 与控制台共用一份策略：桌面壳、控制台、侧车都读 out\\mem-config.json，
+    # 免得「控制台里关了重排」而侧车还常驻着 1.2 GB。命令行显式给了就不覆盖。
+    cfg_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "out", "mem-config.json")
+    try:
+        with open(cfg_path, encoding="utf-8") as fh:
+            _cfg = json.load(fh)
+        if _cfg.get("rerankMode") == "always":
+            RERANK_IDLE_MIN = 0
+        elif not args.rerank_idle_min and isinstance(_cfg.get("rerankIdleMin"), (int, float)):
+            RERANK_IDLE_MIN = max(0, int(_cfg["rerankIdleMin"]))
+        print(f"[serve] 策略来自 {cfg_path}：重排空闲卸载 {RERANK_IDLE_MIN} 分钟", flush=True)
+    except Exception:
+        pass
+    _state["embed_path"] = os.path.join(args.models, args.embed_name)
+    _state["rerank_path"] = os.path.join(args.models, args.rerank_name)
 
     # 2026-11-03 多开守卫：插件的 ensure() 每次启动都会 spawn 一次，而
     # ThreadingHTTPServer 默认 allow_reuse_address 在 Windows 上等于 SO_REUSEADDR，
@@ -334,6 +416,7 @@ def main():
 
 
 IDLE_EXIT_MIN = 30
+RERANK_IDLE_MIN = 0
 
 if __name__ == "__main__":
     main()

@@ -214,22 +214,63 @@ export function pickQuoteTarget(input = {}) {
   if (!reasons.length) return null
 
   const triggerId = ev.message_id == null ? '' : String(ev.message_id)
-  let target = null
   /*
-   * 优先按模型点名的号锁定引用目标（2026-10-26，主人：「引用不能精确」）。
-   * 她写了 <at>甲</at>，引用框就落在甲最近那条上，而不是「触发这一轮的最后一条」。
+   * 2026-11-05（主人 m07124「引用还是挂错」）：
+   * 旧逻辑在三种情况下都会挂到「不该挂的那条」上——
+   *   ① nudge 取 lastOtherMessage → 群里刚说过话的是乙，引到乙，可她要接的是甲；
+   *   ② explicit-at 取「那个人最近一条」→ 甲说完 A 又说 B，引到 B，内容却在答 A；
+   *   ③ crowded 直接引触发那条 ev → 生成这几秒里又来了新消息，她答的是新的，
+   *      引用框还停在旧的。
+   * 现在统一成一条原则：**引用框要落在「她实际接的那条」上**，并用 gap
+   * （引用目标之后又进来了几条别人的消息）把这个偏差量出来，交给调用方决定要不要挂。
    */
-  if (input.explicitAt) target = lastMessageFrom(history, input.explicitAt)
-  if (!target && nudge) target = lastOtherMessage(history)
-  if (!target && triggerId && !triggerId.startsWith('self-')) target = { messageId: triggerId }
+  const users = history.filter((h) => h && h.role === 'user')
+  const usableId = (h) => {
+    const id = h.messageId == null ? '' : String(h.messageId)
+    return Boolean(id) && !id.startsWith('self-')
+  }
+  const indexOf = (id) => users.findIndex((h) => String(h.messageId ?? '') === String(id))
+  let newest = null
+  for (let i = users.length - 1; i >= 0; i--) {
+    if (usableId(users[i])) {
+      newest = users[i]
+      break
+    }
+  }
+
+  let target = null
+  // ① 模型点名了谁：引那个人最近一条（被点名的那句本身最常见）
+  if (input.explicitAt) {
+    const named = lastMessageFrom(history, input.explicitAt)
+    if (named && named.messageId !== triggerId) target = named
+  }
+  // ② 纯叫醒：引「叫她那个人」自己上一条；他没有上一条才退「最后一条非自己」
+  if (!target && nudge) {
+    const caller = String(ev.user_id || '')
+    const mine = caller ? lastMessageFrom(history, caller) : null
+    if (mine && mine.messageId !== triggerId) target = mine
+    if (!target) target = lastOtherMessage(history)
+  }
+  // ③ 兜底：这一轮触发那条——但它要是已经被刷过去两条以上，就改引最新那条，
+  //    因为她生成时读的是最新历史，回答的也是新的那句，「只接最近那一条」是提示词本身就写了的口径。
+  if (!target && triggerId && !triggerId.startsWith('self-')) {
+    const ti = indexOf(triggerId)
+    if (ti < 0 || users.length - 1 - ti <= 1) target = { messageId: triggerId }
+  }
+  if (!target) target = newest
   if (!target || !target.messageId) return null
   if (String(target.messageId).startsWith('self-')) return null
+
+  const targetIdx = indexOf(target.messageId)
+  const gap = targetIdx < 0 ? 0 : Math.max(0, users.length - 1 - targetIdx)
   return {
     messageId: String(target.messageId),
     why: reasons.join('+'),
     nudge,
     count: crowd.count,
     speakers: crowd.speakers,
+    /** 引用目标之后又进来了几条别人的消息（0 = 就是最新那条） */
+    gap,
   }
 }
 

@@ -117,8 +117,8 @@ t('7. engine.js 只剩一行转发：话术池/剥后缀逻辑已不在引擎里
   assert.equal(src.includes('白饭不够了，脑子转不动'), false, '限流话术池不应留在 engine.js')
   assert.equal(src.includes('表情包找不到了，气死'), false, '兜底话术池不应留在 engine.js')
   assert.equal(src.includes('你今天的白饭额度用完了'), false, '降智补丁不应留在 engine.js')
-  assert.equal((src.match(/engineText\./g) || []).length, 6, '六个转发各一次')
-  for (const fn of ['titleFor', 'rateLimitLine', 'withDegradedNote', 'speakerLabel', 'stickerFallback', 'stripGroupCardSuffix']) {
+  assert.equal((src.match(/engineText\./g) || []).length, 7, '七个转发各一次（modelDownLine 是后加的第七个）')
+  for (const fn of ['titleFor', 'rateLimitLine', 'modelDownLine', 'withDegradedNote', 'speakerLabel', 'stickerFallback', 'stripGroupCardSuffix']) {
     assert.ok(new RegExp(`engineText\\.${fn}\\(`).test(src), `engine.js 应转发 ${fn}`)
   }
 })

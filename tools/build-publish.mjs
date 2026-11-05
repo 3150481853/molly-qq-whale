@@ -74,6 +74,8 @@ const FILES = [
    * docs/ 不在任何 DIRS 白名单里，必须逐条登记（否则下一轮孤儿清理会把它们删掉）。
    */
   ['docs/RELEASE-1.1.7.md', 'docs/RELEASE-1.1.7.md'],
+  ['docs/RELEASE-1.1.8-preview.1.md', 'docs/RELEASE-1.1.8-preview.1.md'],
+  ['docs/quote-target-and-owner-naming-2026-11-05.md', 'docs/quote-target-and-owner-naming-2026-11-05.md'],
   ['docs/desktop-app.md', 'docs/desktop-app.md'],
   ['docs/console-glass-v3-integration.md', 'docs/console-glass-v3-integration.md'],
   ['docs/console-about-page.md', 'docs/console-about-page.md'],

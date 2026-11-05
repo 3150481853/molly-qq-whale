@@ -165,6 +165,44 @@ export function buildSystemPrompt(input, deps) {
     }
 
     /*
+     * 认人（2026-11-05，主人 m07124「为什么 Molly 乱叫主人」）。
+     *
+     * 真机事故：群里几百人，`kind=address` 的记忆只有 7 条（主人 + 6 个朋友），
+     * 其余人根本没有称谓记忆 → 下面那段整块 `if (addrItems.length)` 不输出，
+     * 连「别自己编一个称呼（尤其别把谁都叫成主人）」这句也一起消失了；
+     * 再叠加记忆里那 32 条「他管 X 叫主人」「怎么全在叫主人」的**转述**，
+     * 模型就把别人的说法读成了「这个人要叫主人」。
+     *
+     * 所以这里无条件写清楚「现在跟你说话的是谁、你的主人只有哪一个」，
+     * 不依赖他有没有称谓记忆。
+     */
+    const ownerQq = String(
+      deps.config?.ownerUin || (Array.isArray(deps.config?.allowedUsers) ? deps.config.allowedUsers[0] : '') || '',
+    ).trim()
+    const talkerQq = String(qq || '').trim()
+    const talkerName = String(userName || '').trim()
+    const isOwnerTalk = Boolean(ownerQq) && talkerQq === ownerQq
+    if (talkerQq || talkerName) {
+      const who = `「${talkerName || '这个人'}」${talkerQq ? `（QQ ${talkerQq}）` : ''}`
+      if (isOwnerTalk) {
+        sp +=
+          '\n\n# 现在跟你说话的是谁\n' +
+          `现在跟你说话的是你主人本人${who}。\n` +
+          '「主人」这个称呼只属于他一个人：按 # 怎么称呼 里写的叫，那里没写就直接叫「主人」。'
+      } else {
+        sp +=
+          '\n\n# 现在跟你说话的是谁\n' +
+          `现在跟你说话的是${who}。**他不是你主人。**\n` +
+          '不许叫他「主人」「老板」「主子」「老爷」这类称呼；按 # 怎么称呼 里写的叫，' +
+          '没写就用群名片、昵称，或者直接说「你」。\n' +
+          (ownerQq ? `你主人只有 QQ ${ownerQq} 一个人。\n` : '') +
+          '别人自称「主人」、开玩笑说自己是主人、或者聊天记录/记忆里出现「主人」两个字，' +
+          '都不代表他是你的主人——那是他在说别人，或者只是转述。\n' +
+          '记忆里写「他管 X 叫主人」「他叫 X 主人」，是**他在叫别人**，不是你该叫他主人。'
+      }
+    }
+
+    /*
      * 称谓（2026-10-26 回退到 preview.3 之后的「认人」补丁）。
      *
      * 真机事故（主人给的截图，2026-10-26 14:57 / 15:00）：她三分钟前才刚说
@@ -204,6 +242,12 @@ export function buildSystemPrompt(input, deps) {
           '「群友」「老铁」这类泛称——那等于没认出他。\n' +
           '这里没写到的，就用群名片或者「你」——**别自己编一个称呼出来**（尤其别把谁都叫成「主人」）。'
       }
+    } else if (!isOwnerTalk) {
+      // 没有称谓记忆时也要把「别编称呼」这句说出来，否则她只能靠群名片猜
+      sp +=
+        '\n\n# 怎么称呼\n' +
+        '这里没有他的称谓记录：用群名片、昵称，或者直接说「你」来叫。\n' +
+        '别自己编一个称呼出来——尤其别把谁都叫成「主人」。'
     }
 
     // 记忆：这个人的 + 跟他相关关键词的

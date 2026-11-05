@@ -1,0 +1,142 @@
+<Window x:Class="MollyDesktop.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+        Title="Molly" Width="1180" Height="760" MinWidth="680" MinHeight="480"
+        WindowStartupLocation="CenterScreen"
+        WindowStyle="None" ResizeMode="CanResize" AllowsTransparency="False"
+        Background="#99F8F3EA"
+        FontFamily="Segoe UI Variable Text, Segoe UI, Microsoft YaHei UI"
+        Closing="Window_Closing"
+        SourceInitialized="Window_SourceInitialized"
+        StateChanged="Window_StateChanged"
+        TextOptions.TextFormattingMode="Display" UseLayoutRounding="True">
+
+    <!-- ⚠ AllowsTransparency 必须保持 False：WPF 的分层窗口会让 WebView2 变成一块黑，
+         磨砂只能走 DWM（见 WindowGlass.cs）。#01FFFFFF 是 alpha=1 的近全透明底，
+         用来让 DWM 玻璃/亚克力从客户区透出来，而不是真正全透。 -->
+
+    <!-- 无系统标题栏：WindowChrome 只保留 6px 缩放边界；CaptionHeight=0 表示拖动/双击
+         完全由自绘标题条接管（code-behind 里的 DragMove）。
+         GlassFrameThickness=-1 = 整块客户区都算「玻璃扩展区」，DWM 亚克力会连客户区一起
+         上色（这是磨砂能铺满整窗的关键）。代价：那片区域在系统眼里是非客户区，
+         WPF 元素收不到鼠标——所以三个窗口按钮必须标 WindowChrome.IsHitTestVisibleInChrome="True"，
+         否则点上去只会变成拖窗口。 -->
+    <WindowChrome.WindowChrome>
+        <WindowChrome GlassFrameThickness="-1" CaptionHeight="0" ResizeBorderThickness="6"
+                      CornerRadius="0" UseAeroCaptionButtons="False" />
+    </WindowChrome.WindowChrome>
+
+    <Grid x:Name="RootGrid">
+        <Grid.RowDefinitions>
+            <!-- 与 MainWindow.xaml.cs 的 TitleBarHeight 常量一致（构造函数里会再同步一次） -->
+            <RowDefinition x:Name="TitleBarRow" Height="44" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- ============ 自绘标题条（44px，留给前端状态区的中间段保持空白） ============ -->
+        <Grid x:Name="TitleBar" Grid.Row="0" Height="44" Background="Transparent"
+              MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
+
+            <!-- 自绘壁纸磨砂时，标题条这 44px 必须自己把「同一张模糊壁纸」画出来。
+                 原因：这一条是 WindowChrome 的标题区，DWM 会在它后面贴自己的亚克力材料，
+                 WPF 的窗口 Background 在这一条里基本看不到 —— 于是标题条＝系统亚克力的色调，
+                 页面＝我们自绘那张图 + .34 纱，两者在 y=44(CSS) 处对不上，就是用户
+                 截图里那条横线。把同一张图直接画成标题条的**内容**（不是窗口背景）就对齐了。 -->
+            <Border x:Name="TitleBarBackdrop" IsHitTestVisible="False" />
+
+            <!-- 与页面 .app 面纱同浓的 .34 白纱（和 WPF TitleBar.Background 时代一个值）。
+                 自绘之后它必须单独存在：图是不透明的，纱得另铺一层。 -->
+            <Border x:Name="TitleBarVeil" IsHitTestVisible="False" Background="#6BFCFBF8" />
+
+            <!-- 侧栏那一列的白纱要延续到标题条里。
+                 页面里侧栏比正文多垫了 .26 的白纱（console.css §27.16 ⑥b），标题条如果只铺
+                 .42，左上角就会比侧栏暗一档，看起来像窗口顶边压了一条深色横带。这里补同一层
+                 .26，两段就接上了；不画边框、不画阴影。宽度必须与侧栏 236px 一致。 -->
+            <Border x:Name="SidebarVeil" Width="236" HorizontalAlignment="Left"
+                    IsHitTestVisible="False">
+                <Border.Background>
+                    <!-- 与 console.css §27.16 ⑥b 的侧栏渐变同参数：.34 到 62% 保持，86% 降到 .16，末端归零 -->
+                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                        <GradientStop Color="#57FCFBF8" Offset="0" />
+                        <GradientStop Color="#57FCFBF8" Offset="0.62" />
+                        <GradientStop Color="#29FCFBF8" Offset="0.86" />
+                        <GradientStop Color="#00FCFBF8" Offset="1" />
+                    </LinearGradientBrush>
+                </Border.Background>
+            </Border>
+
+            <!-- 左：留空。品牌只在侧栏出现一次（头像 + Molly / 她的控制台）——
+                 标题条再来一遍 M MOLLY 就是两个 wordmark 打架，而且颜色对不齐。
+                 44px 留白当作呼吸带，也当拖动/双击最大化的热区。 -->
+
+            <!-- 右：最小化 / 最大化-还原 / 关闭。默认淡显（0.42），hover 才全亮。 -->
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Stretch">
+                <Button x:Name="MinimizeButton" Style="{StaticResource CaptionButton}" WindowChrome.IsHitTestVisibleInChrome="True" MouseEnter="CaptionButton_MouseEnter" MouseLeave="CaptionButton_MouseLeave"
+                        ToolTip="最小化" Click="Minimize_Click">
+                    <TextBlock Text="&#xE921;" Style="{StaticResource CaptionGlyph}" />
+                </Button>
+                <Button x:Name="MaximizeButton" Style="{StaticResource CaptionButton}" WindowChrome.IsHitTestVisibleInChrome="True" MouseEnter="CaptionButton_MouseEnter" MouseLeave="CaptionButton_MouseLeave"
+                        ToolTip="最大化" Click="Maximize_Click">
+                    <TextBlock x:Name="MaximizeGlyph" Text="&#xE922;" Style="{StaticResource CaptionGlyph}" />
+                </Button>
+                <Button x:Name="CloseButton" Style="{StaticResource CaptionCloseButton}" WindowChrome.IsHitTestVisibleInChrome="True" MouseEnter="CaptionButton_MouseEnter" MouseLeave="CaptionButton_MouseLeave"
+                        ToolTip="关闭" Click="Close_Click">
+                    <TextBlock Text="&#xE8BB;" Style="{StaticResource CaptionGlyph}" />
+                </Button>
+            </StackPanel>
+
+            <!-- 1px 内侧高光：只画在标题条上。WebView2 是子 HWND（airspace），
+                 WPF 覆盖层越不过它，所以窗口四边的高光只能落在标题条这一段。 -->
+            <Border IsHitTestVisible="False" BorderThickness="1,1,1,0" BorderBrush="#73FFFFFF"
+                    CornerRadius="8,8,0,0" Margin="1,1,1,0" />
+        </Grid>
+
+        <!-- ============ 内容区：WebView2 或 状态页，都坐在同一块玻璃上 ============ -->
+        <Grid Grid.Row="1">
+            <!-- 透明背景（DefaultBackgroundColor=Transparent）后，页面里未上色的地方直接看到玻璃。
+                 前端页面（console/）由另一位并行改造，html/body 必须透明。 -->
+            <wv2:WebView2 x:Name="WebView" Visibility="Collapsed" DefaultBackgroundColor="Transparent" />
+
+            <!-- 状态页：与页面同一层 0.58 暖白纱（WindowGlass.TitleBarVeilArgb 的值），
+                 半透明白卡浮在它上面。整屏若铺不透明底，玻璃就白做了。 -->
+            <Grid x:Name="StatusPanel" Background="#94FCFBF8">
+                <Border Width="480" Padding="40,34" Background="#B3FFFFFF" CornerRadius="14"
+                        BorderBrush="#73FFFFFF" BorderThickness="1" VerticalAlignment="Center">
+                    <Border.Effect>
+                        <DropShadowEffect BlurRadius="38" ShadowDepth="12" Direction="270"
+                                          Color="#1E2D23" Opacity="0.28" />
+                    </Border.Effect>
+                    <StackPanel>
+                        <StackPanel Orientation="Horizontal">
+                            <Border Width="30" Height="30" CornerRadius="8" Background="#294F3E">
+                                <TextBlock Text="M" Foreground="#F4F5F1" FontSize="16" FontFamily="Georgia"
+                                           FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                            </Border>
+                            <TextBlock Text="MOLLY" Foreground="#294F3E" FontSize="12.5"
+                                       FontWeight="SemiBold" VerticalAlignment="Center" Margin="10,0,0,0" />
+                        </StackPanel>
+
+                        <TextBlock x:Name="StatusText" Text="正在连接 Molly" Margin="0,26,0,0"
+                                   Foreground="#173F35" FontSize="25" FontWeight="SemiBold"
+                                   TextWrapping="Wrap" />
+                        <TextBlock x:Name="DetailText" Text="正在检查本地服务，请稍候。" Margin="0,11,0,0"
+                                   Foreground="#5A6A64" FontSize="13" TextWrapping="Wrap" LineHeight="22" />
+
+                        <ProgressBar x:Name="Progress" Height="3" Margin="0,24,0,0" IsIndeterminate="True"
+                                     Foreground="#2F6657" Background="#33FFFFFF" />
+
+                        <StackPanel x:Name="ActionPanel" Visibility="Collapsed" Orientation="Horizontal" Margin="0,22,0,0">
+                            <Button Content="重新连接" Style="{StaticResource PrimaryButton}" Click="Retry_Click" />
+                            <Button Content="复制诊断" Style="{StaticResource QuietButton}" Margin="12,0,0,0"
+                                    Click="Diagnostics_Click" />
+                        </StackPanel>
+
+                        <TextBlock Text="本地运行 · 你的数据留在你的设备上" Margin="0,26,0,0"
+                                   Foreground="#8A968F" FontSize="11" />
+                    </StackPanel>
+                </Border>
+            </Grid>
+        </Grid>
+    </Grid>
+</Window>

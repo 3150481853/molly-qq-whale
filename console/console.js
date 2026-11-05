@@ -16,7 +16,25 @@
   var QR_TTL_MS = (typeof window !== 'undefined' && typeof window.__QR_TTL_MS__ === 'number' && window.__QR_TTL_MS__ > 0)
     ? window.__QR_TTL_MS__
     : 120000;
-  var PAGES = ['overview', 'chats', 'memory', 'pending', 'stickers', 'switches', 'budget', 'work', 'watchdog', 'ops', 'external', 'qq', 'exec', 'settings'];
+  var PAGES = ['overview', 'chats', 'memory', 'pending', 'stickers', 'switches', 'budget', 'work', 'watchdog', 'ops', 'external', 'qq', 'exec', 'settings', 'about'];
+
+  /* 关于页「检查更新」的基准（2026-11-04）：页面这一份前端文件加载时，服务端在
+     index.html 里注入了 window.__MOLLY_BUILD__（tools/console-server.mjs 静态页改写）。
+     检查更新时拿 /api/health 的 build 跟它比：一样＝已是最新，不一样＝服务端换了前端文件。
+     直接开文件（没有注入）时这里是空串，只提示「以服务端为准」，不瞎判。 */
+  var PAGE_BUILD = (typeof window !== 'undefined' && window.__MOLLY_BUILD__)
+    ? String(window.__MOLLY_BUILD__)
+    : '';
+
+  /* 桌面窗口契约（docs/console-glass-v3.md §B6）：窗口加载页面时 URL 会带 ?shell=desktop。
+     那种情况下窗口顶部 44px 是 WPF 自绘的拖动条，页面必须把这一带留空（见 console.css §27.3）。
+     浏览器直接访问没有这个参数，就不写 data-shell，表现完全不变 —— 否则移动端/普通浏览器
+     会被切掉一条。只看 location.search：路由 hash（#/overview）排在后面，不影响判断。 */
+  try {
+    if (/(?:^|[?&])shell=desktop(?:&|$)/.test(location.search)) {
+      document.documentElement.setAttribute('data-shell', 'desktop');
+    }
+  } catch (err) { /* 取不到 location 也不能让控制台白屏 */ }
 
   /* 记忆七类（2026-10-27 主人 m01748）：值和插件端 lib/memory.js 的 MEMORY_KINDS
      一一对应，顺序即页面分组顺序。老的 work / sticker 已并入 event / meme，
@@ -105,6 +123,10 @@
     /* form：输入框草稿值缓存。页面每 4 秒被 poll 重渲染一次，不缓存的话
      「临时静音」里刚输入的群号/分钟会被清空（2026-10-22 用户报障 m04335）。 */
   sw: { data: null, error: '', loading: false, group: '', busy: false, form: {} },
+    /* 关于页（2026-11-04）：只放「检查更新」与「更新日志」的就地状态。
+       按钮和容器都在静态 HTML 里，4 秒轮询只重写数据容器，所以点「检查更新」
+       之后焦点不会被重渲染抢走。 */
+    about: { checking: false, chg: null, chgError: null, chgTitle: '' },
     reloading: false   /* 前端版本不一致时只自动 reload 一次 */
   };
 
@@ -698,7 +720,7 @@
           '<div class="stat-value">' + num(budget.used, 2) + '<span class="stat-unit">/ ' + num(budget.dailyCap, 0) + '</span></div>' +
           progressHtml(pct) +
           '<div class="stat-note">' + (budget.enabled ? '积分限制已开启' : '积分限制已关闭') + ' · 日切 ' + val(budget.day) + '</div></div>',
-        '<div class="stat tint-lavender"><div class="stat-label">记忆</div>' +
+        '<div class="stat tint-lavender"><div class="stat-label">Jasmine 记忆</div>' +
           '<div class="stat-value">' + num(mem.count, 0) + '<span class="stat-unit">条</span></div>' +
           '<div class="stat-note">' + (side.reachable ? '数据服务已连接' : '数据服务不可达') + '</div></div>',
         '<div class="stat tint-mint"><div class="stat-label">表情</div>' +
@@ -874,7 +896,10 @@
   function loadMemory(force) {
     if (state.memEntries && !force) return;
     var sub = $('#memSub');
-    if (!state.memEntries && sub) sub.textContent = '正在读取…';
+    if (!state.memEntries) {
+      if (sub) sub.textContent = 'Jasmine · 正在读取…';
+      safe(memSkeleton);
+    }
 
     /* 优先走带 id 的写接口：只有它返回的条目才能「改 / 删」。
        写接口未上线（console-server 还是旧的 14 个动作，POST 会 404）时退回
@@ -928,6 +953,10 @@
     var addBtn = $('#memAdd');
     if (!box || !sub) return;
 
+    /* 只读降级时整页换成单栏（CSS .is-readonly），三栏里的写接口产物不参与 */
+    var pageEl = $('#jzPage');
+    if (pageEl) pageEl.classList.toggle('is-readonly', state.memCrudReady !== true);
+
     /* 降级提示与「新增」按钮状态：写接口不可用时按钮禁用，但页面照常可读 */
     if (notice) {
       var degraded = state.memCrudReady === false;
@@ -948,6 +977,16 @@
       return;
     }
 
+    /* 只读降级：三栏里的指标 / 索引 / 详情都清掉，别把写接口的旧结果留在页面上 */
+    setHtml($('#jzHero'), '');
+    setHtml($('#jzFacets'), '');
+    setHtml($('#jzDetail'), '');
+    jzCloseDrawer();
+    var roCount = $('#jzCount');
+    if (roCount) roCount.textContent = '—';
+    var roMore = $('#jzMoreWrap');
+    if (roMore) roMore.hidden = true;
+
     if (state.memoryError && !state.memory) {
       sub.textContent = '读取失败';
       setHtml(box, emptyHtml('记忆读取失败：' + esc(state.memoryError), '重试'));
@@ -955,7 +994,7 @@
       return;
     }
     if (!state.memory) {
-      sub.textContent = '正在读取…';
+      sub.textContent = 'Jasmine · 正在读取…';
       setHtml(box, '');
       return;
     }
@@ -964,7 +1003,7 @@
     var mem = data.memory || data;
     var groups = Array.isArray(mem.groups) ? mem.groups : [];
 
-    sub.textContent = '共 ' + num(mem.count, 0) + ' 条 · 更新于 ' + val(mem.updatedAt) + ' · 只读';
+    sub.textContent = 'Jasmine · 共 ' + num(mem.count, 0) + ' 条 · 更新于 ' + val(mem.updatedAt) + ' · 只读';
 
     if (!groups.length) {
       setHtml(box, emptyHtml('还没有记忆条目。'));
@@ -993,85 +1032,856 @@
     applyMemFilter();
   }
 
-  /* 可写视图：按 kind 分组，行尾带「改 / 删」。条目按 at 倒序（服务端已排序）。 */
+  /* ---------------- Jasmine 记忆：视图层 ----------------
+     5428 条全部在内存数组上过滤 / 排序，DOM 只保留当前一批（JZ_BATCH 条/批）。
+     搜索按空格分词、词间 AND；命中高亮只做前 2 处，长文本不会爆量。
+     任何筛选 / 搜索变化：重置为 60 条并回到列表顶部。 */
+  var JZ_BATCH = 60;
+  var JZ_MARK = '<svg class="jz-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><g fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"><ellipse cx="12" cy="6.6" rx="2.5" ry="3.9"/><ellipse cx="12" cy="6.6" rx="2.5" ry="3.9" transform="rotate(72 12 12)"/><ellipse cx="12" cy="6.6" rx="2.5" ry="3.9" transform="rotate(144 12 12)"/><ellipse cx="12" cy="6.6" rx="2.5" ry="3.9" transform="rotate(216 12 12)"/><ellipse cx="12" cy="6.6" rx="2.5" ry="3.9" transform="rotate(288 12 12)"/><circle cx="12" cy="12" r="1.3"/></g></svg>';
+
+  var memView = {
+    q: '', sort: 'added',
+    kind: '', who: '', band: '', time: '', day: '',
+    shown: JZ_BATCH, selId: null, whoAll: false,
+    view: null, index: null
+  };
+
+  function jzWide() {
+    try {
+      return !window.matchMedia || window.matchMedia('(min-width: 1280px)').matches;
+    } catch (err) { return true; }
+  }
+
+  function jzDayStart(daysAgo) {
+    var d = new Date();
+    d.setHours(0, 0, 0, 0);
+    if (daysAgo) d.setDate(d.getDate() - daysAgo);
+    return d.getTime();
+  }
+
+  function jzMs(v) {
+    var d = asDate(v);
+    if (d) return d.getTime();
+    var n = Number(v);
+    return isFinite(n) && n > 0 ? n : 0;
+  }
+
+  function jzWho(it) {
+    return it && it.who ? String(it.who).trim() : '';
+  }
+
+  function jzWeightTxt(it) {
+    var w = Number(it && it.weight);
+    if (!isFinite(w) || w <= 0) return '—';
+    return String(Math.round(w * 10) / 10);
+  }
+
+  /* ── 权重衰减（记忆曲线）─────────────────────────────────────────
+     盘上只存 base（weight）+ hits + lastActiveDay；衰减是「读的时候的看法」：
+     空闲 = 当前活跃天 − 条目的 lastActiveDay，超过该类宽限期后每 7 活跃天 −0.5，
+     掉到该类下限为止（称谓恒 10）。
+     这张表必须和 plugin/dsh-qq-whale/lib/memory.js 里的 WEIGHT_FLOOR / GRACE_ACTIVE_DAYS /
+     DECAY_STEP_DAYS / DECAY_STEP 保持一致，否则界面显示的有效权重和召回用的不是一个数。 */
+  var JZ_DECAY_FLOOR = { address: 10, promise: 5, person: 4, fact: 3, preference: 3, event: 1, meme: 1 };
+  var JZ_DECAY_GRACE = { address: Infinity, promise: 14, person: 14, fact: 14, preference: 14, event: 7, meme: 7 };
+  var JZ_DECAY_STEP_DAYS = 7;
+  var JZ_DECAY_STEP = 0.5;
+
+  /* 活跃天：插件 state 里 memory.activeDays 是权威值；后端没带时退一步用最老的 lastActiveDay 猜。 */
+  function jzActiveDays() {
+    var m = state.overview && state.overview.plugin && state.overview.plugin.memory;
+    var n = m ? Number(m.activeDays) : NaN;
+    if (isFinite(n) && n > 0) return n;
+    var all = state.memEntries || [], max = 0;
+    for (var i = 0; i < all.length; i++) {
+      var v = Number(all[i] && all[i].lastActiveDay);
+      if (isFinite(v) && v > max) max = v;
+    }
+    return max;
+  }
+
+  function jzFmtW(w) { return String(Math.round(Number(w) * 10) / 10); }
+
+  function jzDecay(it) {
+    var kind = String((it && it.kind) || 'fact');
+    var base = Number(it && it.weight);
+    if (!isFinite(base) || base <= 0) base = 6;
+    base = Math.min(10, Math.max(1, Math.round(base)));
+    var days = jzActiveDays();
+    if (kind === 'address') return { base: base, eff: 10, idle: 0, grace: Infinity, steps: 0, floor: 10, days: days };
+    var floor = JZ_DECAY_FLOOR[kind] !== undefined ? JZ_DECAY_FLOOR[kind] : 1;
+    var last = Number(it && it.lastActiveDay);
+    if (!isFinite(last)) last = 0;
+    var idle = Math.max(0, days - Math.max(0, Math.round(last)));
+    var grace = JZ_DECAY_GRACE[kind] !== undefined ? JZ_DECAY_GRACE[kind] : JZ_DECAY_STEP_DAYS;
+    var steps = 0;
+    var eff = base;
+    if (base > floor && isFinite(grace) && idle > grace) {
+      steps = Math.floor((idle - grace) / JZ_DECAY_STEP_DAYS);
+      eff = Math.min(10, Math.max(floor, Math.round((base - steps * JZ_DECAY_STEP) * 10) / 10));
+    }
+    return { base: base, eff: eff, idle: idle, grace: grace, steps: steps, floor: floor, days: days };
+  }
+
+  /* 行内标签：没掉权只显示一个数；掉了显示「w6→5.5」，一眼能看出曲线在起作用。 */
+  function jzWLabel(it) {
+    var d = jzDecay(it);
+    if (d.eff >= d.base) return 'w' + jzFmtW(d.base);
+    return 'w' + jzFmtW(d.base) + '<span class="jz-wdown">→' + jzFmtW(d.eff) + '</span>';
+  }
+
+  function jzTokens() {
+    return String(memView.q || '').toLowerCase().split(/\s+/).filter(function (t) { return !!t; });
+  }
+
+  /* 检索串每条只拼一次，挂在条目自己的 __jzHay 上（只在内存里，不回写数据）。 */
+  function jzHay(it) {
+    if (it.__jzHay === undefined) {
+      it.__jzHay = [it.text, it.who, it.qq, memKindLabel(it.kind)].filter(Boolean).join(' ').toLowerCase();
+    }
+    return it.__jzHay;
+  }
+
+  /* 本地日历日 YYYY-MM-DD（用本地时区，避免 toISOString 的 UTC 偏移把凌晨算到前一天） */
+  function jzDayKey(ms) {
+    var d = new Date(jzMs(ms));
+    if (isNaN(d.getTime())) return '';
+    var m = d.getMonth() + 1, day = d.getDate();
+    return d.getFullYear() + '-' + (m < 10 ? '0' + m : m) + '-' + (day < 10 ? '0' + day : day);
+  }
+
+  function jzTodayKey() { return jzDayKey(Date.now()); }
+
+  function jzInTime(it, bucket) {
+    var at = jzMs(it.at);
+    if (bucket === 'today') return at >= jzDayStart(0);
+    if (bucket === 'week') return at >= jzDayStart(6);
+    if (bucket === 'month') return at >= jzDayStart(29);
+    if (bucket === 'older') return at < jzDayStart(29);
+    return true;
+  }
+
+  function jzBandOf(it) {
+    var w = jzDecay(it).eff;
+    if (!isFinite(w)) w = 0;
+    if (w >= 8) return 'core';
+    if (w >= 5) return 'normal';
+    return 'edge';
+  }
+
+  /* skip：算某一组的计数时先忽略它自己那一组（分面计数的常规口径） */
+  function jzPass(it, toks, skip) {
+    if (!it) return false;
+    if (skip !== 'kind' && memView.kind && String(it.kind) !== memView.kind) return false;
+    if (skip !== 'who' && memView.who) {
+      var who = jzWho(it);
+      if (memView.who === '__none__') { if (who) return false; }
+      else if (who !== memView.who) return false;
+    }
+    if (skip !== 'band' && memView.band && jzBandOf(it) !== memView.band) return false;
+    if (skip !== 'time' && memView.time && !jzInTime(it, memView.time)) return false;
+    if (skip !== 'day' && memView.day && jzDayKey(it.at) !== memView.day) return false;
+    if (toks && toks.length) {
+      var hay = jzHay(it);
+      for (var i = 0; i < toks.length; i++) if (hay.indexOf(toks[i]) < 0) return false;
+    }
+    return true;
+  }
+
+  function jzFilterList(skip) {
+    var all = state.memEntries || [];
+    var toks = jzTokens();
+    var out = [];
+    for (var i = 0; i < all.length; i++) {
+      if (jzPass(all[i], toks, skip)) out.push(all[i]);
+    }
+    return out;
+  }
+
+  function jzViewList() {
+    var out = jzFilterList();
+    var s = memView.sort;
+    out.sort(function (a, b) {
+      var d = 0;
+      if (s === 'added') d = jzMs(b.at) - jzMs(a.at);
+      else if (s === 'old') d = jzMs(a.at) - jzMs(b.at);
+      else if (s === 'weight') d = jzDecay(b).eff - jzDecay(a).eff;
+      else if (s === 'weight-asc') d = jzDecay(a).eff - jzDecay(b).eff;
+      else if (s === 'hits') d = (Number(b.hits) || 0) - (Number(a.hits) || 0);
+      /* lastActiveDay 是「第几天」的序号、不是时间戳，混进来会让排序看起来是乱的（2026-11-05） */
+      else d = jzMs(b.lastHitAt || b.at) - jzMs(a.lastHitAt || a.at);
+      if (d) return d;
+      return (s === 'old' || s === 'weight-asc') ? (jzMs(a.at) - jzMs(b.at)) : (jzMs(b.at) - jzMs(a.at));
+    });
+    return out;
+  }
+
+  function jzStats() {
+    var all = state.memEntries || [];
+    var n = 0, withQQ = 0, today = 0, wSum = 0, wN = 0, latest = 0, decayed = 0;
+    var kinds = {}, order = [];
+    MEM_KINDS.forEach(function (k) { kinds[k[0]] = 0; order.push(k[0]); });
+    var t0 = jzDayStart(0);
+    for (var i = 0; i < all.length; i++) {
+      var it = all[i];
+      if (!it) continue;
+      n++;
+      if (it.qq) withQQ++;
+      var at = jzMs(it.at);
+      if (at >= t0) today++;
+      if (at > latest) latest = at;
+      var d = jzDecay(it);
+      if (isFinite(d.eff) && d.eff > 0) { wSum += d.eff; wN++; }
+      if (d.eff < d.base) decayed++;
+      var k = String(it.kind || '');
+      if (kinds[k] === undefined) { kinds[k] = 0; order.push(k); }
+      kinds[k]++;
+    }
+    return { n: n, withQQ: withQQ, today: today, wAvg: wN ? wSum / wN : 0, latest: latest, decayed: decayed, days: jzActiveDays(), kinds: kinds, order: order };
+  }
+
+  function jzMetric(k, v) {
+    return '<div class="jz-metric"><span class="jz-metric-k">' + esc(k) + '</span>' +
+      '<span class="jz-metric-v mono">' + v + '</span></div>';
+  }
+
+  function jzHeroHtml(st) {
+    var pct = st.n ? Math.round(st.withQQ / st.n * 100) : 0;
+    var avg = st.wAvg ? (Math.round(st.wAvg * 10) / 10).toFixed(1) : '—';
+    var segs = [], legend = [];
+    st.order.forEach(function (k, i) {
+      var c = st.kinds[k] || 0;
+      if (!c || !st.n) return;
+      var share = (c / st.n) * 100;
+      var label = memKindLabel(k);
+      segs.push('<span class="jz-seg" data-i="' + Math.min(i, 6) + '" style="width:' + share.toFixed(2) + '%" title="' +
+        esc(label) + ' ' + num(c, 0) + ' 条 · ' + share.toFixed(1) + '%"></span>');
+      legend.push('<button class="jz-legend" type="button" data-act="jz-facet" data-group="kind" data-value="' + esc(k) + '">' +
+        '<i class="jz-legend-dot" data-i="' + Math.min(i, 6) + '"></i>' + esc(label) +
+        '<span class="jz-legend-n mono">' + num(c, 0) + '</span></button>');
+    });
+    return '<div class="jz-hero-inner">' +
+      '<div class="jz-metrics">' +
+      jzMetric('总条数', num(st.n, 0)) +
+      jzMetric('今日新增', num(st.today, 0)) +
+      jzMetric('有身份', num(st.withQQ, 0) + ' <em>· ' + pct + '%</em>') +
+      jzMetric('平均权重', 'w' + avg) +
+      '</div>' +
+      '<div class="jz-dist">' +
+      '<div class="jz-dist-bar" role="img" aria-label="类型分布">' + segs.join('') + '</div>' +
+      '<div class="jz-dist-legend">' + legend.join('') + '</div>' +
+      '</div>' +
+      '<div class="jz-decay-note">衰减曲线：活跃天 <b class="mono">' + num(st.days, 0) + '</b> 天 · ' +
+      '事实/约定/人物/偏好宽限 14 天、闲聊/梗 7 天，之后每 7 活跃天 −0.5' +
+      (st.decayed ? ' · 已有 <b class="mono">' + num(st.decayed, 0) + '</b> 条掉权' : ' · 还没有条目掉权') +
+      '</div></div>';
+  }
+
+  function jzFacetRow(group, value, label, count, on) {
+    return '<button class="jz-facet-row' + (on ? ' is-on' : '') + '" type="button" ' +
+      'data-act="jz-facet" data-group="' + esc(group) + '" data-value="' + esc(value) + '"' +
+      (on ? ' aria-pressed="true"' : '') + '>' +
+      '<span class="jz-facet-label">' + esc(label) + '</span>' +
+      '<span class="jz-facet-n mono">' + num(count, 0) + '</span></button>';
+  }
+
+  function jzPillText(group, value) {
+    if (group === 'kind') return '类型：' + memKindLabel(value);
+    if (group === 'who') return '人物：' + (value === '__none__' ? '未记名字' : value);
+    if (group === 'band') return '权重：' + (value === 'core' ? '核心' : value === 'normal' ? '常规' : '边缘');
+    if (group === 'time') return '时间：' + (value === 'today' ? '今天' : value === 'week' ? '近 7 天' : value === 'month' ? '近 30 天' : '更早');
+    if (group === 'day') return '日期：' + String(value || '').slice(5);
+    return String(value);
+  }
+
+  function jzFacetsHtml() {
+    var byKind = jzFilterList('kind');
+    var byWho = jzFilterList('who');
+    var byBand = jzFilterList('band');
+    var byTime = jzFilterList('time');
+
+    var kindCount = {};
+    byKind.forEach(function (it) { var k = String(it.kind || ''); kindCount[k] = (kindCount[k] || 0) + 1; });
+
+    var whoCount = {};
+    byWho.forEach(function (it) {
+      var w = jzWho(it) || '__none__';
+      whoCount[w] = (whoCount[w] || 0) + 1;
+    });
+    var whoKeys = Object.keys(whoCount).sort(function (a, b) { return whoCount[b] - whoCount[a]; });
+    var named = whoKeys.filter(function (k) { return k !== '__none__'; });
+
+    var bandCount = { core: 0, normal: 0, edge: 0 };
+    byBand.forEach(function (it) { bandCount[jzBandOf(it)]++; });
+
+    var timeCount = { today: 0, week: 0, month: 0, older: 0 };
+    byTime.forEach(function (it) {
+      ['today', 'week', 'month', 'older'].forEach(function (b) { if (jzInTime(it, b)) timeCount[b]++; });
+    });
+
+    /* 顶部：当前筛选回显 + 一键清除 */
+    var pills = [];
+    ['kind', 'who', 'band', 'time', 'day'].forEach(function (g) {
+      if (!memView[g]) return;
+      pills.push('<button class="jz-pill" type="button" data-act="jz-facet" data-group="' + g + '" data-value="' + esc(memView[g]) + '" title="点一下取消">' +
+        esc(jzPillText(g, memView[g])) + '<span class="jz-pill-x" aria-hidden="true">×</span></button>');
+    });
+    var head = '<div class="jz-facet-head">' +
+      '<button class="jz-facet-clear" type="button" data-act="jz-clear"' + (pills.length ? '' : ' disabled') + '>清除筛选</button>' +
+      '<div class="jz-pills">' + pills.join('') + '</div></div>';
+
+    var kindRows = MEM_KINDS.map(function (k) {
+      return jzFacetRow('kind', k[0], k[1], kindCount[k[0]] || 0, memView.kind === k[0]);
+    }).join('');
+
+    var whoTop = (memView.whoAll ? named : named.slice(0, 12)).map(function (k) {
+      return jzFacetRow('who', k, k, whoCount[k], memView.who === k);
+    }).join('');
+    if (whoCount.__none__) {
+      whoTop += jzFacetRow('who', '__none__', '未记名字', whoCount.__none__, memView.who === '__none__');
+    }
+    var whoFoot = named.length > 12
+      ? '<button class="jz-facet-more" type="button" data-act="jz-who-all" aria-expanded="' + (memView.whoAll ? 'true' : 'false') + '">' +
+        (memView.whoAll ? '收起人物' : '全部人物（' + named.length + '）') + '</button>'
+      : '';
+
+    var bandRows =
+      jzFacetRow('band', 'core', '核心 w≥8', bandCount.core, memView.band === 'core') +
+      jzFacetRow('band', 'normal', '常规 w5–7', bandCount.normal, memView.band === 'normal') +
+      jzFacetRow('band', 'edge', '边缘 w≤4', bandCount.edge, memView.band === 'edge');
+
+    var timeRows =
+      jzFacetRow('time', 'today', '今天', timeCount.today, memView.time === 'today') +
+      jzFacetRow('time', 'week', '近 7 天', timeCount.week, memView.time === 'week') +
+      jzFacetRow('time', 'month', '近 30 天', timeCount.month, memView.time === 'month') +
+      jzFacetRow('time', 'older', '更早', timeCount.older, memView.time === 'older');
+
+    return head +
+      '<div class="jz-facet-group"><div class="jz-facet-title">类型</div>' + kindRows + '</div>' +
+      '<div class="jz-facet-group"><div class="jz-facet-title">人物</div>' +
+      '<div class="jz-facet-people' + (memView.whoAll ? ' is-all' : '') + '">' + whoTop + '</div>' + whoFoot + '</div>' +
+      '<div class="jz-facet-group"><div class="jz-facet-title">权重</div>' + bandRows + '</div>' +
+      '<div class="jz-facet-group"><div class="jz-facet-title">时间</div>' + timeRows + '</div>';
+  }
+
+  /* 命中高亮：只做前 2 处，返回已转义的 HTML */
+  function jzHl(text) {
+    var s = String(text === null || text === undefined ? '' : text);
+    var toks = jzTokens();
+    if (!toks.length) return esc(s);
+    var lower = s.toLowerCase();
+    var marks = [];
+    for (var i = 0; i < toks.length && marks.length < 2; i++) {
+      var tok = toks[i];
+      if (!tok) continue;
+      var idx = lower.indexOf(tok);
+      if (idx < 0) continue;
+      var end = idx + tok.length;
+      var overlap = false;
+      for (var j = 0; j < marks.length; j++) {
+        if (idx < marks[j][1] && end > marks[j][0]) { overlap = true; break; }
+      }
+      if (!overlap) marks.push([idx, end]);
+    }
+    if (!marks.length) return esc(s);
+    marks.sort(function (a, b) { return a[0] - b[0]; });
+    var out = '', pos = 0;
+    marks.forEach(function (m) {
+      out += esc(s.slice(pos, m[0])) + '<mark>' + esc(s.slice(m[0], m[1])) + '</mark>';
+      pos = m[1];
+    });
+    return out + esc(s.slice(pos));
+  }
+
+  function jzRowHtml(it) {
+    var id = esc(it.id);
+    var who = jzWho(it);
+    var sel = memView.selId !== null && String(it.id) === String(memView.selId);
+    return '<div class="jz-row' + (sel ? ' is-sel' : '') + '" data-id="' + id + '" role="option" ' +
+      'aria-selected="' + (sel ? 'true' : 'false') + '" tabindex="-1">' +
+      '<div class="jz-row-text">' + jzHl(it.text) + '</div>' +
+      '<div class="jz-row-meta">' +
+      '<span class="mono">' + esc(fmtStamp(it.at)) + '</span>' +
+      '<span class="jz-sep">·</span><span>' + esc(memKindLabel(it.kind)) + '</span>' +
+      (who ? '<span class="jz-sep">·</span><span class="jz-row-who">' + esc(who) + '</span>' : '') +
+      '<span class="jz-sep">·</span><span class="mono">' + jzWLabel(it) + '</span>' +
+      (isFinite(Number(it.hits)) && it.hits !== null && it.hits !== '' ? '<span class="jz-sep">·</span><span>命中 <b class="mono">' + num(it.hits, 0) + '</b></span>' : '') +
+      '</div>' +
+      '<span class="jz-row-ops">' +
+      '<button class="btn btn-ghost btn-xs" type="button" data-act="mem-edit" data-id="' + id + '">改</button>' +
+      '<button class="btn btn-ghost btn-xs btn-quiet-danger" type="button" data-act="mem-del" data-id="' + id + '">删</button>' +
+      '</span></div>';
+  }
+
+  /* 兼容旧名字：外部没别处引用，留一个别名免得以后误改 */
+  function memEntryHtml(it) { return jzRowHtml(it); }
+
+  function jzEmptyHtml() {
+    return '<div class="jz-empty">' + JZ_MARK +
+      '<p>没有符合条件的记忆</p>' +
+      '<button class="btn btn-ghost btn-sm" type="button" data-act="jz-clear">清除筛选</button></div>';
+  }
+
+  function jzMoreState(list) {
+    var wrap = $('#jzMoreWrap');
+    var btn = $('#jzMore');
+    list = list || memView.view || [];
+    var left = list.length - memView.shown;
+    if (wrap) wrap.hidden = !(left > 0);
+    if (btn) btn.textContent = '加载更多（还有 ' + num(left, 0) + ' 条）';
+  }
+
+  function jzCountText(list) {
+    var cnt = $('#jzCount');
+    if (!cnt) return;
+    var total = (state.memEntries || []).length;
+    var shown = (list || []).length;
+    /* 没筛选时两个数一样，说两遍是噪音（2026-11-05） */
+    cnt.textContent = shown === total ? (num(total, 0) + ' 条') : (num(total, 0) + ' 条中 ' + num(shown, 0) + ' 条');
+  }
+
+  function jzAppend() {
+    var box = $('#memGroups');
+    var list = memView.view || [];
+    if (!box || memView.shown >= list.length) { jzMoreState(list); return; }
+    var from = memView.shown;
+    var to = Math.min(list.length, from + JZ_BATCH);
+    var html = '';
+    for (var i = from; i < to; i++) html += jzRowHtml(list[i]);
+    box.insertAdjacentHTML('beforeend', html);
+    memView.shown = to;
+    jzMoreState(list);
+  }
+
+  function jzScroller(el) {
+    var p = el && el.parentNode;
+    while (p && p !== document.body && p !== document.documentElement) {
+      var oy = '';
+      try { oy = window.getComputedStyle(p).overflowY; } catch (err) { oy = ''; }
+      if (oy === 'auto' || oy === 'scroll') return p;
+      p = p.parentNode;
+    }
+    return null;
+  }
+
+  /* 筛选变化后回到列表顶部：滚最近的可滚动祖先，不去动 window 的滚动条 */
+  function jzListTop() {
+    var list = $('.jz-list');
+    if (!list) return;
+    var sc = jzScroller(list);
+    if (!sc) return;
+    var top = list.getBoundingClientRect().top - sc.getBoundingClientRect().top + sc.scrollTop - 8;
+    sc.scrollTop = Math.max(0, top);
+  }
+
+  /* 工具栏日期框与 memView.day 对齐：值、最大可选（今天）、清空按钮显隐 */
+  function jzSyncDate() {
+    var el = $('#jzDate');
+    if (!el) return;
+    if (el.value !== (memView.day || '')) el.value = memView.day || '';
+    el.max = jzTodayKey();
+    el.classList.toggle('is-on', !!memView.day);
+  }
+
+  function jzPaintRows(reset) {
+    var box = $('#memGroups');
+    if (!box) return;
+    var list = jzViewList();
+    memView.view = list;
+    if (reset) memView.shown = Math.min(JZ_BATCH, list.length);
+    var html = '';
+    for (var i = 0; i < memView.shown; i++) html += jzRowHtml(list[i]);
+    setHtml(box, list.length ? html : jzEmptyHtml());
+    jzCountText(list);
+    jzMoreState(list);
+    if (reset) {
+      setHtml($('#jzFacets'), jzFacetsHtml());
+      var sortEl = $('#jzSort');
+      if (sortEl) sortEl.value = memView.sort;
+      jzSyncDate();
+    }
+  }
+
+  function jzSel() {
+    if (memView.selId === null || !memView.index) return null;
+    return memView.index[String(memView.selId)] || null;
+  }
+
+  function jzFindById(id) {
+    if (!memView.index) return null;
+    return memView.index[String(id)] || null;
+  }
+
+  function jzIndexOf(list, id) {
+    for (var i = 0; i < list.length; i++) if (String(list[i].id) === String(id)) return i;
+    return -1;
+  }
+
+  function jzEdgeLabel(t) {
+    var s = String((t && t.text) || '');
+    return s.length > 24 ? s.slice(0, 24) + '…' : s;
+  }
+
+  function jzDetailInner(it) {
+    if (!it) {
+      return '<div class="jz-detail-empty">' + JZ_MARK + '<p>从左边挑一条记忆看详情</p></div>';
+    }
+    var who = jzWho(it);
+    var qq = it.qq ? String(it.qq).trim() : '';
+    var edges = Array.isArray(it.edges) ? it.edges : [];
+    var edgeRows = edges.slice(0, 8).map(function (e) {
+      var tid = e && e[0];
+      var t = jzFindById(tid);
+      return '<button class="jz-edge" type="button" data-act="jz-edge" data-id="' + esc(tid) + '">' +
+        '<span class="jz-edge-kind">' + esc(t ? memKindLabel(t.kind) : '未知') + '</span>' +
+        '<span class="jz-edge-text">' + esc(t ? jzEdgeLabel(t) : '已不在这批记忆里') + '</span></button>';
+    }).join('');
+
+    return '<div class="jz-detail-inner">' +
+      '<div class="jz-detail-head">' +
+      '<span class="jz-chip">' + esc(memKindLabel(it.kind)) + '</span>' +
+      '<span class="jz-wpill mono">' + jzWLabel(it) + '</span>' +
+      '<span class="jz-detail-ops">' +
+      '<button class="btn btn-ghost btn-xs" type="button" data-act="mem-edit" data-id="' + esc(it.id) + '">改</button>' +
+      '<button class="btn btn-ghost btn-xs btn-quiet-danger" type="button" data-act="mem-del" data-id="' + esc(it.id) + '">删</button>' +
+      '<button class="jz-detail-close" type="button" data-act="jz-close" aria-label="关闭详情">×</button>' +
+      '</span></div>' +
+      '<div class="jz-detail-text">' + esc(it.text || '') + '</div>' +
+      '<div class="jz-detail-kv">' +
+      kv('人物', who ? esc(who) : '未记名字') +
+      kv('QQ', qq ? '<span class="mono">' + esc(qq) + '</span>' : '—') +
+      kv('来源', it.source ? esc(it.source) : '—') +
+      kv('权重', (function () {
+        var d = jzDecay(it);
+        var txt = '<span class="mono">w' + jzFmtW(d.base) + '</span>';
+        if (d.eff < d.base) txt += ' → <span class="mono">w' + jzFmtW(d.eff) + '</span>';
+        txt += ' <span class="jz-kv-hint">空闲 ' + num(d.idle, 0) + ' 活跃天' +
+          (isFinite(d.grace) ? ' · 宽限 ' + num(d.grace, 0) + ' 天' : '') + '</span>';
+        return txt;
+      })()) +
+      kv('层级', (it.level === null || it.level === undefined || it.level === '') ? '—' : esc(it.level)) +
+      kv('命中', (isFinite(Number(it.hits)) && it.hits !== null && it.hits !== '') ? ('<span class="mono">' + num(it.hits, 0) + '</span> 次') : '—') +
+      kv('上次命中', esc(fmtStamp(it.lastHitAt))) +
+      kv('记录时间', esc(fmtStamp(it.at))) +
+      '</div>' +
+      '<div class="jz-detail-sec">' +
+      '<div class="jz-sec-title">关系 <span class="mono">' + num(edges.length, 0) + '</span></div>' +
+      (edges.length ? '<div class="jz-edges">' + edgeRows + '</div>' : '<p class="jz-sec-empty">没有关系记录</p>') +
+      '</div>' +
+      '<div class="jz-detail-sec jz-quick">' +
+      '<button class="btn btn-ghost btn-sm" type="button" data-act="jz-only-who"' + (who ? '' : ' disabled') + '>只看这个人</button>' +
+      '<button class="btn btn-ghost btn-sm" type="button" data-act="jz-only-kind">只看这个类型</button>' +
+      '</div></div>';
+  }
+
+  function jzPaintDetail() {
+    var box = $('#jzDetail');
+    if (!box) return;
+    setHtml(box, jzDetailInner(jzSel()));
+  }
+
+  function jzPaintRowsSelection() {
+    $$('#memGroups .jz-row').forEach(function (row) {
+      var on = memView.selId !== null && String(row.getAttribute('data-id')) === String(memView.selId);
+      row.classList.toggle('is-sel', on);
+      row.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+  }
+
+  function jzRowById(id) {
+    var rows = $$('#memGroups .jz-row');
+    for (var i = 0; i < rows.length; i++) {
+      if (String(rows[i].getAttribute('data-id')) === String(id)) return rows[i];
+    }
+    return null;
+  }
+
+  // 抽屉是 fixed 的，但顶栏（玻璃层，z-index 20）画在它上面，顶栏高度又随宽度换行变化，
+  // 所以打开时按实测的顶栏底边给抽屉定位；回到宽屏再清掉，交还给 CSS 的三栏 sticky。
+  function jzSyncDrawerBox(d) {
+    if (!d) return;
+    if (jzWide()) { d.style.top = ''; d.style.height = ''; return; }
+    var bar = document.querySelector('.topbar');
+    /* 顶栏在窄屏会换行成多行，高度只能实测；抽屉从它下面展开，避免被玻璃层压住 */
+    var bottom = bar ? Math.max(0, Math.round(bar.getBoundingClientRect().bottom)) : 0;
+    d.style.top = bottom + 'px';
+    d.style.height = 'calc(100vh - ' + bottom + 'px)';
+    d.style.height = 'calc(100dvh - ' + bottom + 'px)';
+  }
+
+  function jzOpenDetail() {
+    var d = $('#jzDetail');
+    var scrim = $('#jzScrim');
+    if (!d || jzWide()) { if (scrim) scrim.hidden = true; return; }
+    jzSyncDrawerBox(d);
+    d.classList.add('is-open');
+    if (scrim) scrim.hidden = false;
+  }
+
+  function jzCloseDrawer() {
+    var d = $('#jzDetail');
+    var scrim = $('#jzScrim');
+    if (d) d.classList.remove('is-open');
+    if (scrim) scrim.hidden = true;
+  }
+
+  function jzSelectRow(id, open) {
+    memView.selId = (id === null || id === undefined) ? null : String(id);
+    jzPaintRowsSelection();
+    jzPaintDetail();
+    if (open !== false) jzOpenDetail();
+  }
+
+  function jzSyncSearch() {
+    var input = $('#memSearch');
+    if (input) input.value = memView.q;
+  }
+
+  function jzClear(silent) {
+    memView.kind = '';
+    memView.who = '';
+    memView.band = '';
+    memView.time = '';
+    memView.day = '';
+    memView.q = '';
+    memView.whoAll = false;
+    jzSyncSearch();
+    jzApply();
+    if (!silent) toast('已清除筛选');
+  }
+
+  function jzApply() {
+    memView.shown = JZ_BATCH;
+    memView.view = null;
+    jzScrollListTopSafe();
+    jzPaintRows(true);
+  }
+
+  function jzScrollListTopSafe() {
+    try { jzListTop(); } catch (err) { /* 滚动失败不影响渲染 */ }
+  }
+
+  function jzOnlyWho() {
+    var it = jzSel();
+    if (!it) return;
+    var who = jzWho(it);
+    if (!who) { toast('这条记忆没有记名字'); return; }
+    memView.kind = ''; memView.band = ''; memView.time = ''; memView.who = who;
+    memView.q = ''; memView.whoAll = false;
+    jzSyncSearch();
+    jzApply();
+    if (!(memView.view || []).length) toast('没有别的记忆属于这个人');
+  }
+
+  function jzOnlyKind() {
+    var it = jzSel();
+    if (!it) return;
+    memView.who = ''; memView.band = ''; memView.time = '';
+    memView.kind = String(it.kind || '');
+    memView.q = '';
+    jzSyncSearch();
+    jzApply();
+  }
+
+  function jzOpenEdge(id) {
+    var target = jzFindById(id);
+    if (!target) { toast('这条不在这批记忆里'); return; }
+    var list = memView.view || [];
+    var idx = jzIndexOf(list, id);
+    if (idx < 0) {
+      toast('这条不在当前筛选内，已清除筛选后定位');
+      memView.kind = ''; memView.who = ''; memView.band = ''; memView.time = ''; memView.q = '';
+      jzSyncSearch();
+      jzApply();
+      list = memView.view || [];
+      idx = jzIndexOf(list, id);
+    }
+    if (idx < 0) return;
+    while (memView.shown <= idx) jzAppend();
+    jzSelectRow(id);
+    var row = jzRowById(id);
+    if (row) { try { row.scrollIntoView({ block: 'nearest' }); } catch (err) { /* 老引擎没有 options */ } }
+  }
+
+  /* 可写视图：三栏（索引 / 结果 / 详情）。 */
   function renderMemoryEntries() {
     var box = $('#memGroups');
     var sub = $('#memSub');
     if (!box || !sub) return;
     var entries = state.memEntries || [];
 
-    /* 有 QQ 号的比例是这次改造要能一眼看到的指标：名字会重名，QQ 号不会 */
-    var withQQ = entries.filter(function (e) { return e && e.qq; }).length;
-    sub.textContent = '共 ' + entries.length + ' 条 · 其中 ' + withQQ + ' 条有 QQ 号 · 点行尾「改 / 删」维护';
+    var index = {};
+    for (var i = 0; i < entries.length; i++) {
+      if (entries[i]) index[String(entries[i].id)] = entries[i];
+    }
+    memView.index = index;
+    jzSyncSearch();
+
+    var st = jzStats();
+    sub.textContent = 'Jasmine · ' + num(st.n, 0) + ' 条' + (st.latest ? ' · 最近更新 ' + fmtStamp(st.latest) : '');
 
     if (!entries.length) {
-      setHtml(box, emptyHtml('还没有记忆条目，点右上角「+ 新增记忆」写一条。'));
+      setHtml($('#jzHero'), '');
+      setHtml($('#jzFacets'), '');
+      setHtml(box, emptyHtml('还没有记忆条目，点右上角「+ 记一条」写一条。'));
+      setHtml($('#jzDetail'), '');
+      jzCountText([]);
+      jzMoreState([]);
       return;
     }
 
-    var groups = MEM_KINDS.map(function (k) { return { kind: k[0], label: k[1], items: [] }; });
-    var extra = {};
-    entries.forEach(function (it) {
-      var g = null;
-      for (var i = 0; i < groups.length; i++) {
-        if (groups[i].kind === it.kind) { g = groups[i]; break; }
-      }
-      if (!g) {
-        if (!extra[it.kind]) { extra[it.kind] = { kind: it.kind, label: memKindLabel(it.kind), items: [] }; }
-        g = extra[it.kind];
-      }
-      g.items.push(it);
-    });
-    var ordered = groups.concat(Object.keys(extra).map(function (k) { return extra[k]; }));
-
-    var html = ordered.filter(function (g) { return g.items.length; }).map(function (g) {
-      var rows = g.items.map(function (it) { return memEntryHtml(it, g.label); }).join('');
-      return '<details class="mem-group" open>' +
-        '<summary class="mem-summary">' + esc(g.label) +
-        '<span class="mem-count mono">' + g.items.length + ' 条</span></summary>' +
-        '<div class="mem-items">' + rows + '</div></details>';
-    }).join('');
-
-    setHtml(box, html);
-    applyMemFilter();
+    setHtml($('#jzHero'), jzHeroHtml(st));
+    var list = jzViewList();
+    memView.view = list;
+    memView.shown = Math.min(JZ_BATCH, list.length);
+    var html = '';
+    for (var j = 0; j < memView.shown; j++) html += jzRowHtml(list[j]);
+    setHtml(box, list.length ? html : jzEmptyHtml());
+    setHtml($('#jzFacets'), jzFacetsHtml());
+    jzCountText(list);
+    jzMoreState(list);
+    var sortEl = $('#jzSort');
+    if (sortEl) sortEl.value = memView.sort;
+    jzSyncDate();
+    jzPaintDetail();
+    if (!jzWide()) jzCloseDrawer();
   }
 
-  function memEntryHtml(it, kindLabel) {
-    /* qq 既显示也参与搜索：qq 是稳定身份，重名时靠它认人 */
-    var qq = it.qq ? String(it.qq).trim() : '';
-    var search = [it.text, it.who, qq, kindLabel, it.kind, memDate(it.at)].filter(Boolean).join(' ').toLowerCase();
-    var id = esc(it.id);
-    return '<div class="mem-item" data-search="' + esc(search) + '">' +
-      '<span class="mem-date">' + esc(memDate(it.at)) + '</span>' +
-      '<span class="mem-tag">' + esc(kindLabel) + '</span>' +
-      (it.who ? '<span class="mem-who">' + esc(it.who) + '</span>' : '') +
-      '<span class="mem-qq' + (qq ? '' : ' is-empty') + '" title="' + (qq ? 'QQ 号' : '还没记 QQ 号') + '">' +
-      (qq ? 'QQ ' + esc(qq) : 'QQ 未记录') + '</span>' +
-      '<span class="mem-text">' + esc(it.text) + '</span>' +
-      '<span class="mem-ops">' +
-      '<span class="mem-weight mono" title="权重">w' + esc(it.weight === undefined || it.weight === null ? '—' : it.weight) + '</span>' +
-      '<button class="btn btn-ghost btn-xs" type="button" data-act="mem-edit" data-id="' + id + '">改</button>' +
-      '<button class="btn btn-ghost btn-xs btn-quiet-danger" type="button" data-act="mem-del" data-id="' + id + '">删</button>' +
-      '</span></div>';
+  /* 加载态：6 条骨架，prefers-reduced-motion 下不动（见 CSS） */
+  function memSkeleton() {
+    var box = $('#memGroups');
+    if (!box) return;
+    var rows = '';
+    for (var i = 0; i < 6; i++) {
+      rows += '<div class="jz-row is-skeleton" aria-hidden="true">' +
+        '<span class="jz-sk jz-sk-a"></span><span class="jz-sk jz-sk-b"></span></div>';
+    }
+    setHtml(box, '<div class="jz-skeleton">' + rows + '</div>');
+    var hero = $('#jzHero');
+    if (hero && !hero.innerHTML) setHtml(hero, '<div class="jz-hero-inner is-skeleton"><span class="jz-sk jz-sk-c"></span></div>');
   }
 
+  /* 搜索 / 筛选的统一入口：写接口视图走内存过滤，只读降级走旧的 DOM 过滤 */
   function applyMemFilter() {
+    if (state.memCrudReady === true) {
+      var search = $('#memSearch');
+      var q = search ? String(search.value || '') : '';
+      if (q !== memView.q) {
+        memView.q = q;
+        jzApply();
+      }
+      return;
+    }
     var input = $('#memSearch');
     if (!input) return;
-    var q = (input.value || '').trim().toLowerCase();
+    var query = (input.value || '').trim().toLowerCase();
     $$('#memGroups .mem-group').forEach(function (group) {
       var items = $$('.mem-item', group);
       var visible = 0;
       items.forEach(function (item) {
-        var hit = !q || (item.getAttribute('data-search') || '').indexOf(q) >= 0;
+        var hit = !query || (item.getAttribute('data-search') || '').indexOf(query) >= 0;
         item.hidden = !hit;
         if (hit) visible++;
       });
       group.hidden = visible === 0;
-      if (q && visible > 0) group.open = true;
+      if (query && visible > 0) group.open = true;
       var cnt = $('.mem-count', group);
       if (cnt) cnt.textContent = visible + ' 条';
     });
+  }
+
+  /* 列表面板上的点击：筛选 / 选中 / 详情里的动作。行内「改 / 删」仍由 #memGroups 的旧委托处理。 */
+  function onMemClick(ev) {
+    var t = ev.target;
+    if (!t || !t.closest) return;
+    var btn = t.closest('[data-act]');
+    if (btn) {
+      var act = btn.getAttribute('data-act');
+      if (act === 'mem-edit' || act === 'mem-del') {
+        /* 结果行交给 #memGroups 的委托，避免重复打开弹层 */
+        if (!btn.closest('#jzDetail')) return;
+        if (act === 'mem-edit') memEditExisting(btn.getAttribute('data-id'));
+        else memDeleteExisting(btn.getAttribute('data-id'));
+        return;
+      }
+      if (act === 'jz-facet') {
+        var group = btn.getAttribute('data-group');
+        var value = btn.getAttribute('data-value');
+        if (!group) return;
+        memView[group] = (String(memView[group]) === String(value)) ? '' : value;
+        if (group === 'time' && memView.time) memView.day = '';
+        if (group === 'day' && memView.day) memView.time = '';
+        jzApply();
+        return;
+      }
+      if (act === 'jz-clear') { jzClear(); return; }
+      if (act === 'jz-who-all') { memView.whoAll = !memView.whoAll; setHtml($('#jzFacets'), jzFacetsHtml()); return; }
+      if (act === 'jz-close') { jzCloseDrawer(); return; }
+      if (act === 'jz-edge') { jzOpenEdge(btn.getAttribute('data-id')); return; }
+      if (act === 'jz-only-who') { jzOnlyWho(); return; }
+      if (act === 'jz-only-kind') { jzOnlyKind(); return; }
+      return;
+    }
+    var row = t.closest('.jz-row');
+    if (row) jzSelectRow(row.getAttribute('data-id'));
+  }
+
+  /* 键盘：↑/↓ 移选中（只 scrollIntoView nearest），Enter 开详情，Esc 清搜索。
+     绑定在 document 上（行不抢焦点），所以要先确认当前页就是记忆页、焦点不在输入框。 */
+  function onMemKey(ev) {
+    if (state.page !== 'memory' || !ev) return;
+    if (ev.defaultPrevented) return;
+    if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+    var key = ev.key;
+    var el = document.activeElement;
+    var inField = !!(el && el.tagName && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName));
+    if (inField && el.id !== 'memSearch') return;
+    if (key === 'Escape') {
+      if (memView.q) {
+        memView.q = '';
+        jzSyncSearch();
+        jzApply();
+        if (ev.preventDefault) ev.preventDefault();
+      } else {
+        jzCloseDrawer();
+      }
+      return;
+    }
+    if (key !== 'ArrowDown' && key !== 'ArrowUp' && key !== 'Enter') return;
+    var list = memView.view || [];
+    if (!list.length) return;
+    if (key === 'Enter') {
+      if (memView.selId !== null) {
+        jzPaintDetail();
+        jzOpenDetail();
+        if (ev.preventDefault) ev.preventDefault();
+      }
+      return;
+    }
+    /* 输入框里按上下键是移动光标，不抢 */
+    if (inField) return;
+    if (ev.preventDefault) ev.preventDefault();
+    var idx = jzIndexOf(list, memView.selId);
+    var next = key === 'ArrowDown'
+      ? (idx < 0 ? 0 : Math.min(list.length - 1, idx + 1))
+      : (idx < 0 ? 0 : Math.max(0, idx - 1));
+    if (next < 0) return;
+    while (memView.shown <= next) jzAppend();
+    var it = list[next];
+    jzSelectRow(it.id);
+    var row = jzRowById(it.id);
+    if (row) { try { row.scrollIntoView({ block: 'nearest' }); } catch (err) { /* 忽略 */ } }
+  }
+
+  /* 滚动到距底部 240px 时自动追加下一批（按钮兜底） */
+  function jzMaybeAppend() {
+    if (state.page !== 'memory') return;
+    var box = $('#memGroups');
+    var list = memView.view || [];
+    if (!box || !list.length || memView.shown >= list.length) return;
+    var r = box.getBoundingClientRect();
+    var vh = window.innerHeight || document.documentElement.clientHeight || 0;
+    if (r.bottom - vh < 240) jzAppend();
   }
 
   /* ---------------- 待核实（被拦下来、等着人过目的记忆） ---------------- */
@@ -1563,7 +2373,7 @@
   function memAddNew() {
     openCrud({
       mode: 'mem-add',
-      title: '新增记忆',
+      title: '记一条新记忆',
       body: memoryFormBody(null),
       hint: '会立刻写回 memory.json 与 memory.md',
       okText: '保存',
@@ -1578,7 +2388,7 @@
     openCrud({
       mode: 'mem-edit',
       item: it,
-      title: '改记忆',
+      title: '改这条记忆',
       body: memoryFormBody(it),
       hint: '记下的时间不会变，只改内容',
       okText: '保存',
@@ -1630,7 +2440,7 @@
            条数没变 ≠ 失败，所以只看服务端给的 merged 标记，别用条数推断成败。 */
         var data = (res && res.data && typeof res.data === 'object') ? res.data : res;
         var merged = !!(data && data.merged === true);
-        toast(merged ? '内容相近，已合并到已有条目（没有新增）' : '已添加');
+        toast(merged ? '内容相近，已合并到已有条目（没有新增）' : '已记下');
       }
 
       /* 只重拉列表，不整页 reload；弹层由 submitCrud 在 promise 成功后关掉 */
@@ -1899,6 +2709,20 @@
 
   /* ---------------- 预算 ---------------- */
 
+  function renderBudgetEditor() {
+    var box = $('#budgetEditor');
+    var b = state.overview && state.overview.plugin && state.overview.plugin.budget;
+    if (!box || box.childNodes.length || !b) return;
+    box.innerHTML = '<h2 class="card-title">每日额度</h2><p class="card-sub">设置 Molly 每天可用的积分。改动立即生效，无需重启。</p><div class="budget-controls"><select class="input" id="budgetEnabled" aria-label="积分限制开关"><option value="">保持不变</option><option value="true">开启限制</option><option value="false">关闭限制</option></select><input class="input" id="budgetCap" type="number" min="0" step="1" placeholder="每日上限，例如 300" aria-label="每日积分上限"><button class="btn btn-primary" id="budgetSave" type="button">保存额度</button></div><div class="action-result" id="budgetOut" hidden></div>';
+    $('#budgetSave').addEventListener('click', function () {
+      var body = {}; var enabled = $('#budgetEnabled').value; var cap = $('#budgetCap').value.trim();
+      if (enabled) body.enabled = enabled === 'true';
+      if (cap) body.cap = Number(cap);
+      if (!Object.keys(body).length) { toast('请选择开关状态或填写新的每日上限'); return; }
+      runAction('plugin/budget', body, { btn: $('#budgetSave'), box: $('#budgetOut') });
+    });
+  }
+
   function renderBudget() {
     var box = $('#budgetCards');
     if (!box) return;
@@ -1947,49 +2771,48 @@
   function renderWork() {
     var box = $('#workCards');
     if (!box) return;
+    var workspace = $('#dshWorkspaceLink');
+    var hint = $('#dshWorkspaceHint');
     var ov = state.overview;
-    if (!ov) { setHtml(box, card('等待数据', '<p class="card-sub">正在连接控制台服务…</p>')); return; }
-
-    var p = ov.plugin || {};
-    var work = p.work || ov.work || null;
-    var research = p.research || ov.research || null;
-    var qqTool = p.qqTool || ov.qqTool || null;
-
-    var workHtml = work
-      ? [
-        kv('就绪', work.ready ? pill('ok', 'ready') : pill('idle', '未就绪')),
-        kv('会话', work.sessionId ? '<span class="mono">' + esc(work.sessionId) + '</span>' : '—'),
-        kv('运行中', work.running ? pill('warn', '正在跑') : '否'),
-        kv('当前任务', val(work.task)),
-        work.error ? kv('错误', esc(work.error), 'is-bad') : ''
-      ].join('')
-      : '<p class="card-sub">契约 v1 的 /api/overview 未暴露 work 字段，可用下方「探活」现场探测。</p>';
-
-    var researchHtml = research
-      ? [
-        kv('开关', research.enabled === false ? pill('idle', '已关闭') : pill('ok', '已开启')),
-        kv('上次结果', research.ok ? pill('ok', '成功') : pill('warn', '失败')),
-        kv('上次时间', fmtStamp(research.lastAt)),
-        kv('上次需求', val(research.lastNeed)),
-        kv('上次原因', val(research.lastReason)),
-        kv('找到条数', mono(research.lastFound)),
-        kv('耗时', fmtMs(research.lastMs))
-      ].join('')
-      : '<p class="card-sub">契约 v1 未暴露 research 字段，可用下方「研究测试」现场验证。</p>';
-
-    var toolHtml = qqTool
-      ? [
-        kv('工具名', val(qqTool.name)),
-        kv('注册', qqTool.registered ? pill('ok', '已注册') : pill('bad', '未注册')),
-        qqTool.error ? kv('错误', esc(qqTool.error), 'is-bad') : ''
-      ].join('')
-      : '<p class="card-sub">契约 v1 未暴露 qqTool 字段。</p>';
-
-    setHtml(box, [
-      card('工作总线', workHtml),
-      card('研究', researchHtml),
-      card('QQ 工具', toolHtml)
-    ].join(''));
+    var base = ov?.plugin?.reachable ? ov.plugin.base : '';
+    /* 桌面窗口里的页面带宿主桥（window.chrome.webview）。DSH 的网页版只认它自己
+       打印出来的授权地址，光有 origin 一定停在 "dsh web authentication required"，
+       所以桌面模式下不再往浏览器甩链接，改成请宿主把正在用的 DSH 窗口提到最前。 */
+    var bridge = !!(window.chrome && window.chrome.webview && typeof window.chrome.webview.postMessage === 'function');
+    if (workspace && base) {
+      try {
+        var url = new URL(base);
+        if (url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) workspace.href = url.origin;
+      } catch (_) { /* 不采信非法上游地址，保留最后的已知入口。 */ }
+    }
+    if (workspace) {
+      if (bridge) {
+        workspace.textContent = '切到 DSH 工作台';
+        workspace.removeAttribute('target');
+        workspace.removeAttribute('rel');
+        if (workspace.dataset.bound !== '1') {
+          workspace.dataset.bound = '1';
+          workspace.addEventListener('click', function (e) {
+            if (!(window.chrome && window.chrome.webview)) return;   /* 浏览器里退回普通链接 */
+            e.preventDefault();
+            try {
+              window.chrome.webview.postMessage('molly:open-dsh');
+              toast('已把 DSH 窗口提到最前');
+            } catch (_) { location.href = workspace.href; }
+          });
+        }
+      } else {
+        workspace.textContent = '打开 DSH 工作台 ↗';
+        workspace.setAttribute('target', '_blank');
+        workspace.setAttribute('rel', 'noopener');
+      }
+    }
+    if (hint) {
+      setHtml(hint, bridge
+        ? '点上面的按钮会把已经打开的 <b>DeepSeek Harness</b> 窗口提到最前。DSH 的网页版只认它自己打印的授权地址，所以这里不再往浏览器转发链接。'
+        : 'DSH 的网页版只认它自己打印的授权地址，直接用浏览器打开这个端口会停在授权提示上。请在 <b>Molly 桌面应用</b>里点上面的按钮，或从开始菜单启动 <b>DeepSeek Harness</b>。');
+    }
+    setHtml(box, '<p class="card-sub">执行、研究、插件开发与运行记录请前往 DSH 工作台。控制台不再创建第二套任务执行器。</p>');
   }
 
   /* ---------------- 骂人模式（出气筒总开关，task-36） ----------------
@@ -2855,8 +3678,8 @@
         kv('日志轮询', '<span class="mono">' + (LOG_POLL_MS / 1000) + ' 秒</span>')
       ].join('')),
       card('界面', [
-        kv('主题', '浅色 Notion'),
-        kv('主色', '<span class="mono">#5645d4</span>'),
+        kv('主题', '暖纸 · 墨绿'),
+        kv('主色', '<span class="mono">#294f3e</span>'),
         kv('字体', '系统字体，无外链'),
         kv('构建', '无（原生 HTML/CSS/JS）')
       ].join(''))
@@ -2871,6 +3694,8 @@
         var fv = $('#footVersion');
         if (fv && state.health.version) fv.textContent = 'v' + state.health.version;
         if (state.page === 'settings') { safe(renderSettings); safe(refreshSleep); }
+        /* 关于页的版本/构建也吃 health：进页时那一次拉完要把卡片重绘一遍 */
+        if (state.page === 'about') safe(renderAbout);
       })
       .catch(function (err) { console.warn('[molly-console] health 读取失败：', err); });
   }
@@ -2957,19 +3782,282 @@
     });
   }
 
+  /* ---------------- 关于页（2026-11-04） ----------------
+     只读事实页：左列讲她自己（标识、版本/构建比对、本机数据），右列是出口
+     （论坛帖、项目目录、排障文档、恢复入口）。数据只来自已有的 /api/overview
+     （4 秒轮询）与 /api/health，不新增接口；缺一块就写「—」，
+     绝不让 undefined / NaN / null 漏到屏幕上。 */
+
+  function aboutNum(v, digits) {
+    if (v === null || v === undefined || v === '') return '';
+    var n = Number(v);
+    return isFinite(n) ? num(n, digits || 0) : '';
+  }
+
+  function aboutUnit(v, unit) {
+    var s = aboutNum(v);
+    return s ? '<span class="mono">' + s + '</span> ' + unit : '—';
+  }
+
+  function aboutVersion() {
+    var h = state.health || {};
+    return h.version ? String(h.version) : '';
+  }
+
+  function aboutBuild() {
+    var h = state.health || {};
+    var ov = state.overview || {};
+    var b = String(h.build || (ov && ov.build) || '');
+    return b ? b.slice(0, 8) : '';
+  }
+
+  /* 状态行单独维护：4 秒轮询只重绘数据容器，不碰这一行，
+     否则「已是最新 · 20:14:03」会被下一轮 overview 冲掉。 */
+  function aboutStatus(text, cls, withReload) {
+    var el = $('#aboutStatus');
+    if (!el) return;
+    el.className = 'about-status' + (cls ? ' ' + cls : '');
+    el.innerHTML = '<span>' + esc(String(text)) + '</span>' +
+      (withReload ? '<button class="btn btn-ghost btn-sm" id="aboutReload" type="button">刷新</button>' : '');
+  }
+
+  function checkAboutUpdate() {
+    if (state.about.checking) return;
+    state.about.checking = true;
+    aboutStatus('检查中…', '');
+    fetch('/api/health', { cache: 'no-store' })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function (j) {
+        state.health = j || {};
+        var fv = $('#footVersion');
+        if (fv && state.health.version) fv.textContent = 'v' + state.health.version;
+        var server = String(state.health.build || '');
+        var at = fmtClock(Date.now());
+        if (!PAGE_BUILD) {
+          aboutStatus('这个页面没有构建标识（不是控制台服务发出的），刷新后以服务端为准', 'is-warn', true);
+        } else if (!server) {
+          aboutStatus('服务端没返回构建号，这次比不了', 'is-warn');
+        } else if (server === PAGE_BUILD) {
+          aboutStatus('已是最新 · ' + at, 'is-ok');
+        } else {
+          aboutStatus('服务端前端已更新（' + server + '），刷新后生效', 'is-warn', true);
+        }
+        safe(renderAbout);
+      })
+      .catch(function (err) {
+        aboutStatus('检查失败：' + ((err && err.message) || String(err)), 'is-bad');
+      })
+      .then(function () { state.about.checking = false; });
+  }
+
+  /* /api/changelog 只给最新一节，这里取「改了什么」那一段的条目就地展开。
+     发布说明是给我自己看的（还有「验证」「怎么退回」两段，全是测试条数与回滚步骤），
+     关于页要的是「这一版改了什么」，所以优先取变更段；一版里没有小节就退回整节条目。 */
+  function aboutChgSections(md) {
+    var sections = {};
+    var order = [];
+    var cur = '';
+    String(md || '').split(/\r?\n/).forEach(function (raw) {
+      var line = raw.replace(/\s+$/, '');
+      if (!line.trim()) return;
+      var head = line.trim().match(/^\*\*(.+?)\*\*$/);
+      if (head) {
+        cur = head[1].trim();
+        if (!sections[cur]) { sections[cur] = []; order.push(cur); }
+        return;
+      }
+      if (/^#{1,6}\s+/.test(line) || /^---+$/.test(line)) return;
+      if (!cur) return;
+      sections[cur].push(line.trim());
+    });
+    return { sections: sections, order: order };
+  }
+
+  function aboutChgBullets(lines) {
+    var out = [];
+    lines.forEach(function (line) {
+      if (/^[-*]\s+/.test(line)) { out.push(line.replace(/^[-*]\s+/, '')); return; }
+      /* 折行的续行并回上一条，别拆成两条 */
+      if (out.length && /^\s{2,}/.test(line)) { out[out.length - 1] += ' ' + line.trim(); return; }
+      if (out.length) out[out.length - 1] += ' ' + line;
+    });
+    return out;
+  }
+
+  function aboutChgItems(md) {
+    var parsed = aboutChgSections(md);
+    var pick = '';
+    for (var i = 0; i < parsed.order.length; i += 1) {
+      if (/改了什么|变更|新增|修复|更新内容/.test(parsed.order[i])) { pick = parsed.order[i]; break; }
+    }
+    var items = [];
+    if (pick) items = aboutChgBullets(parsed.sections[pick]);
+    if (!items.length) {
+      /* 没有小节标题：退回「全部 bullet」，仍剔掉一眼就是测试结论的行 */
+      var all = [];
+      parsed.order.forEach(function (k) { all = all.concat(parsed.sections[k]); });
+      items = aboutChgBullets(all).filter(function (x) {
+        return !/(通过\s*\/\s*|单测|测试脚本|\.mjs|哈希一致后重载)/.test(x);
+      });
+    }
+    return items.slice(0, 5);
+  }
+
+  function renderAboutChg() {
+    var box = $('#aboutChg');
+    if (!box) return;
+    if (state.about.chgError) {
+      box.innerHTML = '<p class="about-muted">更新日志读取失败：' + esc(state.about.chgError) + '</p>';
+      return;
+    }
+    var items = state.about.chg;
+    if (!items || !items.length) {
+      box.innerHTML = '<p class="about-muted">本版本没有更新记录</p>';
+      return;
+    }
+    var title = state.about.chgTitle ? String(state.about.chgTitle) : '';
+    box.innerHTML = (title ? '<div class="about-chg-title">' + esc(title) + '</div>' : '') +
+      '<ul class="about-chg-list">' + items.map(function (x) {
+        return '<li>' + chgInline(x) + '</li>';
+      }).join('') + '</ul>';
+  }
+
+  function toggleAboutChangelog() {
+    var box = $('#aboutChg');
+    var btn = $('#aboutChgToggle');
+    if (!box) return;
+    if (!box.hidden) {
+      box.hidden = true;
+      if (btn) btn.setAttribute('aria-expanded', 'false');
+      return;
+    }
+    box.hidden = false;
+    if (btn) btn.setAttribute('aria-expanded', 'true');
+    if (state.about.chg || state.about.chgError) { renderAboutChg(); return; }
+    box.innerHTML = '<p class="about-muted">读取中…</p>';
+    fetch('/api/changelog', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        var text = (j && j.text) || '';
+        if (text) chgCache = text;   /* 顺手喂给左下角那个弹层，两边不重复请求 */
+        state.about.chgError = '';
+        /* 小标题优先用接口给的 title（「2026-10-30（深夜）· 记忆闸门：…」），
+           拿不到再从正文第一行 ## 标题里抠一个。 */
+        var t = (j && j.title) ? String(j.title) : '';
+        if (!t && text) {
+          var firstHash = text.match(/^#{1,6}\s+(.+)$/m);
+          if (firstHash) t = firstHash[1].trim();
+        }
+        state.about.chgTitle = t;
+        state.about.chg = aboutChgItems(text);
+        renderAboutChg();
+      })
+      .catch(function (err) {
+        state.about.chg = null;
+        state.about.chgError = String((err && err.message) || err);
+        renderAboutChg();
+      });
+  }
+
+  function copyAboutText(text) {
+    if (!text) return;
+    if (!(navigator.clipboard && navigator.clipboard.writeText)) {
+      toast('当前环境不支持剪贴板');
+      return;
+    }
+    navigator.clipboard.writeText(text)
+      .then(function () { toast('路径已复制'); })
+      .catch(function (err) { toast('复制失败：' + ((err && err.message) || '浏览器拒绝')); });
+  }
+
+  function renderAbout() {
+    var ov = state.overview || {};
+    var p = ov.plugin || {};
+    var wd = ov.watchdog || {};
+    var ver = aboutVersion();
+    var build = aboutBuild();
+
+    /* 标识 + pill 组：版本 / 构建 / 本机地址 / 运行形态 */
+    var host = '';
+    try { host = String(location.host || ''); } catch (err) { host = ''; }
+    var desktop = document.documentElement.getAttribute('data-shell') === 'desktop';
+    setHtml($('#aboutPills'), [
+      pill('idle', ver ? 'v' + ver : '版本未知'),
+      pill('idle', build ? '构建 ' + build : '构建 —'),
+      pill('idle', host || '127.0.0.1:19392'),
+      pill('idle', desktop ? '桌面应用' : '浏览器')
+    ].join(''));
+
+    setHtml($('#aboutUpdateKv'), [
+      kv('当前版本', ver ? '<span class="mono">v' + esc(ver) + '</span>' : '—'),
+      kv('服务端构建', build ? '<span class="mono">' + esc(build) + '</span>' : '—')
+    ].join(''));
+
+    /* 数据与连接：全部 /api/overview；其中一块没报就整行写「—」 */
+    var memCount = aboutUnit(p.memory && p.memory.count, '条');
+    var stkCount = aboutUnit(p.stickers && p.stickers.count, '张');
+    var msgs = aboutNum(p.metrics && p.metrics.messages);
+    var convs = aboutNum(p.metrics && p.metrics.conversations);
+    var talked = (msgs || convs)
+      ? '<span class="mono">' + (msgs || '—') + '</span> 条 / <span class="mono">' + (convs || '—') + '</span> 个会话'
+      : '—';
+    /* 积分是有小数的（22.79），别四舍五入成 23 —— 那和顶栏对不上 */
+    var used = aboutNum(p.budget && p.budget.used, 2);
+    var cap = aboutNum(p.budget && p.budget.dailyCap);
+    var budget = (used || cap)
+      ? '<span class="mono">' + (used || '—') + '</span> / ' + (cap || '—')
+      : '—';
+    var bot = p.bot || {};
+    var nick = bot.nickname ? String(bot.nickname) : '';
+    var uid = (bot.userId === null || bot.userId === undefined || bot.userId === '') ? '' : String(bot.userId);
+    var linkState = String((p.link && p.link.state) || '');
+    var qqLine = (nick || uid)
+      ? esc(nick || '未命名') + (uid ? '（' + esc(uid) + '）' : '') + (linkState ? ' · ' + esc(linkState) : '')
+      : '—';
+    var wdLine = (typeof wd.reachable === 'boolean')
+      ? (wd.reachable ? '<i class="about-dot is-ok" aria-hidden="true"></i>正常'
+        : '<i class="about-dot is-bad" aria-hidden="true"></i>不可达')
+      : '—';
+    var base = p.base ? String(p.base) : '';
+
+    setHtml($('#aboutFacts'), [
+      kv('Jasmine 记忆', memCount),
+      kv('表情', stkCount),
+      kv('已聊', talked),
+      kv('积分', budget),
+      kv('QQ', qqLine),
+      kv('守护', wdLine),
+      kv('DSH 宿主', base ? '<span class="mono">' + esc(base) + '</span>' : '—')
+    ].join(''));
+
+    /* 版本与许可：外观跟着 data-glass 说实话 —— 关掉磨砂时不应还写「玻璃」 */
+    var glass = document.documentElement.getAttribute('data-glass') !== 'false';
+    setHtml($('#aboutMeta'), [
+      kv('版本', ver ? '<span class="mono">v' + esc(ver) + '</span>' : '—'),
+      kv('构建', build ? '<span class="mono">' + esc(build) + '</span>' : '—'),
+      kv('许可', '私有自用'),
+      kv('平台', 'Windows · WebView2'),
+      kv('语言', '中文'),
+      kv('外观', glass ? '玻璃' : '不透明')
+    ].join(''));
+  }
+
   /* ---------------- 执行块 ---------------- */
 
   var ACTIONS = [
     {
       id: 'plugin/toggle',
       title: '开关插件',
-      desc: '启用或停用 Molly 插件本体，经服务端转发到宿主 /toggle。',
+      desc: '启用或停用 Molly 插件本体，改完立即生效。',
       fields: [{ key: 'enabled', label: '目标状态', type: 'select', cast: 'bool', def: 'true', options: [{ value: 'true', label: '启用' }, { value: 'false', label: '停用' }] }]
     },
     {
       id: 'plugin/recheck',
       title: '重新检查连接',
-      desc: '让插件重连 OneBot，并刷新模型与账号信息。'
+      desc: '让插件重新连一次 QQ，并刷新模型与账号信息。'
     },
     {
       id: 'plugin/budget',
@@ -2981,55 +4069,38 @@
       ]
     },
     {
-      id: 'plugin/work-probe',
-      title: '工作总线探活',
-      desc: '转发 /work/probe，确认干活通道是否可用。'
-    },
-    {
-      id: 'plugin/work-run',
-      title: '跑一条指令',
-      desc: '转发 /work/run。任务文本不能为空，默认不发送到 QQ。',
-      fields: [{ key: 'task', label: '指令内容', type: 'text', cast: 'string', required: true, placeholder: '例如：总结今天群里的讨论' }]
-    },
-    {
-      id: 'plugin/research-test',
-      title: '研究测试',
-      desc: '转发 /research/test，用一段文本验证研究链路。',
-      fields: [{ key: 'text', label: '测试文本', type: 'text', cast: 'string', required: true, placeholder: '例如：最近有没有新的表情包' }]
-    },
-    {
       id: 'napcat/qr',
       title: '重新登录 QQ（扫码）',
       /* 两种后端行为不同：SnowLuma 只重启 QQ（不重启 SnowLuma，设备指纹不变）；
          回滚后端走 make-qr.mjs 出二维码。标题用中性的「重新登录」。 */
-      desc: 'SnowLuma 后端：触发计划任务 SnowLuma-Relogin（只重启 QQ 客户端，约 10~25 秒后 QQ 窗口弹出，手机扫码；不重启 Molly 插件、网关和控制台）；回滚后端：spawn make-qr.mjs 显示二维码。'
+      desc: '只重启 QQ 客户端（约 10~25 秒后 QQ 窗口弹出，手机扫码）。Molly 插件、网关和控制台都不重启，扫码完就恢复。'
     },
     {
       id: 'napcat/restart',
       title: '全量重启 QQ 客户端',
-      desc: 'SnowLuma 后端：触发计划任务 SnowLuma-Boot（连 SnowLuma 一起重启，只在进程卡死时用）；回滚后端：spawn start-molly.ps1 -Restart。',
+      desc: '连 QQ 后端一起重启，只在进程卡死、上面那条「重新登录」也不管用的时候用。',
       confirm: true,
       consequence: '会踢掉当前 QQ 登录：Molly 立刻掉线，必须重新扫码才能回来。'
     },
     {
       id: 'watchdog/status',
       title: '守护状态',
-      desc: 'spawn watchdog.mjs --status，把解析后的状态 JSON 显示在下面。'
+      desc: '读出守护的最新巡检状态与配置，原样显示在下面。'
     },
     {
       id: 'watchdog/once',
       title: '立即巡检一次',
-      desc: 'spawn watchdog.mjs --once，最长等 120 秒。'
+      desc: '立刻巡检一次，最长等 120 秒。'
     },
     {
       id: 'watchdog/test-notify',
       title: '测试通知',
-      desc: 'spawn watchdog.mjs --test-notify，确认通知渠道通畅。'
+      desc: '发一条测试通知，确认 PushPlus 那条通路是通的。'
     },
     {
       id: 'watchdog/config',
       title: '改写守护配置',
-      desc: '把 patch 合并写进 watchdog-config.json，只允许契约 §3.2 列出的键。',
+      desc: '把 patch 合并写进守护配置（watchdog-config.json），只接受已知的键，写错会让守护按错误节奏巡检。',
       confirm: true,
       consequence: '会改写 watchdog-config.json：写错键名或数值会让守护按错误节奏巡检。',
       fields: [{ key: 'patch', label: 'patch（JSON）', type: 'textarea', cast: 'json', required: true, placeholder: '{"intervalMinutes": 10}' }]
@@ -3045,9 +4116,9 @@
     {
       id: 'process/start-napcat',
       title: '启动 QQ 客户端进程',
-      desc: 'SnowLuma 后端：触发计划任务 SnowLuma-Boot（拉起 SnowLuma + QQ）；回滚后端：spawn start-molly.ps1（不带 -Restart），只拉起进程。',
+      desc: '拉起 QQ 后端和 QQ 客户端（不重启已有的）。',
       confirm: true,
-      consequence: '会拉起一个 QQ 客户端进程；若已有进程在跑，可能端口冲突。'
+      consequence: '如果 QQ 已经在跑，再拉一次可能端口冲突。'
     }
   ];
 
@@ -3074,12 +4145,23 @@
     return '<div class="field"><label class="field-label">' + esc(f.label) + '</label>' + control + '</div>';
   }
 
+  /* 卡片右上角只给一个中文分类，不把内部接口名（例如 napcat/qr）暴露给用户 */
+  function actionTag(a) {
+    var prefix = String((a && a.id) || '').split('/')[0];
+    var map = {
+      plugin: '插件', napcat: 'QQ', watchdog: '守护', process: '进程',
+      molly: 'Molly', memory: '记忆', stickers: '表情', gateway: '模型',
+      pushplus: '通知', heartbeat: '心跳', pest: '状态'
+    };
+    return map[prefix] || '操作';
+  }
+
   function actionCardHtml(a) {
     var fields = (a.fields || []).map(function (f) { return fieldHtml(a, f); }).join('');
     return '<article class="card action-card" data-action="' + esc(a.id) + '">' +
       '<div class="action-head">' +
         '<h2 class="card-title">' + esc(a.title) + '</h2>' +
-        '<span class="action-id mono">' + esc(a.id) + '</span>' +
+        '<span class="action-tag">' + esc(actionTag(a)) + '</span>' +
       '</div>' +
       '<p class="action-desc">' + esc(a.desc) + '</p>' +
       (a.consequence ? '<p class="action-consequence">⚠ ' + esc(a.consequence) + '</p>' : '') +
@@ -3087,7 +4169,6 @@
       '<div class="action-foot">' +
         '<button class="btn ' + (a.confirm ? 'btn-danger' : 'btn-primary') + ' action-run" type="button">' +
           (a.confirm ? '执行（需确认）' : '执行') + '</button>' +
-        '<span class="action-id mono">' + (a.confirm ? 'confirm: true' : 'confirm: false') + '</span>' +
       '</div>' +
       '<div class="action-result" hidden></div>' +
       '</article>';
@@ -3223,7 +4304,10 @@
       if (box) safe(function () { showResult(box, res); });
       setBusy(btn, false);
       if (res.ok) {
-        toast(actionId === 'napcat/qr' ? '已触发重新登录 QQ，等窗口弹出扫码' : ('已执行：' + actionId));
+        var acted = actionById(actionId);
+        toast(actionId === 'napcat/qr'
+          ? '已触发重新登录 QQ，等窗口弹出扫码'
+          : ('已执行：' + (acted && acted.title ? acted.title : '该操作')));
         if (actionId === 'napcat/qr') safe(poll);   /* 立刻刷一遍状态条，别等 4 秒 */
       } else toast('失败：' + (res.error || '未知错误'));
     });
@@ -3271,29 +4355,7 @@
   /* ---------------- 快捷动作绑定 ---------------- */
 
   function bindQuickActions() {
-    var probe = $('#workProbe');
-    if (probe) {
-      probe.addEventListener('click', function () {
-        runAction('plugin/work-probe', {}, { btn: probe, box: $('#workOut') });
-      });
-    }
-    var run = $('#workRun');
-    if (run) {
-      run.addEventListener('click', function () {
-        var t = ($('#workTask') && $('#workTask').value || '').trim();
-        if (!t) { toast('先在输入框里写一条指令'); return; }
-        runAction('plugin/work-run', { task: t }, { btn: run, box: $('#workOut') });
-      });
-    }
-    var research = $('#workResearch');
-    if (research) {
-      research.addEventListener('click', function () {
-        var t = ($('#workTask') && $('#workTask').value || '').trim();
-        if (!t) { toast('先在输入框里写一段测试文本'); return; }
-        runAction('plugin/research-test', { text: t }, { btn: research, box: $('#workOut') });
-      });
-    }
-
+    // 工作流与研究测试只在 DSH 执行，此处不绑定第二套执行入口。
     var wdStatus = $('#wdStatus');
     if (wdStatus) {
       wdStatus.addEventListener('click', function () {
@@ -3465,6 +4527,7 @@
         maybeReloadForNewBuild(j);
         safe(renderTop);
         safe(renderPageNow);
+    revealPage(name);
       })
       .catch(function (err) {
         /* 失败不清空界面：只标红状态条，旧数据继续留着 */
@@ -4195,11 +5258,179 @@
     return PAGES.indexOf(h) >= 0 ? h : 'overview';
   }
 
+  /* 功能搜索只负责导航，不复制业务按钮，避免产生第二套状态与写入路径。 */
+  var FEATURE_LINKS = [
+    { page: 'overview', icon: '⌂', name: '总览', desc: 'Molly、QQ、守护和数据状态', keys: '首页 状态 在线 健康' },
+    { page: 'chats', icon: '◌', name: '会话与消息', desc: '消息量、响应与学习器记录', keys: '聊天 回复 历史' },
+    { page: 'memory', icon: '❀', name: 'Jasmine 记忆', desc: '搜索、新增、编辑和删除记忆', keys: '记住 事实 偏好 人物' },
+    { page: 'pending', icon: '✓', name: '待核实', desc: '通过或丢弃待确认的记忆', keys: '审批 审核' },
+    { page: 'stickers', icon: '☺', name: '表情包', desc: '上传、改关键词和整理表情', keys: '图片 gif 学习' },
+    { page: 'switches', icon: '◫', name: '发言与互动', desc: '回话、轻回应、点赞、主动搭话和静音', keys: '开关 群聊 私聊 闭嘴' },
+    { page: 'budget', icon: '◒', name: '积分与预算', desc: '每日额度、消耗与限制', keys: '费用 上限 用量' },
+    { page: 'work', icon: '↗', name: '让她干活', desc: '指令、工作总线和研究测试', keys: '任务 执行 研究' },
+    { page: 'qq', icon: '⌁', name: 'QQ 连接', desc: '连接诊断、重新登录与扫码', keys: '掉线 登录 二维码' },
+    { page: 'watchdog', icon: '◎', name: '自动守护', desc: '巡检、通知与计划任务', keys: '监控 修复 免打扰' },
+    { page: 'ops', icon: '↻', name: '进程与日志', desc: '启动、停止、重启和最近日志', keys: '运维 重启 关闭 排障' },
+    { page: 'external', icon: '⊙', name: '模型与服务', desc: '模型选择、网关与外部用量', keys: '切换 deepseek 计费' },
+    { page: 'settings', icon: '⚙', name: '偏好设置', desc: '作息时间与诊断信息', keys: '睡觉 起床 复制' },
+    { page: 'about', icon: 'ⓘ', name: '关于', desc: '版本、构建、本机数据与联系方式', keys: '版本 更新 构建 联系 目录 许可' },
+    { page: 'exec', icon: '⋯', name: '高级操作', desc: '全部底层执行块（仅供排障）', keys: '高级 action 配置' }
+  ];
+  function openCommand() {
+    var mask = $('#commandModal');
+    if (!mask) return;
+    mask.hidden = false;
+    var input = $('#commandInput');
+    if (input) { input.value = ''; input.focus(); }
+    renderCommandResults('');
+  }
+  function closeCommand() { var mask = $('#commandModal'); if (mask) mask.hidden = true; }
+
+  /* 搜索 = 页面导航 + 一句话执行（2026-11-05 主人：功能太多、找起来不友好）。
+     动作不复制第二套写入通路：挑中动作就跳到「高级操作」里那张卡并按卡片自己的
+     规则跑（字段校验、危险动作的系统确认、结果区都还是同一份代码）。 */
+  var commandMatches = [];
+  var commandActive = 0;
+
+  function commandEntries() {
+    var out = [];
+    FEATURE_LINKS.forEach(function (f) {
+      out.push({ kind: 'page', page: f.page, icon: f.icon, name: f.name, desc: f.desc, group: '页面', keys: f.keys });
+    });
+    ACTIONS.forEach(function (a) {
+      out.push({
+        kind: 'action', id: a.id, icon: '▶', name: a.title, desc: a.desc, group: actionTag(a),
+        keys: a.title + ' ' + a.desc + ' ' + actionTag(a) + ' 执行 动作 一键'
+      });
+    });
+    return out;
+  }
+
+  function commandScore(e, q) {
+    if (!q) return 1;
+    var name = String(e.name || '').toLowerCase();
+    var hay = (name + ' ' + String(e.desc || '') + ' ' + String(e.keys || '') + ' ' + String(e.group || '')).toLowerCase();
+    if (name.indexOf(q) === 0) return 100;
+    if (name.indexOf(q) >= 0) return 60;
+    if (String(e.group || '').toLowerCase().indexOf(q) >= 0) return 30;
+    if (hay.indexOf(q) >= 0) return 20;
+    return 0;
+  }
+
+  function renderCommandResults(query) {
+    var box = $('#commandResults');
+    if (!box) return;
+    var q = String(query || '').trim().toLowerCase();
+    var scored = [];
+    commandEntries().forEach(function (e) {
+      var s = commandScore(e, q);
+      if (s > 0) scored.push({ e: e, s: s });
+    });
+    scored.sort(function (a, b) { return b.s - a.s; });
+    /* 同样的分组标题只能出现一次：先按「页面 / 各动作分类」切段，段内再按得分排 */
+    var sections = [];
+    var byGroup = {};
+    scored.slice(0, 24).forEach(function (x) {
+      var label = x.e.kind === 'page' ? '页面' : ('执行 · ' + x.e.group);
+      if (!byGroup[label]) { byGroup[label] = { label: label, items: [], best: x.s }; sections.push(byGroup[label]); }
+      byGroup[label].items.push(x.e);
+    });
+    commandMatches = [];
+    sections.forEach(function (sec) { sec.items.forEach(function (e) { commandMatches.push(e); }); });
+    commandActive = 0;
+    if (!commandMatches.length) {
+      box.innerHTML = '<div class="empty">没找到。试试「记忆」「连接」「守护」或「执行」。</div>';
+      return;
+    }
+    var html = '';
+    var lastGroup = '';
+    var idx = -1;
+    commandMatches.forEach(function (e) {
+      idx += 1;
+      if (e.group !== lastGroup) {
+        html += '<div class="command-group">' + esc(e.kind === 'page' ? '页面' : ('执行 · ' + e.group)) + '</div>';
+        lastGroup = e.group;
+      }
+      var i = idx;
+      var cls = 'command-result' + (i === 0 ? ' is-active' : '');
+      if (e.kind === 'page') {
+        html += '<a class="' + cls + '" href="#/' + e.page + '" role="option">' +
+          '<span aria-hidden="true">' + e.icon + '</span>' +
+          '<span><strong>' + esc(e.name) + '</strong><small>' + esc(e.desc) + '</small></span>' +
+          '<span>打开 ↗</span></a>';
+      } else {
+        html += '<button class="' + cls + ' command-action" type="button" role="option" data-action="' + esc(e.id) + '">' +
+          '<span aria-hidden="true">' + e.icon + '</span>' +
+          '<span><strong>' + esc(e.name) + '</strong><small>' + esc(e.desc) + '</small></span>' +
+          '<span>执行 ↵</span></button>';
+      }
+    });
+    box.innerHTML = html;
+  }
+
+  function commandSetActive(i) {
+    var box = $('#commandResults');
+    if (!box || !commandMatches.length) return;
+    var rows = box.querySelectorAll('.command-result');
+    if (!rows.length) return;
+    commandActive = (i + rows.length) % rows.length;
+    for (var k = 0; k < rows.length; k += 1) rows[k].classList.toggle('is-active', k === commandActive);
+    if (rows[commandActive] && rows[commandActive].scrollIntoView) {
+      try { rows[commandActive].scrollIntoView({ block: 'nearest' }); } catch (err) {}
+    }
+  }
+
+  function commandChoose(i) {
+    var e = commandMatches[typeof i === 'number' ? i : commandActive];
+    if (!e) return;
+    closeCommand();
+    if (e.kind === 'page') { location.hash = '#/' + e.page; return; }
+    runActionFromPalette(e.id);
+  }
+
+  function runActionFromPalette(actionId) {
+    if (location.hash.indexOf('#/exec') !== 0) location.hash = '#/exec';
+    setTimeout(function () {
+      var card = document.querySelector('.action-card[data-action="' + actionId + '"]');
+      if (!card) { toast('没找到这个动作，去「高级操作」里看看'); return; }
+      card.classList.add('is-flash');
+      setTimeout(function () { card.classList.remove('is-flash'); }, 1800);
+      try { card.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (err) {}
+      executeCard(card);
+    }, prefReduceMotion() ? 80 : PAGE_LEAVE_MS + 160);
+  }
+
+  function bindCommandPalette() {
+    var open = $('#navSearch'); var mask = $('#commandModal'); var input = $('#commandInput');
+    var close = $('#commandClose'); var box = $('#commandResults');
+    if (open) open.addEventListener('click', openCommand);
+    if (close) close.addEventListener('click', closeCommand);
+    if (input) input.addEventListener('input', function () { renderCommandResults(input.value); });
+    if (box) box.addEventListener('click', function (e) {
+      var row = e.target && e.target.closest ? e.target.closest('.command-result') : null;
+      if (!row) return;
+      e.preventDefault();
+      var rows = box.querySelectorAll('.command-result');
+      var idx = Array.prototype.indexOf.call(rows, row);
+      commandChoose(idx >= 0 ? idx : 0);
+    });
+    if (mask) mask.addEventListener('click', function (e) { if (e.target === mask) closeCommand(); });
+    document.addEventListener('keydown', function (e) {
+      var isOpen = mask && !mask.hidden;
+      if ((e.ctrlKey || e.metaKey) && String(e.key).toLowerCase() === 'k') { e.preventDefault(); openCommand(); return; }
+      if (!isOpen) return;
+      if (e.key === 'Escape') { e.preventDefault(); closeCommand(); }
+      else if (e.key === 'ArrowDown') { e.preventDefault(); commandSetActive(commandActive + 1); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); commandSetActive(commandActive - 1); }
+      else if (e.key === 'Enter') { e.preventDefault(); commandChoose(commandActive); }
+    });
+  }
+
   function renderPageNow() {
     switch (state.page) {
       case 'overview': renderOverview(); break;
       case 'chats': renderChats(); break;
-      case 'budget': renderBudget(); break;
+      case 'budget': renderBudget(); renderBudgetEditor(); break;
       case 'work': renderWork(); break;
       case 'watchdog': renderWatchdog(); break;
       case 'ops': renderOps(); break;
@@ -4207,9 +5438,70 @@
       /* 合并成一页：QQ 连接 = 链路状态 + 扫码登录（原独立「登录」页已删） */
       case 'qq': renderQq(); renderLogin(); break;
       case 'settings': renderSettings(); break;
+      case 'about': renderAbout(); break;
       case 'switches': if (!swInputFocused()) renderSwitches(); break;
       default: break;
     }
+  }
+
+  /* THRM 式切页入场（2026-11-05）：内容卡按 80ms 阶梯、0.285s ease-out 淡入。
+     动画只在切页时重放，4 秒轮询重绘不触发；prefers-reduced-motion 下由 CSS 关掉。 */
+  function revealPage(name) {
+    var sec = document.querySelector('.page[data-page="' + name + '"]');
+    if (!sec) return;
+    var kids = sec.children;
+    var k = 0;
+    for (var i = 0; i < kids.length; i += 1) {
+      var el = kids[i];
+      if (!el || el.classList.contains('page-head')) continue;
+      el.style.setProperty('--reveal-i', String(Math.min(k, 6)));
+      k += 1;
+    }
+    sec.classList.remove('is-revealing');
+    void sec.offsetWidth;
+    sec.classList.add('is-revealing');
+  }
+
+  /* 切页过渡（2026-11-05，按 THRM 的 AnimatePresence mode="wait" 复刻）：
+     旧页 160ms 向上 -14px 淡出 → 新页 190ms 从 +18px 淡入，两者串行，
+     缓动统一 cubic-bezier(.22,1,.36,1)。卡片另有 80ms 阶梯淡入（revealPage）。
+     减少动态效果时不串行，直接切换。 */
+  var PAGE_LEAVE_MS = 160;
+  var pageSwapTimer = null;
+  function prefReduceMotion() {
+    try { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) { return false; }
+  }
+  function switchPageTo(name) {
+    var secs = $$('.page');
+    var next = null;
+    var prev = null;
+    for (var i = 0; i < secs.length; i += 1) {
+      var s = secs[i];
+      var isNext = s.getAttribute('data-page') === name;
+      if (isNext) next = s;
+      if (!s.hidden) prev = s;
+    }
+    if (pageSwapTimer) { clearTimeout(pageSwapTimer); pageSwapTimer = null; }
+    for (var j = 0; j < secs.length; j += 1) secs[j].classList.remove('is-leaving', 'is-entering');
+    if (!next) return;
+    if (!prev || prev === next || prefReduceMotion()) {
+      for (var k = 0; k < secs.length; k += 1) secs[k].hidden = secs[k] !== next;
+      return;
+    }
+    prev.classList.add('is-leaving');
+    for (var m = 0; m < secs.length; m += 1) {
+      if (secs[m] !== prev && secs[m] !== next) secs[m].hidden = true;
+    }
+    pageSwapTimer = setTimeout(function () {
+      pageSwapTimer = null;
+      prev.hidden = true;
+      prev.classList.remove('is-leaving');
+      next.hidden = false;
+      next.classList.add('is-entering');
+      setTimeout(function () { next.classList.remove('is-entering'); }, 240);
+      safe(renderPageNow);
+      revealPage(name);
+    }, PAGE_LEAVE_MS);
   }
 
   function setPage(name) {
@@ -4218,10 +5510,11 @@
     $$('.nav-item').forEach(function (a) {
       a.classList.toggle('is-active', a.getAttribute('data-page') === name);
     });
-    $$('.page').forEach(function (sec) {
-      sec.hidden = sec.getAttribute('data-page') !== name;
-    });
+    switchPageTo(name);
     safe(renderPageNow);
+    /* 有出场动画时不在这里播入场：等换页完成（见 switchPageTo 回调）再播，
+       否则入场动画会在 hidden 状态下空跑完。 */
+    if (!pageSwapTimer) revealPage(name);
     if (name === 'memory') loadMemory();
     /* 进页签时强制拉一次：轮询只动数字，列表可能是几十分钟前的 */
     if (name === 'pending') loadPending(true);
@@ -4234,6 +5527,8 @@
        启动时若 state.page 还没变成 settings 就永远不刷，表单一直是 HTML 里的
        默认 23:50/09:00——主人一保存就把真实作息覆盖成默认值。 */
     if (name === 'settings') refreshSleep();
+    /* 关于页：进页拉一次 /api/health，别拿几十分钟前的 build 说「已是最新」 */
+    if (name === 'about') loadHealth();
     /* 扫码轮询只挂在「QQ 连接」页：离开就停，别在后台空转 */
     if (name === 'qq') enterLoginPage();
     else stopLoginPoll();
@@ -4245,6 +5540,21 @@
     window.addEventListener('hashchange', function () {
       setPage(currentPage());
     });
+
+    /* 关于页：检查更新 / 更新日志就地展开 / 路径复制 / 服务端已更新后的刷新，
+       全部走页内事件委托 —— 卡片被 4 秒轮询重绘也不用重新绑定。 */
+    var aboutPage = $('#aboutPage');
+    if (aboutPage) {
+      aboutPage.addEventListener('click', function (ev) {
+        var t = ev.target;
+        if (!t || !t.closest) return;
+        var copyBtn = t.closest('[data-copy]');
+        if (copyBtn) { copyAboutText(copyBtn.getAttribute('data-copy')); return; }
+        if (t.closest('#aboutCheck')) { checkAboutUpdate(); return; }
+        if (t.closest('#aboutChgToggle')) { toggleAboutChangelog(); return; }
+        if (t.closest('#aboutReload')) { location.reload(); return; }
+      });
+    }
 
     /* 发言开关：重新加载 + 页内所有按钮走事件委托（列表重绘不用重绑） */
     var swReload = $('#swReload');
@@ -4287,6 +5597,62 @@
 
     var memAdd = $('#memAdd');
     if (memAdd) memAdd.addEventListener('click', function () { memAddNew(); });
+
+    var jzDate = $('#jzDate');
+    if (jzDate) {
+      jzDate.addEventListener('change', function () {
+        memView.day = String(jzDate.value || '');
+        if (memView.day) memView.time = '';
+        memView.shown = JZ_BATCH;
+        safe(jzApply);
+      });
+    }
+
+    var jzSort = $('#jzSort');
+    if (jzSort) {
+      jzSort.addEventListener('change', function () {
+        memView.sort = jzSort.value || 'added';
+        safe(jzApply);
+      });
+    }
+
+    /* 日期筛选：面板每次重绘都会换掉里面的节点，所以监听挂在容器上做委托 */
+    var jzFacetsBox = $('#jzFacets');
+    if (jzFacetsBox) {
+      jzFacetsBox.addEventListener('change', function (ev) {
+        var t = ev && ev.target;
+        if (!t || t.id !== 'jzDate') return;
+        memView.day = String(t.value || '');
+        if (memView.day) memView.time = '';
+        memView.shown = JZ_BATCH;
+        safe(jzApply);
+      });
+    }
+
+    var jzMore = $('#jzMore');
+    if (jzMore) jzMore.addEventListener('click', function () { safe(jzAppend); });
+
+    var jzScrim = $('#jzScrim');
+    if (jzScrim) jzScrim.addEventListener('click', function () { jzCloseDrawer(); });
+
+    /* 索引栏 / 详情 / 结果行：一个委托管完。行内「改 / 删」仍由下面的 #memGroups 老委托处理。 */
+    var jzPage = $('#jzPage');
+    if (jzPage) jzPage.addEventListener('click', function (ev) { safe(function () { onMemClick(ev); }); });
+    document.addEventListener('keydown', function (ev) { safe(function () { onMemKey(ev); }); });
+
+    /* 滚动到离底 240px 时追加下一批：桌面壳滚 .content，浏览器壳滚 window，两个都听着 */
+    var jzScrollHost = $('.content');
+    if (jzScrollHost) jzScrollHost.addEventListener('scroll', function () { safe(jzMaybeAppend); }, { passive: true });
+    window.addEventListener('scroll', function () { safe(jzMaybeAppend); }, { passive: true });
+
+    /* 跨断点时抽屉的内联定位要交还给 CSS */
+    window.addEventListener('resize', function () {
+      safe(function () {
+        var d = $('#jzDetail');
+        if (d && jzWide()) { d.style.top = ''; d.style.height = ''; jzCloseDrawer(); }
+        jzMaybeAppend();
+      });
+    }, { passive: true });
 
     /* 记忆行的「改 / 删」用事件委托：列表重绘后不用重新绑定 */
     var memGroups = $('#memGroups');
@@ -4453,15 +5819,47 @@
     });
   }
 
+  /* ---------------- 本地外观偏好 ---------------- */
+
+  function bindAppearance() {
+    var root = document.documentElement;
+    var theme = 'forest';
+    var glass = true;
+    try {
+      var saved = JSON.parse(localStorage.getItem('molly-console-appearance') || '{}');
+      if (['forest', 'indigo', 'clay', 'plum'].indexOf(saved.theme) >= 0) theme = saved.theme;
+      if (typeof saved.glass === 'boolean') glass = saved.glass;
+    } catch (err) { console.warn('[molly-console] 外观偏好读取失败，使用默认值', err); }
+    function apply() {
+      root.setAttribute('data-theme', theme);
+      root.setAttribute('data-glass', glass ? 'true' : 'false');
+      $$('.theme-option').forEach(function (button) {
+        button.setAttribute('aria-checked', button.getAttribute('data-theme') === theme ? 'true' : 'false');
+      });
+      var toggle = $('#glassEnabled');
+      if (toggle) toggle.checked = glass;
+      try { localStorage.setItem('molly-console-appearance', JSON.stringify({ theme: theme, glass: glass })); }
+      catch (err) { console.warn('[molly-console] 外观偏好无法保存', err); }
+    }
+    $$('.theme-option').forEach(function (button) {
+      button.addEventListener('click', function () { theme = button.getAttribute('data-theme'); apply(); });
+    });
+    var toggle = $('#glassEnabled');
+    if (toggle) toggle.addEventListener('change', function () { glass = toggle.checked; apply(); });
+    apply();
+  }
+
   /* ---------------- 启动 ---------------- */
 
   function init() {
     try {
+      bindAppearance();
       initActions();
       bindQuickActions();
       bindOpsEvents();
       bindEvents();
       bindChangelog();
+      bindCommandPalette();
       setPage(currentPage());
       loadHealth();
       poll();

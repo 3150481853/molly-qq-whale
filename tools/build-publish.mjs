@@ -53,6 +53,36 @@ const DIRS = [
 /** 单文件复制（源 → 目标） */
 const FILES = [
   /*
+   * 桌面外壳（2026-11-05 v1.1.7）：WPF + WebView2 的 Molly.exe 源码。
+   * 只登记源码，不登记 bin/obj —— 构建产物不进仓库，用 build.ps1 现编。
+   */
+  ['desktop/MollyDesktop.csproj', 'desktop/MollyDesktop.csproj'],
+  ['desktop/app.manifest', 'desktop/app.manifest'],
+  ['desktop/App.xaml', 'desktop/App.xaml'],
+  ['desktop/App.xaml.cs', 'desktop/App.xaml.cs'],
+  ['desktop/MainWindow.xaml', 'desktop/MainWindow.xaml'],
+  ['desktop/MainWindow.xaml.cs', 'desktop/MainWindow.xaml.cs'],
+  ['desktop/WindowGlass.cs', 'desktop/WindowGlass.cs'],
+  ['desktop/WallpaperBackdrop.cs', 'desktop/WallpaperBackdrop.cs'],
+  ['desktop/build.ps1', 'desktop/build.ps1'],
+  ['desktop/README.md', 'desktop/README.md'],
+  ['desktop/Assets/Molly.ico', 'desktop/Assets/Molly.ico'],
+  ['desktop/Assets/Molly.png', 'desktop/Assets/Molly.png'],
+  ['desktop/tools/make-icon.py', 'desktop/tools/make-icon.py'],
+  /*
+   * v1.1.7 文档：桌面应用、玻璃化集成、Jasmine 两套、命令面板、THRM 动效、发布说明。
+   * docs/ 不在任何 DIRS 白名单里，必须逐条登记（否则下一轮孤儿清理会把它们删掉）。
+   */
+  ['docs/RELEASE-1.1.7.md', 'docs/RELEASE-1.1.7.md'],
+  ['docs/desktop-app.md', 'docs/desktop-app.md'],
+  ['docs/console-glass-v3-integration.md', 'docs/console-glass-v3-integration.md'],
+  ['docs/console-about-page.md', 'docs/console-about-page.md'],
+  ['docs/console-command-palette.md', 'docs/console-command-palette.md'],
+  ['docs/jasmine-memory-ui-spec.md', 'docs/jasmine-memory-ui-spec.md'],
+  ['docs/jasmine-controller-spec.md', 'docs/jasmine-controller-spec.md'],
+  ['docs/thrm-motion-spec.md', 'docs/thrm-motion-spec.md'],
+  ['docs/sing-request-fix-2026-11-05.md', 'docs/sing-request-fix-2026-11-05.md'],
+  /*
    * 向量 + 重排的本地服务（2026-11-03）：lib/sidecar.js 按相对路径找它，
    * 不登记的话「按仓库装插件」只有客户端、没有服务端，回忆会一直退回纯关键词。
    */

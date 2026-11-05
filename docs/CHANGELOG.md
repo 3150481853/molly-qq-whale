@@ -7,6 +7,40 @@
 
 ---
 
+## 2026-11-05 · v1.1.7 正式版：玻璃化界面、Jasmine 记忆、桌面应用
+
+> 完整清单见 `docs/RELEASE-1.1.7.md`（按「外观 / 功能 / 后端 / 桌面 / 记忆内核 / 插件」六块拆开，含验收数据）。
+
+**改了什么**
+
+- **控制台外观**：改成「相对桌面的磨砂玻璃」——桌面外壳自绘整屏壁纸模糊图（1/4 分辨率 + 半径 15，移动缩放只改 Viewbox），页面三层纱（标题条 .42 / 正文 .34 / 侧栏胶囊渐变 .33→.52）；侧栏做成铺满左缘的胶囊；顶栏去掉 `backdrop-filter`（透明窗口里它会把白色根背景一起合成，压出一条白雾带）；滚动条统一成 4/6px 无槽悬浮拇指；字体从「未安装的 Inter 回落雅黑」换成 MiSans → Noto Sans SC。
+- **切页过渡**：照本机 THRM 的实测参数——旧页 160ms `translateY(-14px)` 淡出、新页 190ms `translateY(18px)` 淡入（`cubic-bezier(.22,1,.36,1)`），卡片 285ms ease-out + 80ms 阶梯；`prefers-reduced-motion` 全关。
+- **命令面板**（`Ctrl+K`）：同时搜页面与执行块，按「页面 / 执行 · 分类」分组；`Enter` 执行会跳到执行块卡片、高亮后走原有确认通路（不新增写入路径）。
+- **Jasmine 记忆页**：更名「茉莉花记忆系统」，三栏（索引 / 列表 / 详情抽屉）+ 四指标 + 七类分布条；搜索分词 AND、六种排序、按日期筛选、中栏常显滚动条；新增**有效权重可见**（`w6 → 5.5` + 衰减口径说明）。
+- **关于页**：品牌卡 / 检查更新（前后端 build 一致性）/ 数据卡 / 联系与许可；更新日志自动抓本文件最新一节的「改了什么」。
+- **术语清理**：界面上的 NapCat 字样全部清掉（删设置页回滚卡、动作 id 改中文分类胶囊、toast 用动作中文标题、服务端文案改写）。
+- **控制台后端**：修好 SEA 下的 `ROOT` 推导（向上找 `tools\watchdog.mjs`）——这是「守护状态：脚本不存在」的根因；`LIVE` 改为「EXE 默认真执行、源码默认演练」；宿主端口探测加 `out\dsh-host.json` 记忆、超时 2000ms、失败只缓存 15 秒；`overview.memory` 补 `activeDays` / `activeDayKey`。
+- **桌面应用**：WPF + WebView2 原生窗口（单实例、自绘 44px 标题条、关闭三选语义、自管后端、安装目录指针），并新增 DSH 宿主桥（页面 `postMessage` → 把 DSH 窗口提到最前）；`tools\start-dsh.ps1` 新增 `-DesktopExePath` / `Start-MollyDesktop`，随 DSH 一起拉起。
+- **记忆内核**：`jasmine-memory` 升 `0.4.0` 并发到 GitHub（`3150481853/jasmine-memory`，tag `v0.4.0`）；新增零依赖「茉莉花控制台」`jasmine-controller`（三页 + 12 个 API，缺省上限 20000，支持导入 Molly 的 `{ok,data:{entries}}`）。
+- **插件侧唱歌**：RVC 加 `expandable_segments` + 30 秒分片 + OOM 兜底（110 秒不再崩）；`maybeSing` 放行群聊里手打 `@Molly`，预告文案改「五六分钟」，`parseSingRequest` 认「点歌 / 唱一下 / 唱一遍」并清书名号。
+
+**验证**
+
+- 控制台 15 个页面逐页点过：无报错、无横向溢出、任一时刻只一个 section 可见。
+- 玻璃接缝：1.5 缩放窗口标题条下沿（物理 y=66）六列亮度差 ≤2.4（修前最大 31.1）；滚动后顶栏不糊字。
+- 命令面板：`QQ` → 6 条四段分组；`守护` → 7 条且「守护状态」第一；`Enter` 执行返回 `成功 278 ms HTTP 200`。
+- 记忆页：5,432 条，首行 137ms，`memory/list` 69ms / 2.36MB。
+- 桌面：单实例、关闭三选语义、自起后端 2 秒健康、点「切到 DSH 工作台」前台窗口变成 `DeepSeek Harness`。
+- 唱歌：110 秒单段 94 秒出片；40 秒强制分片 28.9 秒出片（输出 39.97 秒）。
+- 记忆内核：`node --test` 47/47；真实 5,435 条迁移 `added 5435 / skipped 1`。
+
+**怎么退回**
+
+- 外观相关全部集中在 `console\console.css` 的 §27–§38 与 `desktop\`（`WindowGlass.cs` / `WallpaperBackdrop.cs` / `MainWindow.xaml`），删掉这些节即回到 preview.1 的暖纸面；
+- 后端三处改动在 `tools\console-server.mjs` 的 `ROOT` 推导、`LIVE`、`discoverHostBase` 三小段，可单独回退；
+- 插件侧改动有备份 `lib\engine.js.bak-singfix-20261105-1132`、`lib\singing.js.bak-singfix-20261105-1132`。
+
+---
 ## 2026-10-30（深夜）· 记忆闸门：第三人称辈分断言；本地违禁词迁到配置
 
 **改了什么**

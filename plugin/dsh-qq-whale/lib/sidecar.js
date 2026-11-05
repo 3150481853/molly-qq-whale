@@ -4,7 +4,9 @@
  * 为什么单独一个文件、为什么是同步的：
  *   recall() 是同步的（engine-context → contextFor → recall 一路没有 await），
  *   而 HTTP 客户端只有异步的 fetch。所以这里用 `execFileSync` 调系统 curl，
- *   **阻塞但有时限**：嵌入 2s、重排 1.5s，超时直接抛，recall 里 catch 住退回关键词粗排。
+ *   **阻塞但有时限**：嵌入 4s、重排 8s（2026-11-03 修：原来 2s/1.5s 太短，
+ *   重排 40 条热态就要 0.8–0.9s、冷启 5s，客户端提前断开会每轮静默退回粗排）。
+ *   超时直接抛，recall 里 catch 住退回关键词粗排。
  *   阻塞代价：一次召回最多多等 0.7–1.5 秒（40 条重排）。群里本来就要想几秒，可接受；
  *   真觉得慢就 `MOLLY_RERANK=0` 关掉，或把 RERANK_POOL 调小。
  *
@@ -26,6 +28,30 @@ import path from 'node:path'
 const DEFAULT_URL = 'http://127.0.0.1:8791'
 const DEFAULT_PYTHON = 'G:\\Molly\\data\\singing\\venv312\\Scripts\\python.exe'
 const DEFAULT_MODELS = 'G:\\Molly\\models'
+// 2026-11-03：sidecar 的调用日志（JSONL）。主人说后期要接控制台，所以默认就落盘。
+const DEFAULT_LOG = 'G:\\Molly\\data\\qq-whale\\embed-server.log.jsonl'
+
+/** 同步小睡（ensure 在插件启动路径上，不能 await）。 */
+function sleepSync(ms) {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+  } catch {
+    /* 不支持就用忙等兜底 */
+    const end = Date.now() + ms
+    while (Date.now() < end) {}
+  }
+}
+
+/**
+ * 2026-11-03：优先用 pythonw.exe 起 sidecar。
+ * python.exe 是控制台程序，即使 spawn 时给了 windowsHide，detached 起来也常会
+ * 留下一个空的黑框（主人截图里那两个「${MOLLY_ROOT}\data\singing\venv31…」窗口就是它）。
+ * pythonw.exe 没有控制台，天然不显示窗口。
+ */
+function preferWindowlessPython(p) {
+  const w = String(p).replace(/python\.exe$/i, 'pythonw.exe')
+  return w !== p && fs.existsSync(w) ? w : p
+}
 
 function curlJson(url, body, timeoutSec) {
   // body 写临时文件再传：40 条正文拼起来能到 12KB，直接上命令行会撞 Windows 参数长度上限
@@ -61,6 +87,7 @@ export function createSidecar({ logger = () => {}, root = '' } = {}) {
     process.env.MOLLY_EMBED_SCRIPT || 'G:\\Molly\\qq-whale\\tools\\embed-server.py',
   )
   const models = String(process.env.MOLLY_EMBED_MODELS || DEFAULT_MODELS)
+  const logFile = String(process.env.MOLLY_EMBED_LOG || DEFAULT_LOG)
 
   let spawned = false
   let healthy = false
@@ -91,11 +118,30 @@ export function createSidecar({ logger = () => {}, root = '' } = {}) {
       logger('warn', `嵌入 sidecar 起不来：python=${python} script=${script}（退回纯关键词）`)
       return
     }
+    const exe = preferWindowlessPython(python)
     const args = [script, '--port', new URL(base).port || '8791', '--models', models]
+    if (logFile) args.push('--log', logFile)
     try {
-      const child = spawn(python, args, { detached: true, stdio: 'ignore', windowsHide: true })
+      const child = spawn(exe, args, {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+        cwd: path.dirname(exe),
+      })
       child.unref()
-      logger('info', `已拉起嵌入 sidecar（${base}，模型目录 ${models}），首次调用可能要等几秒加载`)
+      /*
+       * 2026-11-03：spawn 完等它真的应答再算数。
+       * 不等的话，插件启停两次就会各 spawn 一个——服务端虽然加了端口守卫会自己退出，
+       * 但那是「起两个、死一个」，不如这里就等它 ready，第二次直接看到 health 通过。
+       */
+      for (let i = 0; i < 4; i += 1) {
+        sleepSync(700)
+        if (health()) {
+          logger('info', `已拉起嵌入 sidecar（${exe}，${base}，模型 ${models}）`)
+          return
+        }
+      }
+      logger('warn', '嵌入 sidecar 已拉起但 3 秒内没应答（首次加载模型可能更慢，先按纯关键词跑）')
     } catch (err) {
       logger('warn', `拉起嵌入 sidecar 失败：${err?.message || err}（退回纯关键词）`)
     }
@@ -137,5 +183,31 @@ export function createSidecar({ logger = () => {}, root = '' } = {}) {
     }
   }
 
-  return { off, base, embed, rerank, embedBatch, health, ensure, get healthy() { return healthy } }
+  /**
+   * 服务端统计快照（给控制台用）。
+   * 控制台以后只要 `GET http://127.0.0.1:8791/stats` 就能拿到调用次数、平均/最慢耗时、
+   * 最近 10 次调用和日志路径，不用去 tail 日志文件。失败返回 null，调用方自行兜底。
+   */
+  const stats = () => {
+    try {
+      return curlJson(`${base}/stats`, null, 2)
+    } catch {
+      return null
+    }
+  }
+
+  return {
+    off,
+    base,
+    embed,
+    rerank,
+    embedBatch,
+    health,
+    ensure,
+    stats,
+    logFile,
+    get healthy() {
+      return healthy
+    },
+  }
 }

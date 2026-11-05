@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>茉莉花 · 记忆控制台</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<aside class="sidebar">
+  <a class="brand" href="#/memory">
+    <span class="bloom">❀</span>
+    <span class="brand-text">茉莉花<em>Jasmine</em></span>
+  </a>
+
+  <nav class="nav" aria-label="页面">
+    <a class="nav-item" href="#/memory" data-route="memory"><span class="nav-name">记忆库</span><span class="nav-hint">Memory</span></a>
+    <a class="nav-item" href="#/curves" data-route="curves"><span class="nav-name">曲线</span><span class="nav-hint">Curves</span></a>
+    <a class="nav-item" href="#/data" data-route="data"><span class="nav-name">数据</span><span class="nav-hint">Data</span></a>
+  </nav>
+
+  <div class="side-space"></div>
+
+  <div class="side-foot">
+    <span class="side-label">数据目录</span>
+    <code id="sideDir" title="">—</code>
+  </div>
+</aside>
+
+<main class="main">
+
+  <!-- ============================== 记忆库 ============================== -->
+  <section class="page" id="page-memory" aria-label="记忆库">
+    <header class="page-head">
+      <div class="head-titles">
+        <h1>茉莉花记忆</h1>
+        <p class="sub" id="memSub">Jasmine · 读取中…</p>
+      </div>
+      <div class="head-actions">
+        <button class="btn btn-primary" id="btnAdd" type="button">＋ 记一条</button>
+        <button class="btn" id="btnExport" type="button">导出</button>
+      </div>
+    </header>
+
+    <div class="metrics" id="metrics"></div>
+
+    <div class="dist">
+      <div class="dist-bar" id="distBar"></div>
+      <div class="dist-legend" id="distLegend"></div>
+    </div>
+
+    <div class="mem-body">
+      <div class="idx" id="idx" aria-label="索引"></div>
+
+      <div class="list-col">
+        <div class="toolbar">
+          <input id="search" class="search" type="search" autocomplete="off" spellcheck="false"
+                 placeholder="搜索正文 / 人物 / QQ（空格分词，同时命中）" aria-label="搜索">
+          <select id="sort" class="sort" aria-label="排序">
+            <option value="at-desc">加入时间 · 新→旧</option>
+            <option value="at-asc">加入时间 · 旧→新</option>
+            <option value="eff-desc">有效权重 · 高→低</option>
+            <option value="eff-asc">有效权重 · 低→高</option>
+            <option value="hits-desc">命中次数 · 多→少</option>
+          </select>
+          <span class="count" id="countText">—</span>
+        </div>
+        <div class="rows" id="rows"></div>
+        <div class="list-foot" id="listFoot"><button class="btn btn-ghost" id="more" type="button">加载更多</button></div>
+      </div>
+
+      <div class="drawer-wrap" id="drawerWrap">
+        <div class="drawer" id="drawer"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================== 曲线 ============================== -->
+  <section class="page" id="page-curves" aria-label="曲线">
+    <header class="page-head">
+      <div class="head-titles">
+        <h1>茉莉花曲线</h1>
+        <p class="sub" id="curvesSub">基础权重与有效权重 · 同一坐标</p>
+      </div>
+      <div class="head-actions">
+        <button class="btn" id="btnCurvesReload" type="button">刷新</button>
+      </div>
+    </header>
+
+    <div class="scroll-area">
+      <div class="card">
+        <div class="card-head">
+          <h2>权重分布</h2>
+          <span class="hint">每条记忆的基础权重与衰减后的有效权重，落在 1–10 同一把尺子上</span>
+        </div>
+        <div class="chart" id="chart"></div>
+        <div class="chart-axis" id="chartAxis"></div>
+        <div class="chart-legend">
+          <span class="lg"><i class="sw sw-base"></i>基础权重</span>
+          <span class="lg"><i class="sw sw-eff"></i>有效权重</span>
+          <span class="lg-note" id="chartNote"></span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>衰减进度</h2>
+          <span class="hint">空闲超过宽限天数后，每 7 个活跃天掉 0.5 权重，直到下限</span>
+        </div>
+        <table class="table" id="decayTable">
+          <thead>
+            <tr>
+              <th>类型</th><th class="num">条数</th><th class="num">宽限天数</th>
+              <th class="num">掉权步长</th><th class="num">下限</th><th class="num">最近空闲</th><th class="num">可归档</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>归档簿 <span class="chip-count" id="archCount">0</span></h2>
+          <span class="hint">陈旧的事件与梗会挪到这里，只读；需要时可取回记忆库</span>
+        </div>
+        <div id="archList" class="arch-list"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================== 数据 ============================== -->
+  <section class="page" id="page-data" aria-label="数据">
+    <header class="page-head">
+      <div class="head-titles">
+        <h1>数据</h1>
+        <p class="sub" id="dataSub">原始账 · 导入导出 · 维护</p>
+      </div>
+      <div class="head-actions">
+        <button class="btn btn-primary" id="btnDataExport" type="button">导出 bundle</button>
+      </div>
+    </header>
+
+    <div class="scroll-area">
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-head"><h2>这本库</h2></div>
+          <dl class="kv" id="dataKv"></dl>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2>导入 bundle</h2>
+            <span class="hint">先预览，再落盘</span>
+          </div>
+          <div class="import-box">
+            <input type="file" id="importFile" accept="application/json,.json">
+            <div class="import-preview" id="importPreview">选一个 <code>jasmine-bundle-*.json</code></div>
+            <div class="import-actions">
+              <button class="btn" id="btnImportConfirm" type="button" disabled>确认导入</button>
+              <button class="btn btn-ghost" id="btnImportCancel" type="button" disabled>取消</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>维护</h2>
+          <span class="hint">重建会按原始账重放，先备份再动</span>
+        </div>
+        <div class="maint">
+          <div class="maint-row">
+            <div class="maint-text">
+              <b>从原始账重建</b>
+              <span>把 jasmine.json 按 ledger.jsonl 重新回放一遍，修掉手改或中断留下的偏差。</span>
+            </div>
+            <button class="btn" id="btnRebuild" type="button">重建</button>
+          </div>
+          <div class="maint-row">
+            <div class="maint-text">
+              <b>归档陈旧条目</b>
+              <span>把权重见底、且超过 <code id="archDays">90</code> 活跃天没动过的事件与梗挪进归档簿。</span>
+            </div>
+            <button class="btn" id="btnArchive" type="button">查看预计</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>原始账</h2>
+          <span class="hint">ledger.jsonl 最后 200 行，只读</span>
+          <button class="btn btn-ghost btn-sm" id="btnRawReload" type="button">刷新</button>
+        </div>
+        <div class="raw" id="rawList"></div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<!-- 新增 / 编辑 -->
+<div class="modal-mask" id="modalMask" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal-head">
+      <h2 id="modalTitle">记一条</h2>
+      <button class="icon-btn" id="modalClose" type="button" aria-label="关闭">×</button>
+    </div>
+    <form id="entryForm" class="form" autocomplete="off">
+      <input type="hidden" id="f-id">
+      <label class="field">
+        <span class="field-label">正文</span>
+        <textarea id="f-text" rows="3" maxlength="240" placeholder="一条值得记住的话" required></textarea>
+        <span class="field-note" id="f-textNote">0 / 200</span>
+      </label>
+      <div class="field-row">
+        <label class="field">
+          <span class="field-label">类型</span>
+          <select id="f-kind"></select>
+        </label>
+        <label class="field">
+          <span class="field-label">权重</span>
+          <select id="f-weight"></select>
+        </label>
+      </div>
+      <div class="field-row">
+        <label class="field">
+          <span class="field-label">人物</span>
+          <input id="f-who" type="text" maxlength="24" placeholder="可空">
+        </label>
+        <label class="field">
+          <span class="field-label">QQ</span>
+          <input id="f-qq" type="text" maxlength="16" placeholder="可空">
+        </label>
+      </div>
+      <div class="modal-foot">
+        <button class="btn btn-ghost" type="button" id="modalCancel">取消</button>
+        <button class="btn btn-primary" type="submit" id="modalSubmit">写进去</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

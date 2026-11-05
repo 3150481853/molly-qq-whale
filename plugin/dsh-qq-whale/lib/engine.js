@@ -469,6 +469,8 @@ export class ChatEngine {
       quoteSent: 0,
       quoteFail: 0,
       quoteAtDropped: 0,
+      // 引用目标太旧（gap ≥ 4）主动不挂引用的次数（2026-11-05，主人 m07124）
+      quoteStale: 0,
       quoteLast: null,
       // 引用回复里语音段降级成文字的次数（2026-10-25，主人 m03353）
       voiceDemoted: 0,
@@ -6701,7 +6703,19 @@ export class ChatEngine {
           nowMs: this.now(),
         })
       : null
-    const quoteTarget = quotePick?.messageId || ''
+    /*
+     * 引用体检（2026-11-05，主人 m07124「引用还是挂错」）。
+     *
+     * pickQuoteTarget 现在会把「引用目标之后又进来几条别人的消息」算成 gap。
+     * gap 越大，说明这句话越可能是在答更新的那条——这时候挂引用框就是在指错人。
+     * 规矩：gap ≥ 4 就不挂（宁可只发文字），并在 stats 里记一笔，方便看真实分布。
+     */
+    const quoteStale = Boolean(quotePick && Number(quotePick.gap) >= 4)
+    if (quoteStale) {
+      this.stats.quoteStale = (this.stats.quoteStale || 0) + 1
+      this.logger('debug', `引用目标太旧（差 ${quotePick.gap} 条），这轮不挂引用：${quotePick.messageId}`)
+    }
+    const quoteTarget = quotePick && !quoteStale ? (quotePick.messageId || '') : ''
     const triggerNudge = isGroup && isPureNudge(ev)
     /*
      * 引用回复里不能带语音（主人 m03353：QQ 端「引用+语音」这条根本发不出去）。
@@ -6710,7 +6724,7 @@ export class ChatEngine {
      */
     const demoteVoice = shouldDemoteVoice({ isGroup, quoteTarget })
     let quoteDone = false
-    if (quotePick) this.logger('debug', `引用回复：${quotePick.why} → ${quotePick.messageId}`)
+    if (quotePick && !quoteStale) this.logger('debug', `引用回复：${quotePick.why} → ${quotePick.messageId}（差 ${quotePick.gap} 条）`)
 
     for (const step of plan) {
       if (signal?.aborted) break
@@ -6867,6 +6881,7 @@ export class ChatEngine {
             this.stats.quoteLast = {
               id: String(quoteTarget),
               why: quotePick?.why || '',
+              gap: Number(quotePick?.gap) || 0,
               at: this.now(),
             }
           }
@@ -6877,6 +6892,7 @@ export class ChatEngine {
           this.stats.quoteLast = {
             id: String(quoteTarget),
             why: 'failed',
+            gap: Number(quotePick?.gap) || 0,
             at: this.now(),
             error: String(err?.message || err).slice(0, 80),
           }

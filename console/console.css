@@ -3146,3 +3146,22 @@ button.command-result>span:last-child{white-space:nowrap}
 }
 .jz-date-slot .jz-date::-webkit-datetime-edit { color: rgba(25, 33, 30, .66); }
 .jz-date-slot .jz-date.is-on::-webkit-datetime-edit { color: var(--primary); }
+/* §39 储存与占用（2026-11-05）：给别的部署者看「谁在吃内存」并就地调策略。
+   行式表格沿用 .kv 的节奏，但不用卡片描边——这一块是仪表，不是装饰。 */
+.mem-table { display: flex; flex-direction: column; margin: 12px 0 4px; }
+.mem-item {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  padding: 8px 2px; border-bottom: 1px solid var(--hairline-soft);
+  font-size: 13px; color: var(--ink);
+}
+.mem-item:last-child { border-bottom: 0; }
+.mem-item.is-total { margin-top: 2px; border-top: 1px solid var(--hairline); border-bottom: 0; font-weight: 600; }
+.mem-item.is-muted { color: var(--stone); }
+.mem-item b { font-weight: 600; font-variant-numeric: tabular-nums; }
+.mem-count { margin-left: 6px; font-style: normal; font-size: 11px; color: var(--stone); }
+.mem-row { flex-wrap: wrap; gap: 12px; align-items: flex-end; margin-top: 6px; }
+.mem-field { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--stone); }
+.mem-field .input { width: 152px; }
+.mem-toggles { display: flex; flex-direction: column; gap: 2px; margin-top: 12px; }
+html[data-glass="true"] .mem-item { border-bottom-color: rgba(25, 33, 30, .08); }
+html[data-glass="true"] .mem-item.is-total { border-top-color: rgba(25, 33, 30, .14); }

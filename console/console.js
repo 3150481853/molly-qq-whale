@@ -3684,6 +3684,8 @@
         kv('构建', '无（原生 HTML/CSS/JS）')
       ].join(''))
     ].join(''));
+    /* 储存与占用是异步的（要跑一次 tasklist + 问一次侧车），单独拉，别拖慢设置页首屏 */
+    safe(renderMem);
   }
 
   function loadHealth() {
@@ -5849,11 +5851,138 @@
     apply();
   }
 
+  /* ---------------- 储存与占用（2026-11-05） ----------------
+     主人要的是「给其他部署者用」：在控制台里能看见各类进程各占多少、能调策略、能一键回收。
+     策略落在服务端 out\mem-config.json —— 桌面壳和 Python 侧车读同一份，避免三套口径。
+     这里只做「读状态 / 写配置 / 触发回收」，真正把模型卸出内存的是侧车的 /unload。 */
+
+  var memState = { config: null, mem: null, embed: null, busy: false };
+
+  function memMb(n) {
+    var v = Number(n);
+    if (!isFinite(v) || v <= 0) return '0 MB';
+    return v >= 1000 ? (v / 1024).toFixed(2) + ' GB' : Math.round(v) + ' MB';
+  }
+
+  function memPost(actionId, body) {
+    return fetch('/api/action/' + actionId, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body || {})
+    }).then(function (r) { return r.json(); });
+  }
+
+  function renderMemTable() {
+    var box = $('#memTable');
+    if (!box) return;
+    var m = memState.mem;
+    if (!m || !m.groups || !m.groups.length) {
+      setHtml(box, '<div class="mem-item is-muted"><span>读不到进程内存</span><b>—</b></div>');
+      return;
+    }
+    var rows = m.groups.map(function (g) {
+      return '<div class="mem-item"><span>' + esc(g.label) +
+        (g.count ? '<i class="mem-count">×' + g.count + '</i>' : '') +
+        '</span><b class="mono">' + memMb(g.mb) + '</b></div>';
+    });
+    rows.push('<div class="mem-item is-total"><span>Molly 合计</span><b class="mono">' + memMb(m.totalMb) + '</b></div>');
+    setHtml(box, rows.join(''));
+  }
+
+  function renderMemControls() {
+    var c = memState.config || {};
+    var mode = $('#memRerankMode');
+    if (mode) mode.value = c.rerankMode === 'always' ? 'always' : 'lazy';
+    var idle = $('#memRerankIdle');
+    if (idle) idle.value = String(c.rerankIdleMin == null ? 5 : c.rerankIdleMin);
+    var sovits = $('#memSovitsIdle');
+    if (sovits) sovits.value = String(c.sovitsIdleMin == null ? 10 : c.sovitsIdleMin);
+    var guard = $('#memGuard');
+    if (guard) guard.checked = c.guard !== false;
+    var susp = $('#memSuspend');
+    if (susp) susp.checked = c.suspendOnMinimize !== false;
+  }
+
+  function renderMem(force) {
+    if (memState.busy && !force) return;
+    memPost('mem/status').then(function (j) {
+      if (!j || !j.ok) throw new Error((j && j.error) || '状态读取失败');
+      var d = j.data || {};
+      memState.config = d.config || null;
+      memState.mem = d.mem || null;
+      memState.embed = d.embed || null;
+      renderMemTable();
+      renderMemControls();
+      var hint = $('#memHint');
+      if (hint && d.embed && d.embed.reached) {
+        var mins = d.embed.uptime_s ? Math.round(d.embed.uptime_s / 60) : 0;
+        hint.textContent = '嵌入服务在跑 · 已用 ' + mins + ' 分钟' +
+          (d.embed.rerank && d.embed.rerank.calls ? ' · 重排 ' + d.embed.rerank.calls + ' 次' : '');
+      } else if (hint && !memState.busy) {
+        hint.textContent = '嵌入服务没在跑（空闲会自动退出）';
+      }
+    }).catch(function (err) {
+      var box = $('#memTable');
+      if (box) setHtml(box, '<div class="mem-item is-muted"><span>状态读取失败</span><b>—</b></div>');
+      console.warn('[molly-console] 储存与占用状态读取失败：', err);
+    });
+  }
+
+  function saveMem(patch, label) {
+    memPost('mem/config', patch).then(function (j) {
+      if (!j || !j.ok) throw new Error((j && j.error) || '保存失败');
+      memState.config = (j.data && j.data.config) || memState.config;
+      renderMemControls();
+      toast('已保存' + (label ? '：' + label : ''));
+    }).catch(function (err) { toast('保存失败：' + (err && err.message ? err.message : err)); });
+  }
+
+  function trimMemory() {
+    var btn = $('#memTrim');
+    var hint = $('#memHint');
+    if (memState.busy) return;
+    memState.busy = true;
+    if (btn) { btn.disabled = true; btn.textContent = '正在回收…'; }
+    if (hint) hint.textContent = '把重排和嵌入卸出内存，下一次召回会重新加载…';
+    memPost('mem/trim').then(function (j) {
+      if (!j || !j.ok) throw new Error((j && j.error) || '回收失败');
+      var d = j.data || {};
+      memState.mem = d.after || memState.mem;
+      renderMemTable();
+      var freed = Number(d.freedMb) || 0;
+      toast(freed > 0 ? '已回收约 ' + memMb(freed) : '没有可回收的内存');
+      if (hint) hint.textContent = freed > 0 ? ('刚回收 ' + memMb(freed) + '，需要时她会自己重新加载') : '没有可回收的内存';
+    }).catch(function (err) {
+      toast('回收失败：' + (err && err.message ? err.message : err));
+      if (hint) hint.textContent = '';
+    }).then(function () {
+      memState.busy = false;
+      if (btn) { btn.disabled = false; btn.textContent = '立即回收'; }
+      safe(function () { renderMem(true); });
+    });
+  }
+
+  function bindMem() {
+    var mode = $('#memRerankMode');
+    if (mode) mode.addEventListener('change', function () { saveMem({ rerankMode: mode.value }, '重排方式'); });
+    var idle = $('#memRerankIdle');
+    if (idle) idle.addEventListener('change', function () { saveMem({ rerankIdleMin: Number(idle.value) }, '重排空闲卸载'); });
+    var sovits = $('#memSovitsIdle');
+    if (sovits) sovits.addEventListener('change', function () { saveMem({ sovitsIdleMin: Number(sovits.value) }, '语音空闲退出'); });
+    var guard = $('#memGuard');
+    if (guard) guard.addEventListener('change', function () { saveMem({ guard: guard.checked }, '内存守卫'); });
+    var susp = $('#memSuspend');
+    if (susp) susp.addEventListener('change', function () { saveMem({ suspendOnMinimize: susp.checked }, '最小化挂起'); });
+    var trim = $('#memTrim');
+    if (trim) trim.addEventListener('click', trimMemory);
+  }
+
   /* ---------------- 启动 ---------------- */
 
   function init() {
     try {
       bindAppearance();
+      bindMem();
       initActions();
       bindQuickActions();
       bindOpsEvents();

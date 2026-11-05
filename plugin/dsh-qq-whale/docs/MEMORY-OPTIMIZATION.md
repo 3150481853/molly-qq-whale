@@ -86,3 +86,34 @@
 2. 服务端是 `tools/embed-server.py`（标准库 http.server + torch，无需新依赖）；插件启动时会尝试拉起它，起不来只 warn 并退回关键词。
 3. 开关：`MOLLY_EMBED_OFF=1` 全关；`MOLLY_EMBED_URL` / `MOLLY_EMBED_PYTHON` / `MOLLY_EMBED_SCRIPT` / `MOLLY_EMBED_MODELS` 可覆盖；`MOLLY_TENSE=0` 关闭计划判定；`MOLLY_TOPIC_MERGE=1` 打开写入侧同题合并。
 4. 成本：每轮净增约 1–1.7 秒（CPU）、常驻内存约 1GB 量级。**先在自己的语料上量收益，没提升就别开。**
+
+---
+
+## 六、sidecar 观测接口（留给控制台）
+
+主人说后期要改控制台界面，把「嵌入/重排在干什么」接进去。所以这里从一开始就分成两层：**给机器的 `/stats`** 和 **给人的日志文件**。
+
+1. **`GET http://127.0.0.1:8791/stats`** —— 控制台直接 fetch 这个就行，不需要解析日志：
+
+```json
+{
+  "ok": true,
+  "uptime_s": 125,
+  "hits": 3,
+  "embed":  { "calls": 2, "items": 2,  "ms_avg": 61.5, "ms_max": 101 },
+  "rerank": { "calls": 1, "items": 40, "ms_avg": 812,  "ms_max": 812 },
+  "errors": 0,
+  "last":   { "kind": "rerank", "ms": 812, "query": "围鱼那张…" },
+  "recent": [ { "at": 1793716940213, "kind": "boot", "port": 8791, … } ],
+  "log_file": "G:\\Molly\\data\\qq-whale\\embed-server.log.jsonl",
+  "models": "G:\\Molly\\models"
+}
+```
+
+2. **`GET /health`** 多了 `uptime_s`，适合做「服务还活着吗」的指示灯；判活只看 `ok`。
+
+3. **日志文件** `${MOLLY_ROOT}\data\qq-whale\embed-server.log.jsonl`：JSONL，一行一个事件，`kind` 为 `boot` / `embed` / `rerank` / `error` / `stop`，带 `at`（毫秒时间戳）、`n`、`ms`、`query`、`head`。超过 8MB 自动轮转到 `.1`。轮转/写失败一律静默，**日志不许影响推理**。
+
+4. **插件侧的入口**：`lib/sidecar.js` 的 `createSidecar()` 返回 `{ embed, rerank, embedBatch, health, ensure, stats, logFile }`；`stats()` 就是上面那个端点的同步包装（失败返回 `null`）。将来控制台要做「记忆系统」面板，从 `engine.js` 里拿到 `this.sidecar` 就能读。
+
+5. **别再加控制台窗口。** sidecar 用 `pythonw.exe` 起（无控制台），端口守卫保证重复启动会自己退出；要看运行状态就查 `/stats`，想看历史就看日志文件——这两样都不会在屏幕上多出一个黑框。

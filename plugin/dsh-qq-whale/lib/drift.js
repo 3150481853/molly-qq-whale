@@ -17,8 +17,13 @@ import path from 'node:path'
 const pad2 = (n) => String(n).padStart(2, '0')
 export const localDateKey = (d = new Date()) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
 
-const KEEP_DAYS = 3
-const MAX_TOPICS = 60
+/*
+ * 2026-11-03：这两条不只是「话题库保留期」，现在还是**去重记忆**的保留期——
+ * 3 天太短（一批旧帖三天后又能重新「新」一次），改成 14 天。给聊天用的
+ * contextText() 另有自己的 hours 窗口，不会因为这里放宽而翻出旧帖。
+ */
+const KEEP_DAYS = 14
+const MAX_TOPICS = 200
 const MAX_BATCHES = 20
 
 const DEFAULTS = {
@@ -52,20 +57,55 @@ const DEFAULTS = {
   timeoutMs: 540000,
 }
 
-const TASK = [
+/*
+ * 2026-11-03 主人问「为什么每次 Molly 看小黑盒都是那几篇重复的」——
+ * 查了 drift/batches.json：20 批见闻里只有 3 个链接，五天没变过。三层原因：
+ *   1. 首页 feed 经常压根没渲染（快照里只有导航和话题药丸、没有帖子卡片），
+ *      模型手上没有新素材；
+ *   2. drift 会话是长期复用的（workSessionTag:'drift1'），上一轮那三条链接和
+ *      那份 JSON 一直在上下文里，没素材时它就直接复述；
+ *   3. 系统侧没拦：runOnce 里的 `topics.some(...)` 只挡住入库，批次用的是
+ *      未过滤的 items，重复帖照发。
+ * 所以「已看过」这份清单必须写进提示词，runOnce 再按同一份清单过滤批次；
+ * 挑不出新的就输出 []——宁可今天没刷，也别重复念旧闻。
+ */
+const SEEN_IN_PROMPT = 24
+
+/** 把最近看过的帖子塞进提示词：不给这份清单，模型只会从自己的记忆里翻旧账。 */
+export function seenSection(topics = []) {
+  const items = (topics || []).filter((t) => t && t.link).slice(-SEEN_IN_PROMPT)
+  if (!items.length) return ''
+  const id = (link) => {
+    const m = String(link).match(/link\/(\d+)/)
+    return m ? m[1] : String(link)
+  }
+  return [
+    '',
+    '**下面这些你已经看过了，这一轮不要再挑（挑回来会被系统丢掉，白跑一轮）：**',
+    ...items.map((t) => `- ${String(t.title || '').slice(0, 40)}（${id(t.link)}）`),
+    '挑不出没看过的新帖就直接输出 [] 结束。今天没新鲜事也正常，别拿旧的凑数。',
+  ].join('\n')
+}
+
+const TASK_HEAD = [
   '你在替主人闲逛（不是干活任务：别动任何文件、别发 QQ 消息、别列计划）。',
   '用 bsk_* 工具（bsk_session start 开会话 → bsk_page navigate 打开页面 → bsk_inspect observe 读内容 → bsk_interact 操作 → 最后 bsk_session stop）。',
   '**不要用 ego_*，那个浏览器已经被小黑盒风控死了（安全验证循环）。**',
   '弹出「安全验证」/验证码时：用 bsk_assist action=request-help 请主人手动点掉（说明写「小黑盒弹了安全验证，麻烦在浏览器窗口里点一下」），等它消失再继续；等不到就直接输出 []。',
-  '最多 6 步，别反复试：',
+  '最多 8 步，别反复试：',
   '1) 打开 https://www.xiaoheihe.cn/app/bbs/home',
-  '2) 用一次脚本/快照把页面上所有 /app/bbs/link/ 的卡片标题抓出来（别一条条看）',
-  '3) 挑 2~3 条看起来有意思的（有评论数的优先），各打开一次，读标题和开头几行',
+  '2) 先快照一次。**如果快照里一条帖子卡片都没有（只有导航和话题药丸），先往下滚一屏再快照**；还是没有就点顶部话题药丸（盒友杂谈 / 数码硬件 / ai.ai 都行）再看。',
+  '3) 挑 2~3 条看起来有意思、且**没在上面的「已看过」清单里**的帖子（有评论数的优先），各打开一次，读标题和开头几行；打不开或读不到就换一条。',
   '4) 立刻输出 JSON 数组，不要解释、不要客套、不要代码块之外的任何字：',
   '[{"title":"标题","author":"作者","link":"https://www.xiaoheihe.cn/app/bbs/link/数字id","gist":"一句话讲这帖子在说什么","why":"你为什么感兴趣（20字内）","draft":"想去评论区回一句就写这句（40字内，像人说话，别夸，具体点）；不想回就写空字符串"}]',
   '5) 收尾关浏览器（bsk_session stop）。',
-  '如果浏览器打不开、弹验证码、或者页面根本读不到帖子，就直接输出 [] 结束，别硬试。',
-].join('\n')
+  '如果浏览器打不开、弹验证码、或者整页都读不到帖子，就直接输出 [] 结束，别硬试。',
+]
+
+/** 每轮把「已看过」拼进去；没有历史清单时就是原始提示词。 */
+export function buildTask(topics = []) {
+  return [...TASK_HEAD, seenSection(topics)].filter(Boolean).join('\n')
+}
 
 /** 兜底：模型上一轮给了人话但没给 JSON 时，让它只做一次格式整理。 */
 const FORMAT_TASK = [
@@ -362,7 +402,9 @@ export class Drift {
       }
     }
     try {
-      let res = await this.runTask(TASK)
+      const task = buildTask(this.topics)
+      const seenCount = this.topics.length
+      let res = await this.runTask(task)
       let items = parseTopics(res.text)
       if (!items.length) {
         /*
@@ -384,15 +426,26 @@ export class Drift {
           return { ok: false, error: this.lastError, raw }
         }
       }
-      const at = Date.now()
-      for (const it of items) {
-        if (this.topics.some((t) => t.link === it.link)) continue
-        this.topics.push({ at, ...it })
+      /*
+       * 2026-11-03：把去重提前到「批次」这一层。
+       * 以前只在入库时 `topics.some(...) => continue`，批次里放的还是未过滤的
+       * items，所以模型复述旧帖时群里照样收到同一批——20 批只有 3 条链接就是这么来的。
+       */
+      const fresh = items.filter((it) => !this.topics.some((t) => t.link === it.link))
+      if (!fresh.length) {
+        this.lastError = `这轮 ${items.length} 条全看过了（首页没给新东西）`
+        this.logger('warn', `闲逛：${this.lastError}；已知 ${seenCount} 条，不发群`)
+        return { ok: false, error: this.lastError, items: items.length, allSeen: true }
       }
+      if (fresh.length < items.length) {
+        this.logger('info', `闲逛：${items.length} 条里 ${items.length - fresh.length} 条看过，留 ${fresh.length} 条`)
+      }
+      const at = Date.now()
+      for (const it of fresh) this.topics.push({ at, ...it })
       const batch = {
         at,
-        items: items.map((it) => ({ title: it.title, author: it.author, link: it.link, gist: it.gist, why: it.why })),
-        drafts: items
+        items: fresh.map((it) => ({ title: it.title, author: it.author, link: it.link, gist: it.gist, why: it.why })),
+        drafts: fresh
           .map((it, i) => ({ index: i + 1, title: it.title, link: it.link, draft: it.draft, status: 'pending' }))
           .filter((d) => d.draft),
       }
@@ -401,10 +454,10 @@ export class Drift {
       if (reason === 'idle') this.count += 1
       this.lastOkAt = at
       this.lastError = ''
-      this.logger('info', `闲逛完成（${reason}）：${items.length} 条，想回 ${batch.drafts.length} 条`)
+      this.logger('info', `闲逛完成（${reason}）：${fresh.length} 条，想回 ${batch.drafts.length} 条`)
       const shouldNotify = notify == null ? this.cfg.notify !== false : notify
       if (shouldNotify) this.lastShare = await this.share(batch)
-      return { ok: true, items: items.length, drafts: batch.drafts.length }
+      return { ok: true, items: fresh.length, drafts: batch.drafts.length }
     } catch (err) {
       this.lastError = String(err?.message || err).slice(0, 160)
       this.logger('warn', `闲逛失败：${this.lastError}`)

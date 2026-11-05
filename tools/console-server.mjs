@@ -30,6 +30,7 @@ import crypto from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { isSea } from 'node:sea';
 import { detectDataDirFromProfiles, defaultDataDir } from './resolve-paths.mjs';
+import { TokenLedger } from '../jasmine/src/ledger.mjs';
 
 /*
  * ── 配置（三条来源，优先级从低到高）────────────────────────────────────────
@@ -91,10 +92,30 @@ const pick = (envKey, cfgKey, fallback) => {
   return fallback;
 };
 
+// exe 模式下从 exe 目录往上找「真正的 qq-whale 工作区」：判据是该目录下有 tools/watchdog.mjs。
+// 起因（2026-11-04 主人报障）：桌面版把 molly-console.exe 放在 dist\desktop\，
+// 旧逻辑 ROOT=exe 目录 → TOOLS=dist\desktop\tools 不存在，守护页直接报
+// 「脚本不存在：...\dist\desktop\tools\watchdog.mjs」，二维码/日志/看板数据也一起失效。
+// 找不到工作区就退回 exe 目录，行为与旧版一致。
+function findWorkspaceRoot(startDir) {
+  let dir = startDir;
+  for (let i = 0; i < 5; i += 1) {
+    try {
+      if (dir && fs.existsSync(path.join(dir, 'tools', 'watchdog.mjs'))) return dir;
+    } catch {
+      /* ignore */
+    }
+    const parent = dir ? path.dirname(dir) : '';
+    if (!parent || parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
 // 工作区根：MOLLY_ROOT > console.json > 源码模式按本文件位置推（<root>/tools/console-server.mjs），
-// exe 模式取 exe 所在目录（下面 CONSOLE_DIR 会再兜底）。
+// exe 模式先往上找 tools/watchdog.mjs，找不到才取 exe 所在目录（下面 CONSOLE_DIR 会再兜底）。
 const ROOT = pick('MOLLY_ROOT', 'root',
-  IS_SEA ? EXE_DIR : path.resolve(HERE, '..'));
+  IS_SEA ? (findWorkspaceRoot(EXE_DIR) || EXE_DIR) : path.resolve(HERE, '..'));
 const DATA = pick('MOLLY_DATA_DIR', 'dataDir',
   detectDataDirFromProfiles() || defaultDataDir());
 // 前端产物：MOLLY_CONSOLE_DIR > console.json(consoleDir) > exe 同级 console/ > 工作区 console/
@@ -114,7 +135,7 @@ const PORT = Number(pick('MOLLY_CONSOLE_PORT', 'port', 19392)) || 19392;
 // 控制台版本：以插件 package.json 为唯一真源，别在这里写死（2026-10-25 主人 m03522：
 // 左下角一直显示 v1.0.0 就是这一行写死的；发布版本与插件版本从此自动同步）。
 // exe 模式读不到 package.json 时退回 FALLBACK_VERSION，保证打包版也有版本号。
-const FALLBACK_VERSION = '1.1.7-preview.1';
+const FALLBACK_VERSION = '1.1.7';
 const VERSION = (() => {
   try {
     const pkg = JSON.parse(
@@ -195,7 +216,7 @@ const PLUGIN_BASE = (() => {
 const NODE_EXE = pick(
   'MOLLY_NODE_EXE',
   'nodeExe',
-  'C:\\Users\\example\\.dsh\\dsh-runtimes\\dsh-primary-runtime\\dependencies\\node\\bin\\node.exe',
+  IS_SEA ? path.join(process.env.USERPROFILE || '', '.dsh', 'dsh-runtimes', 'dsh-primary-runtime', 'dependencies', 'node', 'bin', 'node.exe') : process.execPath,
 );
 const PS_EXE = 'powershell.exe';
 
@@ -208,7 +229,12 @@ const QR_PNG = path.join(OUT, 'console-qr.png');
 const BROWSER_PROFILE = path.join(OUT, 'edge-console-profile');
 const STICKER_DIR = path.join(DATA, 'stickers', '学来的'); // 表情包图片目录（与 panel-data.mjs 一致）
 const TASK_NAME = 'Molly-Watchdog';                       // Windows 计划任务名
-const LIVE = process.env.MOLLY_CONSOLE_LIVE === '1';      // 只有显式置 1 才真跑危险动作
+// 危险动作（重启 QQ / 重新登录等）是否真执行：
+//   源码直跑 = 开发态，默认只演练，需显式 MOLLY_CONSOLE_LIVE=1；
+//   打包成 EXE（SEA）= 生产态，默认真执行（界面上这些动作都要用户二次确认），置 0 可退回演练。
+const LIVE = IS_SEA
+  ? process.env.MOLLY_CONSOLE_LIVE !== '0'
+  : process.env.MOLLY_CONSOLE_LIVE === '1';
 
 // ── 外部服务（task-57：集成终端里的"外部服务类"动作）──────────────────────
 // 网关是本地单进程（wb_proxy.py），面板密码默认 admin；**密码与 token 绝不进日志**。
@@ -343,11 +369,29 @@ async function jpost(url, body, timeoutMs = 6000) {
 }
 
 // ── 宿主端口探测（不写死 7053；DSH 重启会换端口）───────────────────────────
-// 前端 4 秒轮询，绝不能每次都遍历端口：结果（含"没探到"）统一缓存 30 秒。
-const HOST_PROBE_TTL = 30_000;
-const HOST_PROBE_TIMEOUT = 700;
+// 前端 4 秒轮询，绝不能每次都遍历端口：结果缓存。探到了就长缓存（3 分钟），
+// 没探到只短缓存（15 秒）—— 否则偶发一次探空，界面会连续半分钟显示「插件不可达」。
+const HOST_PROBE_TTL = 180_000;
+const HOST_PROBE_TTL_FAIL = 15_000;
+const HOST_PROBE_TIMEOUT = 2_500;  // 单端口探测超时：宿主忙（跑模型）时 700ms 不够
+const DSH_HOST_FILE = path.join(OUT, 'dsh-host.json'); // 上次探到的宿主地址，重启后先试它
 let hostCache = { base: null, port: 0, at: 0 };
 let hostProbing = null;
+
+// 记住上次探到的宿主：控制台/DSH 重启后不必再扫一遍端口（扫一次要 2 秒 + 几百次探测）
+function rememberHost(base) {
+  try {
+    fs.writeFileSync(DSH_HOST_FILE, JSON.stringify({ base, at: Date.now() }));
+  } catch { /* 记住失败不影响功能 */ }
+}
+
+function readRememberedHost() {
+  try {
+    const d = JSON.parse(fs.readFileSync(DSH_HOST_FILE, 'utf8'));
+    if (d && typeof d.base === 'string' && /^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(d.base)) return d.base;
+  } catch { /* 没记住过 / 文件坏了都当没探到 */ }
+  return null;
+}
 
 // 走 PowerShell 拿本机 LISTEN 端口（只用内置模块，不装依赖）
 function listListenPorts() {
@@ -401,8 +445,16 @@ async function probeHost(port) {
 
 async function discoverHostBase() {
   const tried = new Set();
-  // 1) 先试上次探到的端口（宿主重启后多半还是它）
-  if (hostCache.port) {
+  // 0) 先试上次记住的地址（关机重开、控制台重启都走这条，一次探测就走完）
+  const remembered = readRememberedHost();
+  if (remembered) {
+    const port = Number(remembered.slice(remembered.lastIndexOf(':') + 1));
+    if (port) tried.add(port);
+    const hit = await probeHost(port);
+    if (hit) return hit;
+  }
+  // 1) 再试上次进程内探到的端口（宿主重启后多半还是它）
+  if (hostCache.port && !tried.has(hostCache.port)) {
     tried.add(hostCache.port);
     const again = await probeHost(hostCache.port);
     if (again) return again;
@@ -423,7 +475,9 @@ async function discoverHostBase() {
 async function resolveHostBase() {
   // 显式配了 MOLLY_PLUGIN_BASE 就用它，不再扫端口（部署到服务器时走这条）
   if (PLUGIN_BASE) return PLUGIN_BASE;
-  if (Date.now() - hostCache.at < HOST_PROBE_TTL) return hostCache.base; // 30 秒内直接用缓存
+  // 探到过长缓存，探空只短缓存：避免偶发一次探空让界面连续半分钟显示「插件不可达」
+  const ttl = hostCache.base ? HOST_PROBE_TTL : HOST_PROBE_TTL_FAIL;
+  if (Date.now() - hostCache.at < ttl) return hostCache.base;
   if (hostProbing) return hostProbing; // 4 秒轮询并发时只探一次
   hostProbing = (async () => {
     let base = null;
@@ -437,6 +491,7 @@ async function resolveHostBase() {
       port: base ? Number(base.slice(base.lastIndexOf(':') + 1)) : 0,
       at: Date.now(),
     };
+    if (base) rememberHost(base);
     hostProbing = null;
     return base;
   })();
@@ -453,7 +508,7 @@ async function buildOverview() {
   if (!pluginBase) {
     out.plugin = { reachable: false, error: '没探到 DSH 宿主端口（1024-65535）' };
   } else {
-    const r = await jget(`${pluginBase}/dsh-qq-whale/state`, 1500);
+    const r = await jget(`${pluginBase}/dsh-qq-whale/state`, 3000);
     if (!r.ok) {
       out.plugin = { reachable: false, error: r.error, base: pluginBase };
     } else {
@@ -474,7 +529,15 @@ async function buildOverview() {
               lastReplyMs: isNum(s.metrics.lastReplyMs) ? s.metrics.lastReplyMs : null,
             }
           : null,
-        memory: s.memory ? { count: isNum(s.memory.count) ? s.memory.count : null } : null,
+        memory: s.memory
+          ? {
+              count: isNum(s.memory.count) ? s.memory.count : null,
+              /* 活跃天：Jasmine 衰减曲线的唯一时间轴（只在真聊过天的日子 +1）。
+                 前端要用它算「有效权重」，否则只能拿条目的 lastActiveDay 猜。 */
+              activeDays: isNum(s.memory.activeDays) ? s.memory.activeDays : null,
+              activeDayKey: typeof s.memory.activeDayKey === 'string' ? s.memory.activeDayKey : null,
+            }
+          : null,
         stickers: s.stickers
           ? {
               count: isNum(s.stickers.count) ? s.stickers.count : null,
@@ -814,7 +877,7 @@ async function buildQqStatus(plugin, napcat) {
     clientReachable,
     clientLogin,
     backend,
-    backendName: backend === 'snowluma' ? 'SnowLuma' : '回滚后端（NapCat）',
+    backendName: backend === 'snowluma' ? 'SnowLuma' : '回滚后端',
     webui: backend === 'snowluma' ? SNOWLUMA_WEBUI : NAPCAT,
     uin: (napcat && napcat.uin) || (plugin && plugin.bot && plugin.bot.userId) || null,
     nickname: (napcat && napcat.nickname) || (plugin && plugin.bot && plugin.bot.nickname) || null,
@@ -1191,6 +1254,8 @@ function openAppWindow(url) {
 // 命令行：--version / -v 只打印版本退出（打包成 exe 后用它确认文件没坏）；
 // --help / -h 打印配置说明。正常启动时不消费任何参数。
 const ARGV = process.argv.slice(2);
+// 原生桌面壳持有自己的窗口，绝不回退成浏览器 --app 快捷方式。
+const NO_BROWSER = ARGV.includes('--no-browser') || process.env.MOLLY_NO_BROWSER === '1';
 if (ARGV.includes('--version') || ARGV.includes('-v')) {
   console.log(`molly-console ${VERSION}${IS_SEA ? ' (sea)' : ''}`);
   console.log(`node ${process.version} / ${process.platform}-${process.arch}`);
@@ -1204,6 +1269,7 @@ if (ARGV.includes('--help') || ARGV.includes('-h')) {
 
 用法：
   molly-console.exe            按 console.json + 环境变量启动
+  molly-console.exe --no-browser  原生应用托管，绝不打开浏览器
   molly-console.exe --version  打印版本和生效路径
   molly-console.exe --help     本说明
 
@@ -1282,6 +1348,10 @@ async function handleOccupiedPort() {
   const health = await probeExistingConsole(PORT, PROBE_HOST);
   if (health) {
     console.log(`控制台已经在运行：${SELF_URL}（本次不再启动，直接给你开窗口）`);
+    if (NO_BROWSER) {
+      console.log('[console] 原生应用模式：复用健康服务，不打开浏览器。');
+      return 0;
+    }
     const r = openAppWindow(SELF_URL);
     if (r.opened) {
       console.log(`[console] 已用 ${path.basename(r.browser)} 打开独立窗口（pid=${r.pid}）`);
@@ -1384,7 +1454,7 @@ async function route(req, res) {
     const days = Math.max(1, Math.min(365, Number(url.searchParams.get('days')) || 7));
     const since = Date.now() - days * 86400000;
     try {
-      const { TokenLedger } = await import('../jasmine/index.mjs');
+      // SEA 构建随入口内联账本模块；只读聚合不加载整个 Jasmine 引擎。
       const jp = FILE_CFG && FILE_CFG.jasminePrices;
       const prices = jp && typeof jp === 'object' ? jp : {};
       const led = new TokenLedger({ file: path.join(DATA, 'jasmine', 'ledger.jsonl'), prices });
@@ -1596,12 +1666,8 @@ function readJsonBody(req) {
     req.on('data', (b) => {
       total += b.length;
       if (total > MAX_BODY) {
+        // 不 destroy：请求连接还要留给调用方写 JSON 413；继续 drain 完请求体。
         finish(reject, new BodyTooLarge(MAX_BODY));
-        try {
-          req.destroy();
-        } catch {
-          /* ignore */
-        }
         return;
       }
       chunks.push(b);
@@ -2303,9 +2369,10 @@ const ACTIONS = {
     const payload = { text };
     if (body?.kind !== undefined) payload.kind = String(body.kind);
     if (body?.who !== undefined) payload.who = String(body.who);
+    if (body?.qq !== undefined) payload.qq = String(body.qq).trim();
     if (body?.weight !== undefined && body.weight !== null) {
       const w = Number(body.weight);
-      if (!Number.isInteger(w) || w < 1 || w > 5) return { ok: false, status: 400, error: 'weight 必须是 1-5 的整数' };
+      if (!Number.isFinite(w) || w < 1 || w > 10 || Math.round(w * 10) !== w * 10) return { ok: false, status: 400, error: 'weight 必须是 1~10 的数字，最多一位小数' };
       payload.weight = w;
     }
     return proxyPlugin('POST', '/memory/add', payload);
@@ -2323,14 +2390,15 @@ const ACTIONS = {
     }
     if (body?.kind !== undefined) payload.kind = String(body.kind);
     if (body?.who !== undefined) payload.who = String(body.who);
+    if (body?.qq !== undefined) payload.qq = String(body.qq).trim();
     if (body?.weight !== undefined && body.weight !== null) {
       const w = Number(body.weight);
-      if (!Number.isInteger(w) || w < 1 || w > 5) return { ok: false, status: 400, error: 'weight 必须是 1-5 的整数' };
+      if (!Number.isFinite(w) || w < 1 || w > 10 || Math.round(w * 10) !== w * 10) return { ok: false, status: 400, error: 'weight 必须是 1~10 的数字，最多一位小数' };
       payload.weight = w;
     }
     // 至少要改一个字段，否则等于空跑
     if (Object.keys(payload).length === 1) {
-      return { ok: false, status: 400, error: 'text/kind/who/weight 至少要给一个' };
+      return { ok: false, status: 400, error: 'text/kind/who/qq/weight 至少要给一个' };
     }
     return proxyPlugin('POST', '/memory/update', payload);
   },
@@ -2462,7 +2530,7 @@ const ACTIONS = {
         killed: r.killed,
         notRunning: r.notRunning,
         failed: r.failed,
-        note: '只停了 QQ 与 NapCat；DSH 宿主、网关、控制台本身没动。',
+        note: '只停了 QQ 客户端与 QQ 后端；DSH 宿主、网关、控制台本身没动。',
       },
       error: okAll ? undefined : '有些进程没停掉：' + r.failed.map((f) => `${f.name}#${f.pid}`).join(', '),
     };

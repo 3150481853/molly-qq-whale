@@ -1,6 +1,6 @@
 {
   "name": "jasmine-memory",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "茉莉花（Jasmine）记忆系统：双卡存储 + RRF 召回 + 向量与重排 + 相对日期归一 + 计划判定 + 出口核对 + 周信 + token 账本，零依赖纯 Node ESM",
   "type": "module",
   "main": "./index.mjs",
@@ -10,11 +10,15 @@
     "./recall": "./src/recall.mjs",
     "./decay": "./src/decay.mjs"
   },
+  "bin": {
+    "jasmine-controller": "controller/server.mjs"
+  },
   "files": [
     "index.mjs",
     "src/",
     "adapters/",
     "docs/",
+    "controller/",
     "README.md",
     "LICENSE"
   ],

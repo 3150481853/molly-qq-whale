@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 # 一键拉起 Molly（QQ 111111111 + NapCat + OneBot11）
 #
 # 为什么要写成脚本：启动 NapCat 要设 5 个环境变量、路径还都是绝对路径，
@@ -34,6 +34,16 @@ $QQNUM   = '111111111'
 $WEBUI   = 'http://127.0.0.1:6099'
 $WEBTOKEN = '${NAPCAT_TOKEN}'                           # napcat\config\webui.json
 $ONEBOBOT_PORT = 3001
+# 2026-11-05：NapCat 后端已整体归档（改用 SnowLuma 后不再需要），原目录已删除。
+# 回滚前必须先解压归档，否则下面全是死路径。
+if (-not (Test-Path -LiteralPath $NAPCAT)) {
+  Write-Host ''
+  Write-Host '  回滚后端 NapCat 已于 2026-11-05 归档，本脚本现在跑不起来。' -ForegroundColor Yellow
+  Write-Host '  归档文件：${MOLLY_ROOT}\backup\napcat-archived-20261105.zip' -ForegroundColor Yellow
+  Write-Host '  恢复步骤：解压到 ${MOLLY_ROOT}\qq-whale\（得到 qq-whale\napcat\）后重新运行本脚本。' -ForegroundColor Yellow
+  Write-Host ''
+  exit 2
+}
 
 function Write-Step($msg) { Write-Host "`n=== $msg ===" -ForegroundColor Cyan }
 function Write-Ok($msg)   { Write-Host "  [OK]   $msg" -ForegroundColor Green }

@@ -15,39 +15,39 @@
   <aside class="sidebar">
     <div class="brand">
       <span class="brand-mark" aria-hidden="true">🐳</span>
-      <span class="brand-text">Molly 控制台</span>
+      <span class="brand-text">Molly<small>她的控制台</small></span>
     </div>
 
+    <button class="nav-search" id="navSearch" type="button" aria-label="搜索控制台功能" title="搜索功能（Ctrl K）"><span aria-hidden="true">⌕</span><span>查找功能</span><kbd>Ctrl K</kbd></button>
     <nav class="nav" id="nav" aria-label="主导航">
-      <!-- 总览单独放最上面，不再套组标题（组标题也叫「总览」会重复） -->
-      <a class="nav-item" href="#/overview" data-page="overview">总览</a>
+      <a class="nav-item" href="#/overview" data-page="overview"><span class="nav-icon" aria-hidden="true">⌂</span><span>总览</span></a>
       <div class="nav-group">
-        <div class="nav-group-title">她</div>
-        <a class="nav-item" href="#/chats" data-page="chats">会话与消息</a>
-        <a class="nav-item" href="#/memory" data-page="memory">记忆</a>
-        <a class="nav-item" href="#/pending" data-page="pending">待核实<span class="nav-badge" id="pendBadge" hidden>0</span></a>
-        <a class="nav-item" href="#/stickers" data-page="stickers">表情包</a>
+        <div class="nav-group-title">Molly 的日常</div>
+        <a class="nav-item" href="#/chats" data-page="chats"><span class="nav-icon" aria-hidden="true">◌</span><span>会话与消息</span></a>
+        <a class="nav-item" href="#/memory" data-page="memory"><span class="nav-icon" aria-hidden="true">❀</span><span>Jasmine 记忆</span></a>
+        <a class="nav-item" href="#/pending" data-page="pending"><span class="nav-icon" aria-hidden="true">✓</span><span>待核实</span><span class="nav-badge" id="pendBadge" hidden>0</span></a>
+        <a class="nav-item" href="#/stickers" data-page="stickers"><span class="nav-icon" aria-hidden="true">☺</span><span>表情包</span></a>
       </div>
       <div class="nav-group">
-        <div class="nav-group-title">行为</div>
-        <a class="nav-item" href="#/switches" data-page="switches">发言开关</a>
-        <a class="nav-item" href="#/budget" data-page="budget">预算</a>
+        <div class="nav-group-title">她怎么回应</div>
+        <a class="nav-item" href="#/switches" data-page="switches"><span class="nav-icon" aria-hidden="true">◫</span><span>发言与互动</span></a>
+        <a class="nav-item" href="#/budget" data-page="budget"><span class="nav-icon" aria-hidden="true">◒</span><span>积分与预算</span></a>
+        <a class="nav-item" href="#/work" data-page="work"><span class="nav-icon" aria-hidden="true">↗</span><span>任务与研究 · DSH</span></a>
       </div>
       <div class="nav-group">
-        <div class="nav-group-title">QQ</div>
-        <a class="nav-item" href="#/qq" data-page="qq">QQ 连接<span class="nav-badge is-warn nav-dot" id="loginBadge" hidden aria-hidden="true"></span></a>
+        <div class="nav-group-title">连接与运行</div>
+        <a class="nav-item" href="#/qq" data-page="qq"><span class="nav-icon" aria-hidden="true">⌁</span><span>QQ 连接</span><span class="nav-badge is-warn nav-dot" id="loginBadge" hidden aria-hidden="true"></span></a>
+        <a class="nav-item" href="#/watchdog" data-page="watchdog"><span class="nav-icon" aria-hidden="true">◎</span><span>自动守护</span></a>
+        <a class="nav-item" href="#/ops" data-page="ops"><span class="nav-icon" aria-hidden="true">↻</span><span>进程与日志</span></a>
+        <a class="nav-item" href="#/external" data-page="external"><span class="nav-icon" aria-hidden="true">⊙</span><span>模型与服务</span></a>
       </div>
       <div class="nav-group">
-        <div class="nav-group-title">运维</div>
-        <a class="nav-item" href="#/work" data-page="work">干活</a>
-        <a class="nav-item" href="#/watchdog" data-page="watchdog">守护</a>
-        <a class="nav-item" href="#/ops" data-page="ops">运维</a>
-        <a class="nav-item" href="#/external" data-page="external">外部服务</a>
-      </div>
-      <div class="nav-group">
-        <div class="nav-group-title">系统</div>
-        <a class="nav-item" href="#/exec" data-page="exec">执行块</a>
-        <a class="nav-item" href="#/settings" data-page="settings">设置</a>
+        <div class="nav-group-title">偏好与高级</div>
+        <a class="nav-item" href="#/settings" data-page="settings"><span class="nav-icon" aria-hidden="true">⚙</span><span>偏好设置</span></a>
+        <a class="nav-item" href="#/about" data-page="about"><span class="nav-icon" aria-hidden="true">ⓘ</span><span>关于</span></a>
+        <details class="advanced-nav"><summary>高级操作</summary>
+          <a class="nav-item nav-sub" href="#/exec" data-page="exec"><span>所有执行块</span></a>
+        </details>
       </div>
     </nav>
 
@@ -87,6 +87,10 @@
           <span>⚠️ Molly 还没连上 QQ —— 点这里看怎么处理</span>
           <span class="ov-login-banner-go">去 QQ 连接 →</span>
         </a>
+        <div class="quick-strip" aria-label="常用操作">
+          <div><strong>接下来想做什么？</strong><span>常用操作已放在这里，不必翻找设置。</span></div>
+          <div class="quick-actions"><a class="btn btn-primary" href="#/memory">记一件事</a><a class="btn btn-ghost" href="#/stickers">整理表情包</a><a class="btn btn-ghost" href="#/qq">检查 QQ 连接</a></div>
+        </div>
         <div class="stat-grid" id="ovStats"></div>
         <div class="card-grid" id="ovCards"></div>
       </section>
@@ -100,21 +104,58 @@
         <div class="card-grid" id="chatCards"></div>
       </section>
 
-      <!-- 记忆 -->
-      <section class="page" data-page="memory" hidden>
+      <!-- 茉莉花记忆系统（Jasmine）：索引 / 结果 / 详情 三栏浏览器 -->
+      <section class="page jz-page" data-page="memory" id="jzPage" hidden>
         <div class="page-head page-head-row">
-          <div>
-            <h1>记忆</h1>
-            <p class="page-sub" id="memSub">正在读取…</p>
+          <div class="jz-head-main">
+            <h1 class="jz-title">
+              <svg class="jz-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <g fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round">
+                  <ellipse cx="12" cy="6.6" rx="2.5" ry="3.9"/>
+                  <ellipse cx="12" cy="6.6" rx="2.5" ry="3.9" transform="rotate(72 12 12)"/>
+                  <ellipse cx="12" cy="6.6" rx="2.5" ry="3.9" transform="rotate(144 12 12)"/>
+                  <ellipse cx="12" cy="6.6" rx="2.5" ry="3.9" transform="rotate(216 12 12)"/>
+                  <ellipse cx="12" cy="6.6" rx="2.5" ry="3.9" transform="rotate(288 12 12)"/>
+                  <circle cx="12" cy="12" r="1.3"/>
+                </g>
+              </svg>
+              <span>茉莉花记忆系统</span>
+            </h1>
+            <p class="page-sub" id="memSub">Jasmine · 正在读取…</p>
           </div>
-          <button class="btn btn-primary" id="memAdd" type="button" disabled>+ 新增记忆</button>
+          <div class="jz-head-actions">
+            <button class="btn btn-ghost btn-sm" id="memReload" type="button">重新加载</button>
+            <button class="btn btn-primary" id="memAdd" type="button" disabled>+ 记一条</button>
+          </div>
         </div>
         <div class="notice" id="memNotice" hidden></div>
-        <div class="toolbar">
-          <input class="input" id="memSearch" type="search" placeholder="搜索正文 / 日期 / 类型 / 人 / QQ 号" autocomplete="off" spellcheck="false">
-          <button class="btn btn-ghost btn-sm" id="memReload" type="button">重新加载</button>
+        <div class="jz-hero" id="jzHero"></div>
+        <div class="jz-body">
+          <aside class="jz-facets" id="jzFacets" aria-label="索引"></aside>
+          <div class="jz-list">
+            <div class="jz-toolbar">
+              <input class="input jz-search" id="memSearch" type="search" placeholder="搜正文 / 人物 / QQ 号" autocomplete="off" spellcheck="false">
+              <select class="input input-sm jz-sort" id="jzSort" aria-label="排序">
+                <option value="added">时间：新→旧</option>
+                <option value="old">时间：旧→新</option>
+                <option value="active">最近活跃</option>
+                <option value="weight">权重：高→低</option>
+                <option value="weight-asc">权重：低→高</option>
+                <option value="hits">命中次数</option>
+              </select>
+<label class="jz-date-slot" title="按日期看某一天">
+                <input class="input input-sm jz-date" type="date" id="jzDate" aria-label="按日期筛选">
+              </label>
+              <span class="jz-count mono" id="jzCount">—</span>
+            </div>
+            <div class="jz-rows" id="memGroups"></div>
+            <div class="jz-more" id="jzMoreWrap" hidden>
+              <button class="btn btn-ghost btn-sm" id="jzMore" type="button">加载更多</button>
+            </div>
+          </div>
+          <aside class="jz-detail" id="jzDetail" aria-label="详情"></aside>
         </div>
-        <div id="memGroups"></div>
+        <div class="jz-scrim" id="jzScrim" hidden></div>
       </section>
 
       <!-- 待核实：拦下来的记忆先放这儿，等人过目 -->
@@ -122,7 +163,7 @@
         <div class="page-head page-head-row">
           <div>
             <h1>待核实</h1>
-            <p class="page-sub">这些是自动写入时被拦下的记忆，通过后才会进正式记忆。</p>
+            <p class="page-sub">这些是自动写入时被拦下的记忆，通过后才会写进茉莉花记忆。</p>
           </div>
           <button class="btn btn-danger" id="pendRejectAll" type="button" disabled>全部丢弃</button>
         </div>
@@ -158,30 +199,23 @@
       <section class="page" data-page="budget" hidden>
         <div class="page-head">
           <h1>预算</h1>
-          <p class="page-sub">每日积分上限与实际用量。改动额度请到「执行块 → 积分限制」。</p>
+          <p class="page-sub">每日积分上限与实际用量。可在下方直接调整，修改后立即生效。</p>
         </div>
         <div class="card-grid" id="budgetCards"></div>
+        <div class="card card-block" id="budgetEditor"></div>
       </section>
 
-      <!-- 干活 -->
+      <!-- DSH 专属工作流：控制台不复制任务执行器 -->
       <section class="page" data-page="work" hidden>
-        <div class="page-head">
-          <h1>干活</h1>
-          <p class="page-sub">工作总线、研究开关与学习器。快捷动作与「执行块」共用同一套接口。</p>
-        </div>
+        <div class="page-head"><h1>任务与研究</h1><p class="page-sub">任务、研究、插件开发与运行记录统一在 DSH 中管理。这里不再提供第二套执行器。</p></div>
         <div class="card-grid" id="workCards"></div>
-        <div class="card card-block">
-          <h2 class="card-title">快捷执行</h2>
-          <div class="field">
-            <label class="field-label" for="workTask">指令内容</label>
-            <input class="input" id="workTask" type="text" placeholder="例如：总结一下今天群里的讨论" autocomplete="off">
-          </div>
-          <div class="row-actions">
-            <button class="btn btn-primary" id="workProbe" type="button">探活</button>
-            <button class="btn btn-ghost" id="workRun" type="button">跑一条指令</button>
-            <button class="btn btn-ghost" id="workResearch" type="button">研究测试</button>
-          </div>
-          <div class="action-result" id="workOut" hidden></div>
+        <div class="card card-block dsh-handoff">
+          <span class="eyebrow">DEEPSEEK HARNESS</span>
+          <h2>把复杂工作交给工作台</h2>
+          <p>在 DSH 中可以分步骤执行、跟踪进度、恢复会话；插件工坊则负责草稿、隔离测试与打包。测试和打包不等于安装或启用插件。</p>
+          <div class="row-actions"><a class="btn btn-primary" id="dshWorkspaceLink" href="http://127.0.0.1:8816" target="_blank" rel="noopener">打开 DSH 工作台 ↗</a><a class="btn btn-ghost" href="#/overview">返回 Molly 总览</a></div>
+          <p class="muted" id="dshWorkspaceHint">DSH 的网页版只认它自己打印的授权地址；在 Molly 桌面应用里点上面的按钮会把已经打开的 DSH 窗口提到最前。</p>
+          <p class="muted">Molly 的 QQ 回复、记忆和表情仍在这里管理；DSH 离线不会影响本地控制台。</p>
         </div>
       </section>
 
@@ -322,7 +356,7 @@
       <section class="page" data-page="exec" hidden>
         <div class="page-head">
           <h1>执行块</h1>
-          <p class="page-sub">契约 §4.2 的 14 个动作。红色按钮会重启进程或改写配置，执行前会二次确认并写明后果。</p>
+          <p class="page-sub">QQ、守护与插件的 11 个高级动作。任务和研究请到 DSH；危险动作仍需确认。</p>
         </div>
         <div class="action-grid" id="actionGrid"></div>
       </section>
@@ -331,9 +365,20 @@
       <section class="page" data-page="settings" hidden>
         <div class="page-head">
           <h1>设置</h1>
-          <p class="page-sub">连接信息与诊断。这里只读，真正的开关都在「执行块」。</p>
+          <p class="page-sub">作息、连接信息与诊断。运行故障可在「自动守护」或「进程与日志」处理。</p>
         </div>
         <div class="card-grid" id="setCards"></div>
+        <div class="card card-block appearance-card">
+          <h2 class="card-title">外观</h2>
+          <p class="card-sub">为控制台选一种安静的颜色。主题和磨砂只保存在这台电脑上，不影响 Molly 的运行。</p>
+          <div class="theme-options" id="themeOptions" role="radiogroup" aria-label="主题颜色">
+            <button class="theme-option" type="button" data-theme="forest" role="radio" aria-checked="false"><i style="--swatch:#294f3e"></i><span>墨绿<small>自然、专注</small></span></button>
+            <button class="theme-option" type="button" data-theme="indigo" role="radio" aria-checked="false"><i style="--swatch:#475569"></i><span>雾蓝<small>清爽、理性</small></span></button>
+            <button class="theme-option" type="button" data-theme="clay" role="radio" aria-checked="false"><i style="--swatch:#895849"></i><span>陶土<small>温暖、柔和</small></span></button>
+            <button class="theme-option" type="button" data-theme="plum" role="radio" aria-checked="false"><i style="--swatch:#6c516f"></i><span>烟紫<small>内敛、细腻</small></span></button>
+          </div>
+          <label class="glass-setting" for="glassEnabled"><span><b>导航与顶栏磨砂</b><small>轻微透出背景，正文保持清晰；低性能设备可关闭。</small></span><input type="checkbox" id="glassEnabled"><i aria-hidden="true"></i></label>
+        </div>
         <div class="card card-block" id="sleepCard">
           <h2 class="card-title">作息时间（北京时间）</h2>
           <p class="card-sub">这段时间里她在睡觉：群里不掺和，私聊/@ 被叫醒才会短回一句。时间按北京时间算，改完立即生效（不用重启）。</p>
@@ -355,16 +400,104 @@
           </div>
         </div>
         <div class="card card-block">
-          <h2 class="card-title">后端切换（回滚备注）</h2>
-          <p class="card-sub">QQ 后端由 <span class="mono">${MOLLY_ROOT}\qq-whale\watchdog-config.json</span> 的 <span class="mono">backend</span> 决定：默认 <b>SnowLuma</b>；历史回滚后端的名字是 <b>NapCat</b>。切换属于运维操作，不在这里改。</p>
-          <p class="card-sub">正常部署不用关心 NapCat，只有回滚时才会用到它；控制台其余页面都只显示「QQ」。</p>
-        </div>
-        <div class="card card-block">
           <h2 class="card-title">诊断</h2>
-          <p class="card-sub">把当前 overview / memory / stickers 的原始 JSON 复制走，方便贴给 Molly 排查。</p>
+          <p class="card-sub">把当前运行数据（总览 / 记忆 / 表情包）的原始信息复制走，方便排查问题时贴给 Molly。</p>
           <div class="row-actions">
             <button class="btn btn-primary" id="setCopyDiag" type="button">复制诊断信息</button>
             <button class="btn btn-ghost" id="setOpenLogs" type="button">打开日志抽屉</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 关于 -->
+      <section class="page" data-page="about" id="aboutPage" hidden>
+        <div class="about-grid">
+          <div class="about-col">
+            <article class="card about-hero">
+              <div class="about-mark" aria-hidden="true">M</div>
+              <div class="about-hero-main">
+                <h1 class="about-name">Molly</h1>
+                <p class="about-sub">她的控制台 · 本地 QQ 智能体的记忆、发言与守护</p>
+                <div class="about-pills" id="aboutPills">
+                  <span class="pill pill-idle"><i class="dot"></i>v1.1.7-preview.1</span>
+                  <span class="pill pill-idle"><i class="dot"></i>构建 —</span>
+                  <span class="pill pill-idle"><i class="dot"></i>127.0.0.1:19392</span>
+                  <span class="pill pill-idle"><i class="dot"></i>浏览器</span>
+                </div>
+                <p class="about-note">数据都在本机；DSH 关掉不影响这里的记忆、表情与守护。</p>
+              </div>
+            </article>
+
+            <article class="card">
+              <div class="about-card-head">
+                <h2 class="card-title">检查更新</h2>
+                <button class="btn btn-ghost btn-sm" id="aboutCheck" type="button">检查更新</button>
+              </div>
+              <div id="aboutUpdateKv">
+                <div class="kv"><span class="kv-k">当前版本</span><span class="kv-v">—</span></div>
+                <div class="kv"><span class="kv-k">服务端构建</span><span class="kv-v">—</span></div>
+              </div>
+              <p class="about-status" id="aboutStatus">还没检查过</p>
+              <div class="about-chg-row">
+                <button class="about-link" id="aboutChgToggle" type="button" aria-expanded="false" aria-controls="aboutChg">更新日志</button>
+                <span class="about-hint">最近更新</span>
+              </div>
+              <div class="about-chg" id="aboutChg" hidden></div>
+            </article>
+
+            <article class="card">
+              <h2 class="card-title">数据与连接</h2>
+              <div id="aboutFacts">
+                <div class="kv"><span class="kv-k">Jasmine 记忆</span><span class="kv-v">—</span></div>
+              </div>
+            </article>
+          </div>
+
+          <div class="about-col">
+            <article class="card">
+              <h2 class="card-title">开发者与联系</h2>
+              <div class="about-rows">
+                <div class="about-row">
+                  <span class="about-row-icon" aria-hidden="true">◎</span>
+                  <div class="about-row-main">
+                    <div class="about-row-title">论坛帖</div>
+                    <div class="about-row-sub mono">dsh-online-time 0.1.3</div>
+                  </div>
+                  <a class="about-row-act" href="https://example.asia/dsh/forum/35" target="_blank" rel="noopener noreferrer">打开 ↗</a>
+                </div>
+                <div class="about-row">
+                  <span class="about-row-icon" aria-hidden="true">◫</span>
+                  <div class="about-row-main">
+                    <div class="about-row-title">项目目录</div>
+                    <div class="about-row-sub mono">${MOLLY_ROOT}\qq-whale</div>
+                  </div>
+                  <button class="btn btn-ghost btn-sm" type="button" data-copy="${MOLLY_ROOT}\qq-whale">复制</button>
+                </div>
+                <div class="about-row">
+                  <span class="about-row-icon" aria-hidden="true">◇</span>
+                  <div class="about-row-main">
+                    <div class="about-row-title">排障文档</div>
+                    <div class="about-row-sub mono">docs\desktop-app.md</div>
+                  </div>
+                  <button class="btn btn-ghost btn-sm" type="button" data-copy="${MOLLY_ROOT}\qq-whale\docs\desktop-app.md">复制</button>
+                </div>
+                <div class="about-row">
+                  <span class="about-row-icon" aria-hidden="true">↻</span>
+                  <div class="about-row-main">
+                    <div class="about-row-title">恢复入口</div>
+                    <div class="about-row-sub mono">start-dsh.ps1</div>
+                  </div>
+                  <button class="btn btn-ghost btn-sm" type="button" data-copy="${MOLLY_ROOT}\qq-whale\tools\start-dsh.ps1">复制</button>
+                </div>
+              </div>
+            </article>
+
+            <article class="card">
+              <h2 class="card-title">版本与许可</h2>
+              <div id="aboutMeta">
+                <div class="kv"><span class="kv-k">许可</span><span class="kv-v">私有自用</span></div>
+              </div>
+            </article>
           </div>
         </div>
       </section>
@@ -392,7 +525,7 @@
 </div>
 
 <!-- 右下角浮动日志抽屉 -->
-<button class="btn log-fab" id="logFab" type="button">日志</button>
+<button class="btn log-fab" id="logFab" type="button"><span aria-hidden="true">≡</span> 查看日志</button>
 <aside class="drawer" id="drawer" hidden aria-label="日志">
   <div class="drawer-head">
     <strong class="drawer-title">日志</strong>
@@ -446,6 +579,14 @@
       <button class="btn btn-ghost" id="confirmCancel" type="button">取消</button>
       <button class="btn btn-danger" id="confirmOk" type="button">确认执行</button>
     </div>
+  </div>
+</div>
+
+<div class="modal" id="commandModal" hidden role="dialog" aria-modal="true" aria-labelledby="commandTitle">
+  <div class="modal-card command-card">
+    <div class="command-search"><span aria-hidden="true">⌕</span><input id="commandInput" class="input" type="search" placeholder="搜索：记忆、连接、预算、日志…" autocomplete="off" aria-label="搜索功能"><button class="btn btn-ghost btn-sm" id="commandClose" type="button" aria-label="关闭">Esc</button></div>
+    <div class="command-results" id="commandResults" role="listbox" aria-label="功能搜索结果"></div>
+    <div class="command-hint">输入名称或用途查找功能 · ↑↓ 选择 · 回车打开或执行</div>
   </div>
 </div>
 

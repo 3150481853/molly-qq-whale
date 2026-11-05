@@ -3854,8 +3854,21 @@ export class ChatEngine {
 
   async maybeSing({ ev, scene, text }) {
     if (this.config.singingEnabled === false) return false
-    if (scene !== SCENE_PRIVATE && scene !== SCENE_MENTION) return false
-    const raw = String(text || '').replace(/^(?:@我|@全体成员)\s*/u, '').trim()
+    /*
+     * 2026-11-05 主人 m05040：群里手打「@Molly 唱歌 无人之岛」时，OneBot 消息里根本没有 at 段
+     * （整条只是一个普通 text），scene 就是普通群聊，会被下面那行直接挡掉：请求落到聊天链路，
+     * 模型只能嘴上答应「行，等我去扒」，而这句又被 maybeVoice（voiceChance）随机读成三四秒语音
+     * —— 用户看到的就是「先读四秒，之后才正常」（其实根本没唱）。
+     * 所以这里认两种「冲我来的」：真 at（SCENE_MENTION / 私聊），以及手打的 @昵称。
+     */
+    const textStr = String(text || '').trim()
+    const handAt = /^(?:@|＠)\s*(?:molly|茉莉|莫莉|小鱼|小莫|小茉莉)/iu.test(textStr)
+    if (scene !== SCENE_PRIVATE && scene !== SCENE_MENTION && !handAt) return false
+    const raw = textStr
+      .replace(/^(?:@我|@全体成员)\s*/u, '')
+      .replace(/^(?:@|＠)\s*(?:molly|茉莉|莫莉|小鱼|小莫|小茉莉)[\s,，:：、]*/iu, '')
+      .trim()
+    if (!raw) return false
     // 上一句我问过「网易云还是 B 站」/「要哪个版本」，这条就是回答 → 接着唱
     if (await this.answerSingPending({ ev, scene, text: raw })) return true
     const req = parseSingRequest(raw)
@@ -3924,11 +3937,13 @@ export class ChatEngine {
     }
     // 2026-10-31：出片上限从 55 秒提到 110 秒后，一整首要跑 2~4 分钟（分离+RVC+混音），
     // 原来的「一两分钟」会让人以为卡住了，改成「两三分钟」。
+    // 2026-11-05 主人 m05040：实测 110 秒那首从发起到出片 6 分钟（10:55:18 → 11:01:45），
+    // 预告里还说「两三分钟」等于骗人，改口「五六分钟」。
     // 主人点歌时若指名了平台（「去网易云」「b站」），预告里也照着说，别骗人。
     const wantNz = /网易云|网易|云音乐|云村|网抑云/i.test(q)
     const where = wantNz ? '网易云' : 'B 站'
     const cleanQ = q.replace(/^(?:去|上|在|从|用)?\s*(?:网易云|网易|云音乐|云村|网抑云|b\s*站|哔哩哔哩|bilibili|破站)\s*/i, '').trim() || q
-    await this.sayQuick(ev, scene, `《${cleanQ}》？行，等我去 ${where} 扒一段回来，两三分钟，别催。`)
+    await this.sayQuick(ev, scene, `《${cleanQ}》？行，等我去 ${where} 扒一段回来，五六分钟，别催。`)
     let res = null
     try {
       res = await this.biliSinger.sing(q, { bv })

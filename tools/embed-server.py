@@ -44,7 +44,51 @@ _state = {
     "last": time.time(),
     "lock": threading.Lock(),
     "hits": 0,  # 累计服务次数，用来在 /health 里判断「插件到底有没有在调我」
+    # —— 2026-11-03 起给控制台留的口子（主人说「后期想优化控制台界面，正好能接进去」）
+    # /stats 直接读这些数，控制台不需要解析日志文件；日志文件只是给人事后翻的。
+    "started_at": time.time(),
+    "embed_calls": 0,
+    "embed_items": 0,
+    "embed_ms": 0,
+    "embed_max_ms": 0,
+    "rerank_calls": 0,
+    "rerank_items": 0,
+    "rerank_ms": 0,
+    "rerank_max_ms": 0,
+    "last_kind": "",
+    "last_ms": 0,
+    "last_q": "",
+    "errors": 0,
+    "recent": [],  # 最近 20 次调用，给控制台做「最近调用」列表
 }
+
+RECENT_MAX = 20
+LOG_PATH = ""  # 由 --log 设定；空表示只打 stdout
+
+
+def log_event(kind, **fields):
+    """记一条结构化日志：写文件（JSONL）+ 留在内存里给 /stats。
+
+    为什么不是纯文本：控制台要把它渲染成表格（谁在调、多少次、多慢），
+    JSONL 一行一个事件，前端直接 JSON.parse 就行，不用再写解析器。
+    """
+    now = time.time()
+    evt = {"at": int(now * 1000), "kind": kind}
+    evt.update(fields)
+    recent = _state["recent"]
+    recent.append(evt)
+    if len(recent) > RECENT_MAX:
+        del recent[0:len(recent) - RECENT_MAX]
+    if not LOG_PATH:
+        return
+    try:
+        # 简单轮转：单文件过 8MB 就换 .1（日志只是观测，不追求无损）
+        if os.path.exists(LOG_PATH) and os.path.getsize(LOG_PATH) > 8 * 1024 * 1024:
+            os.replace(LOG_PATH, LOG_PATH + ".1")
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(evt, ensure_ascii=False) + "\n")
+    except Exception:  # noqa: BLE001
+        pass  # 日志写不进去绝不能影响推理
 
 
 def load_embed(path):
@@ -132,6 +176,35 @@ class Handler(BaseHTTPRequestHandler):
                 "rerank": bool(_state["rerank"]),
                 "idle_exit_min": IDLE_EXIT_MIN,
                 "hits": _state.get("hits", 0),
+                "uptime_s": int(time.time() - _state["started_at"]),
+            })
+        elif self.path.startswith("/stats"):
+            # 给控制台的一次性快照：不需要它去 tail 日志文件
+            self._send(200, {
+                "ok": True,
+                "uptime_s": int(time.time() - _state["started_at"]),
+                "hits": _state["hits"],
+                "embed": {
+                    "calls": _state["embed_calls"],
+                    "items": _state["embed_items"],
+                    "ms_avg": round(_state["embed_ms"] / max(1, _state["embed_calls"]), 1),
+                    "ms_max": _state["embed_max_ms"],
+                },
+                "rerank": {
+                    "calls": _state["rerank_calls"],
+                    "items": _state["rerank_items"],
+                    "ms_avg": round(_state["rerank_ms"] / max(1, _state["rerank_calls"]), 1),
+                    "ms_max": _state["rerank_max_ms"],
+                },
+                "errors": _state["errors"],
+                "last": {
+                    "kind": _state["last_kind"],
+                    "ms": _state["last_ms"],
+                    "query": _state["last_q"],
+                },
+                "recent": _state["recent"][-10:],
+                "log_file": LOG_PATH,
+                "models": _state.get("models_dir", ""),
             })
         else:
             self._send(404, {"ok": False, "error": "not found"})
@@ -157,7 +230,17 @@ class Handler(BaseHTTPRequestHandler):
                     vecs = embed(texts, bool(body.get("query")))
                 _state["hits"] += 1
                 _state["last"] = time.time()
-                print(f"[embed] n={len(texts)} q={bool(body.get('query'))} {int((time.time() - _t0) * 1000)}ms", flush=True)
+                _ms = int((time.time() - _t0) * 1000)
+                _state["embed_calls"] += 1
+                _state["embed_items"] += len(texts)
+                _state["embed_ms"] += _ms
+                _state["embed_max_ms"] = max(_state["embed_max_ms"], _ms)
+                _state["last_kind"] = "embed"
+                _state["last_ms"] = _ms
+                _state["last_q"] = (texts[0][:40] if texts else "")
+                log_event("embed", n=len(texts), ms=_ms, query=bool(body.get("query")),
+                          head=(texts[0][:40] if texts else ""))
+                print(f"[embed] n={len(texts)} q={bool(body.get('query'))} {_ms}ms", flush=True)
                 self._send(200, {"vectors": vecs, "dim": len(vecs[0]) if vecs else 0})
             elif self.path.startswith("/rerank"):
                 if not _state["rerank"]:
@@ -172,11 +255,22 @@ class Handler(BaseHTTPRequestHandler):
                     scores = rerank(query, texts)
                 _state["hits"] += 1
                 _state["last"] = time.time()
-                print(f"[rerank] n={len(texts)} {int((time.time() - _t0) * 1000)}ms q={query[:30]}", flush=True)
+                _ms = int((time.time() - _t0) * 1000)
+                _state["rerank_calls"] += 1
+                _state["rerank_items"] += len(texts)
+                _state["rerank_ms"] += _ms
+                _state["rerank_max_ms"] = max(_state["rerank_max_ms"], _ms)
+                _state["last_kind"] = "rerank"
+                _state["last_ms"] = _ms
+                _state["last_q"] = query[:40]
+                log_event("rerank", n=len(texts), ms=_ms, query=query[:40])
+                print(f"[rerank] n={len(texts)} {_ms}ms q={query[:30]}", flush=True)
                 self._send(200, {"scores": scores})
             else:
                 self._send(404, {"ok": False, "error": "not found"})
         except Exception as exc:  # noqa: BLE001
+            _state["errors"] += 1
+            log_event("error", path=self.path, error=f"{type(exc).__name__}: {exc}")
             self._send(500, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
 
 
@@ -189,8 +283,16 @@ def idle_watchdog(server):
             return
 
 
+def port_in_use(host, port):
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        return s.connect_ex((host, port)) == 0
+
+
 def main():
-    global IDLE_EXIT_MIN
+    global IDLE_EXIT_MIN, LOG_PATH
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8791)
     ap.add_argument("--host", default="127.0.0.1")
@@ -199,8 +301,20 @@ def main():
     ap.add_argument("--rerank-name", default="bge-reranker-base")
     ap.add_argument("--idle-exit-min", type=int, default=30)
     ap.add_argument("--no-rerank", action="store_true")
+    # 2026-11-03 主人要接控制台：日志默认落到数据目录，JSONL 一行一个事件
+    ap.add_argument("--log", default=r"${MOLLY_ROOT}\data\qq-whale\embed-server.log.jsonl")
     args = ap.parse_args()
     IDLE_EXIT_MIN = args.idle_exit_min
+    LOG_PATH = args.log or ""
+    _state["models_dir"] = args.models
+
+    # 2026-11-03 多开守卫：插件的 ensure() 每次启动都会 spawn 一次，而
+    # ThreadingHTTPServer 默认 allow_reuse_address 在 Windows 上等于 SO_REUSEADDR，
+    # 第二个实例也能 bind 成功 —— 于是两份模型（1.2GB 内存）常驻，还会多出控制台窗口。
+    # 所以先探测端口：已经有人应答就立刻退出，连模型都不加载。
+    if port_in_use(args.host, args.port):
+        print(f"[serve] {args.host}:{args.port} 已有实例在跑，本次退出", flush=True)
+        return
 
     _state["embed"] = load_embed(os.path.join(args.models, args.embed_name))
     if not args.no_rerank:
@@ -208,11 +322,15 @@ def main():
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"[serve] http://{args.host}:{args.port} 就绪", flush=True)
+    log_event("boot", port=args.port, models=args.models,
+              embed=args.embed_name, rerank=(not args.no_rerank),
+              idle_exit_min=IDLE_EXIT_MIN, pid=os.getpid())
     threading.Thread(target=idle_watchdog, args=(server,), daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+    log_event("stop", pid=os.getpid(), hits=_state["hits"])
 
 
 IDLE_EXIT_MIN = 30

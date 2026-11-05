@@ -12,8 +12,8 @@
  *
  * 关键限制：SEA 的 main 当前只按 CommonJS 执行（config 里的 mainFormat 会被静默忽略，
  * 实测报 "Cannot use import statement outside a module"）。而 console-server.mjs 是 ESM。
- * 本脚本的处理：把源文件里 5 行 `import ... from 'node:x'` 机械改成 `require('node:x')`，
- * 生成 dist/_build/console-sea.cjs 再打包。**不改动源文件本身**，`node console-server.mjs`
+ * 本脚本的处理：把源文件及本地相对模块的 import/export 机械改成 CJS，
+ * 生成 dist/_build/console-sea.cjs 及同路径模块再打包。**不改动源文件本身**，`node console-server.mjs`
  * 仍按 ESM 跑；转换后若出现残留的 ESM 语法会直接报错退出，不会悄悄打出一个坏 exe。
  *
  * 用法：
@@ -82,11 +82,13 @@ function toCjs(srcPath) {
   text = text.replace(/^#![^\n]*\n/, '');
 
   const converted = [];
+  const local = [];
   // import x from 'm'  →  const x = require('m')
   text = text.replace(
     /^import\s+([A-Za-z_$][\w$]*)\s+from\s+['"]([^'"]+)['"];?[ \t]*$/gm,
     (m, name, mod) => {
       converted.push(`${name} <- ${mod}`);
+      if (mod.startsWith('.')) local.push(mod);
       return `const ${name} = require('${mod}');`;
     },
   );
@@ -101,6 +103,11 @@ function toCjs(srcPath) {
         .map((s) => s.replace(/\s+as\s+/, ': '))
         .join(', ');
       converted.push(`{${list}} <- ${mod}`);
+      if (mod.startsWith('.')) {
+        local.push(mod);
+        const key = path.basename(mod).replace(/\.mjs$/, '.cjs');
+        return `const { ${list} } = loadLocalAsset('${key}');`;
+      }
       return `const { ${list} } = require('${mod}');`;
     },
   );
@@ -112,6 +119,24 @@ function toCjs(srcPath) {
       return `const ${ns} = require('${mod}');`;
     },
   );
+
+  // 命名导出（当前本地模块只有命名函数；default/重导出不在白名单，遇新形式直接失败）
+  text = text.replace(
+    /^export\s+function\s+([A-Za-z_$][\w$]*)\s*\(/gm,
+    (m, name) => { converted.push(`export ${name}`); return `function ${name}(`; },
+  );
+  text = text.replace(
+    /^export\s+class\s+([A-Za-z_$][\w$]*)\s*\{/gm,
+    (m, name) => { converted.push(`export ${name}`); return `class ${name} {`; },
+  );
+  text = text.replace(
+    /^export\s+(const|let|var)\s+([A-Za-z_$][\w$]*)/gm,
+    (m, kind, name) => { converted.push(`export ${name}`); return `${kind} ${name}`; },
+  );
+  if (converted.some(s => s.startsWith('export '))) {
+    const names = converted.filter(s => s.startsWith('export ')).map(s => s.slice(7));
+    text += `\nmodule.exports = { ${names.join(', ')} };\n`;
+  }
 
   // 兜底：任何残留的 ESM 语法都视为转换失败
   const leftovers = [];
@@ -131,8 +156,11 @@ function toCjs(srcPath) {
 
   const header =
     '/* 由 tools/build-exe.mjs 生成，勿手改。源：tools/console-server.mjs（ESM）*/\n' +
-    `/* 转换的 import：${converted.join(' | ')} */\n`;
-  return header + text;
+    `/* 转换的 import：${converted.join(' | ')} */\n` +
+    (srcPath === SRC && local.length
+      ? "const loadLocalAsset = (key) => { const m = { exports: {} }; new Function('module', 'exports', 'require', require('node:sea').getAsset(key, 'utf8'))(m, m.exports, require); return m.exports; };\n"
+      : '');
+  return { code: header + text, local };
 }
 
 // ── 2. 取 postject（无 npm 也能用）──────────────────────────────────────────
@@ -207,8 +235,18 @@ async function main() {
   // 3.1 ESM → CJS
   const cjsPath = path.join(BUILD, 'console-sea.cjs');
   const cjs = toCjs(SRC);
-  fs.writeFileSync(cjsPath, cjs, 'utf8');
-  log(`[build] 已生成 CJS 入口 ${path.basename(cjsPath)}（${(cjs.length / 1024).toFixed(1)} KB）`);
+  fs.writeFileSync(cjsPath, cjs.code, 'utf8');
+  for (const specifier of cjs.local) {
+    const source = path.resolve(HERE, specifier);
+    if (path.extname(source) !== '.mjs') die('仅支持已审计的 .mjs 本地模块：' + specifier);
+    const output = path.join(BUILD, specifier);
+    const converted = toCjs(source);
+    if (converted.local.length) die('本地模块不支持嵌套相对依赖，请扩展构建白名单：' + specifier);
+    fs.mkdirSync(path.dirname(output), { recursive: true });
+    fs.writeFileSync(output, converted.code, 'utf8');
+    log(`[build] 内联本地模块 ${specifier}`);
+  }
+  log(`[build] 已生成 CJS 入口 ${path.basename(cjsPath)}（${(cjs.code.length / 1024).toFixed(1)} KB）`);
 
   // 3.2 语法自检 —— 转换出来的东西必须是合法 JS，否则后面注入完才发现就晚了
   const chk = spawnSync(process.execPath, ['--check', cjsPath], { encoding: 'utf8' });
@@ -219,12 +257,19 @@ async function main() {
   // 3.3 生成 SEA blob
   const seaCfg = path.join(BUILD, 'sea-config.json');
   const blobPath = path.join(BUILD, 'sea-prep.blob');
+  const assets = {};
+  for (const specifier of cjs.local) {
+    const key = path.basename(specifier).replace(/\.mjs$/, '.cjs');
+    assets[key] = path.join(BUILD, specifier);
+  }
   fs.writeFileSync(
     seaCfg,
     JSON.stringify(
       {
         main: cjsPath,
         output: blobPath,
+        assets,
+        useCodeCache: false,
         disableExperimentalSEAWarning: true,
         // 静态资源不内联：exe 运行时按 MOLLY_CONSOLE_DIR 读目录，
         // 这样改 console.js 不用重新打包（deploy.md 有说明）。

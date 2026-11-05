@@ -69,7 +69,8 @@ export function songNames() {
 export function parseSingRequest(text) {
   const raw = String(text || '').replace(/\s+/g, ' ').trim()
   if (!raw) return null
-  const m = /^(?:麻烦|请|给我|快)?\s*(?:唱歌|唱一首|唱一个|唱个|唱一段|来一首|来一个|来段|唱)\s*([\s\S]*)$/u.exec(raw)
+  // 2026-11-05 主人 m05040：「点歌 无人之岛」「唱一下 无人之岛」也得认，否则进不了点歌。
+  const m = /^(?:麻烦|请|给我|快)?\s*(?:唱歌|点歌|唱一首|唱一下|唱一遍|唱一个|唱个|唱一段|来一首|来一个|来段|唱)\s*([\s\S]*)$/u.exec(raw)
   if (!m) return null
   /*
    * 2026-10-31 修：「唱歌 一半一半」被吃成「半一半」。
@@ -78,7 +79,7 @@ export function parseSingRequest(text) {
    * 光秃秃的一个「一」保留给歌名。
    */
   const rest = String(m[1] || '')
-    .replace(/^(?:[个]{1}|[一二两]?[首段个次遍])\s*/u, '')
+    .replace(/^(?:[一二两]?[首段个次遍]|一下|一遍|一次|一回)\s*/u, '')
     .replace(/^[了,，。.、\s]+/u, '')
     .replace(/[。！!？?]+$/u, '')
     .trim()
@@ -87,8 +88,9 @@ export function parseSingRequest(text) {
   if (SONGS[songName]) return { song: songName, requested: songName }
   // 名字带了书名号/引号也能认
   const bare = songName.replace(/^[《「『"]+|[》」』"]+$/gu, '').trim()
-  if (SONGS[bare]) return { song: bare, requested: songName }
-  return { song: '', requested: songName }
+  if (SONGS[bare]) return { song: bare, requested: bare }
+  // 2026-11-05：书名号洗掉后要用 bare 去搜歌，否则 B 站会拿「《无人之岛》」当关键词。
+  return { song: '', requested: bare }
 }
 
 /** 歌词 → 逐字（去掉标点/空白；英文数字按单字符保留一个音节）。 */

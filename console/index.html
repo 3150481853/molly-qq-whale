@@ -24,6 +24,7 @@
       <div class="nav-group">
         <div class="nav-group-title">Molly 的日常</div>
         <a class="nav-item" href="#/chats" data-page="chats"><span class="nav-icon" aria-hidden="true">◌</span><span>会话与消息</span></a>
+        <a class="nav-item" href="#/online" data-page="online"><span class="nav-icon" aria-hidden="true">◷</span><span>在线时间</span></a>
         <a class="nav-item" href="#/memory" data-page="memory"><span class="nav-icon" aria-hidden="true">❀</span><span>Jasmine 记忆</span></a>
         <a class="nav-item" href="#/pending" data-page="pending"><span class="nav-icon" aria-hidden="true">✓</span><span>待核实</span><span class="nav-badge" id="pendBadge" hidden>0</span></a>
         <a class="nav-item" href="#/stickers" data-page="stickers"><span class="nav-icon" aria-hidden="true">☺</span><span>表情包</span></a>
@@ -45,6 +46,7 @@
         <div class="nav-group-title">偏好与高级</div>
         <a class="nav-item" href="#/settings" data-page="settings"><span class="nav-icon" aria-hidden="true">⚙</span><span>偏好设置</span></a>
         <a class="nav-item" href="#/about" data-page="about"><span class="nav-icon" aria-hidden="true">ⓘ</span><span>关于</span></a>
+        <a class="nav-item" href="#/feedback" data-page="feedback"><span class="nav-icon" aria-hidden="true">⚑</span><span>问题反馈</span></a>
         <details class="advanced-nav"><summary>高级操作</summary>
           <a class="nav-item nav-sub" href="#/exec" data-page="exec"><span>所有执行块</span></a>
         </details>
@@ -93,6 +95,41 @@
         </div>
         <div class="stat-grid" id="ovStats"></div>
         <div class="card-grid" id="ovCards"></div>
+      </section>
+
+      <!-- 在线时间（2026-11-06）：分天 + 分时，数据只来自 dsh-online-time 插件的采样 -->
+      <section class="page on-page" data-page="online" id="onlinePage" hidden>
+        <div class="page-head">
+          <h1>在线时间</h1>
+          <p class="page-sub">只统计插件自己的采样。采样空档、以及 DSH / QQ 没开着的时段记为「未知」，不算离线。</p>
+        </div>
+        <div class="on-kpis" id="onKpis"></div>
+
+        <div class="card on-card">
+          <div class="on-card-head">
+            <div class="card-title">系统状态</div>
+            <div class="on-range" id="onRange" role="tablist" aria-label="统计范围"></div>
+          </div>
+          <div class="on-days-wrap">
+            <div class="on-days" id="onDays"></div>
+          </div>
+        </div>
+
+        <div class="card on-card">
+          <div class="on-card-head">
+            <div class="card-title">一天里的分布</div>
+            <div class="on-tabs" id="onTabs" role="tablist" aria-label="分时范围"></div>
+          </div>
+          <div class="on-hours" id="onHours"></div>
+          <div class="on-sub-title">一周里的分布</div>
+          <div class="on-heat" id="onHeat"></div>
+        </div>
+
+        <div class="card on-card">
+          <div class="card-title">今天的轨迹</div>
+          <div class="on-timeline" id="onTimeline"></div>
+          <div class="on-sessions" id="onSessions"></div>
+        </div>
       </section>
 
       <!-- 会话与消息 -->
@@ -382,6 +419,7 @@
         <div class="card card-block" id="memCard">
           <h2 class="card-title">储存与占用</h2>
           <p class="card-sub">给别的部署者用：按这台机器的内存调策略，改完立刻写进 <span class="mono">out\mem-config.json</span>。内存宽裕就保持默认——默认值不牺牲任何功能。</p>
+          <label class="glass-setting mem-game" for="memGame"><span><b>游戏模式</b><small>打游戏时打开：语音合成与点歌立刻暂停（这两件最吃显存），顺手把重排卸掉；关掉马上恢复，不用重启。</small></span><input type="checkbox" id="memGame"><i aria-hidden="true"></i></label>
           <div class="mem-table" id="memTable"><div class="mem-item is-muted"><span>正在读取…</span><b>—</b></div></div>
           <div class="row-actions mem-row">
             <label class="mem-field">重排
@@ -535,6 +573,95 @@
                 <div class="kv"><span class="kv-k">许可</span><span class="kv-v">私有自用</span></div>
               </div>
             </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- 问题反馈（2026-11-06）：bot 名称必填，日志可选，提交后本地也留一份 -->
+      <section class="page fb-page" data-page="feedback" id="fbPage" hidden>
+        <div class="page-head">
+          <h1>问题反馈</h1>
+          <p class="page-sub">写清「看到什么、期望什么」，勾上日志；提交后本机留一份存档，能发到论坛就发，发不出去会给你现成的 Markdown 复制粘贴。</p>
+        </div>
+        <div class="fb-grid">
+          <article class="card fb-card">
+            <div class="fb-field">
+              <label class="fb-label" for="fbBot">bot 名称 <em>必填</em></label>
+              <input class="input" id="fbBot" maxlength="60" required aria-required="true" placeholder="比如 Molly / 茉莉花">
+              <span class="fb-hint">同一套插件很多人部署，站长要靠它认出是哪一台。</span>
+            </div>
+            <div class="fb-field">
+              <label class="fb-label" for="fbTitle">一句话标题 <em>必填</em></label>
+              <input class="input" id="fbTitle" maxlength="120" placeholder="比如 在线时间页在 90 天视图下柱状图挤成一条">
+            </div>
+            <div class="fb-duo">
+              <div class="fb-field">
+                <label class="fb-label" for="fbKind">类型</label>
+                <select class="input" id="fbKind">
+                  <option value="bug">功能坏了</option>
+                  <option value="ui">界面 / 显示问题</option>
+                  <option value="perf">卡顿 / 占用高</option>
+                  <option value="docs">文档看不懂</option>
+                  <option value="feature">想要的新功能</option>
+                  <option value="other">其它</option>
+                </select>
+              </div>
+              <div class="fb-field">
+                <label class="fb-label" for="fbAt">发生时间</label>
+                <input class="input" id="fbAt" type="datetime-local">
+              </div>
+            </div>
+            <div class="fb-field">
+              <label class="fb-label" for="fbDesc">发生了什么 <em>必填</em></label>
+              <textarea class="input fb-area" id="fbDesc" rows="5" placeholder="看到的（现象）、期望的（应该怎样）、实际区别"></textarea>
+            </div>
+            <div class="fb-field">
+              <label class="fb-label" for="fbSteps">怎么复现（可选）</label>
+              <textarea class="input fb-area" id="fbSteps" rows="3" placeholder="点了哪、发了什么、第几步开始不对"></textarea>
+            </div>
+            <div class="fb-field">
+              <span class="fb-label">附带日志（会脱敏：QQ 号打码、路径换成 &lt;本机&gt;、token 隐去）</span>
+              <div class="fb-checks" id="fbLogs">
+                <label class="fb-check"><input type="checkbox" value="console" checked> 控制台</label>
+                <label class="fb-check"><input type="checkbox" value="watchdog" checked> 守护</label>
+                <label class="fb-check"><input type="checkbox" value="plugin"> 插件</label>
+              </div>
+            </div>
+            <div class="fb-actions">
+              <button class="btn btn-primary" id="fbSubmit" type="button">提交反馈</button>
+              <span class="fb-status" id="fbStatus">还没提交过</span>
+            </div>
+            <div class="fb-result" id="fbResult" hidden>
+              <div class="fb-result-head">
+                <span id="fbResultTitle">提交结果</span>
+                <span class="fb-result-acts">
+                  <button class="btn btn-ghost btn-sm" id="fbCopy" type="button">复制内容</button>
+                  <button class="btn btn-ghost btn-sm" id="fbOpen" type="button">打开论坛</button>
+                  <button class="btn btn-ghost btn-sm" id="fbIssue" type="button" hidden>去 GitHub 提 issue</button>
+                </span>
+              </div>
+              <textarea class="input fb-md" id="fbMarkdown" rows="10" readonly></textarea>
+            </div>
+          </article>
+          <div class="fb-side">
+<article class="card fb-card fb-history">
+            <div class="fb-history-head">
+              <h2 class="card-title">本机存档</h2>
+              <button class="btn btn-ghost btn-sm" id="fbReload" type="button">重新读取</button>
+            </div>
+            <p class="fb-hint" id="fbDir">—</p>
+            <div class="fb-list" id="fbList"></div>
+          </article>
+          <article class="card fb-card fb-help">
+            <h2 class="card-title">提交之后会怎样</h2>
+            <ol class="fb-steps">
+              <li><b>本机先留一份</b>存档在 <code>&lt;Molly&gt;\qq-whale\out\feedback</code>，断网、论坛挂了都不会丢。</li>
+              <li><b>能发就发</b>：论坛放权后会直接发到帖子里；没放权就把写好的 Markdown 放到下面，一键复制粘过去。</li>
+              <li><b>提醒站长</b>：提交成功会同时给站长推一条消息（配置了推送通道才发）。</li>
+              <li><b>从 GitHub 部署的</b>：帖子发不出去时，结果里会多一个「去 GitHub 提 issue」，标题和正文都替你填好。</li>
+            </ol>
+            <p class="fb-hint">日志会自动脱敏：QQ 号打码、本机路径换成 &lt;本机&gt;、token 一类字段直接隐去。</p>
+          </article>
           </div>
         </div>
       </section>

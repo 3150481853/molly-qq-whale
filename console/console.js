@@ -10,13 +10,14 @@
   var LOG_POLL_MS = 5000;  /* 日志抽屉只在展开时轮询 */
   var PEND_POLL_MS = 15000;   /* 待核实计数：15 秒一次，只走轻量 GET，不动列表 DOM */
   var QR_POLL_MS = 3000;      /* 等待扫码时每 3 秒读一次 overview，扫上就停 */
+  var ONLINE_POLL_MS = 30000; /* 在线时间页：页签可见时 30 秒自刷，与后端缓存对齐 */
   var QR_MAX_AUTO = 3;        /* 过期自动换码最多连换 3 次，之后交回人手，免得无限刷 */
   /* 二维码有效期只是本地展示：约 2 分钟，不假装与 QQ 客户端内部计时精确一致。
      测试里用 window.__QR_TTL_MS__ 缩短，免得等两分钟。 */
   var QR_TTL_MS = (typeof window !== 'undefined' && typeof window.__QR_TTL_MS__ === 'number' && window.__QR_TTL_MS__ > 0)
     ? window.__QR_TTL_MS__
     : 120000;
-  var PAGES = ['overview', 'chats', 'memory', 'pending', 'stickers', 'switches', 'budget', 'work', 'watchdog', 'ops', 'external', 'qq', 'exec', 'settings', 'about'];
+  var PAGES = ['overview', 'chats', 'online', 'memory', 'pending', 'stickers', 'switches', 'budget', 'work', 'watchdog', 'ops', 'external', 'qq', 'exec', 'settings', 'about', 'feedback'];
 
   /* 关于页「检查更新」的基准（2026-11-04）：页面这一份前端文件加载时，服务端在
      index.html 里注入了 window.__MOLLY_BUILD__（tools/console-server.mjs 静态页改写）。
@@ -127,6 +128,9 @@
        按钮和容器都在静态 HTML 里，4 秒轮询只重写数据容器，所以点「检查更新」
        之后焦点不会被重渲染抢走。 */
     about: { checking: false, chg: null, chgError: null, chgTitle: '' },
+    /* 在线时间（2026-11-06）：一次拉 days=30 的统计，切「今天/昨天/近 7 天」只重绘分时区，
+       不再请求；数据最多 60 秒旧一次（spec §3.2）。 */
+    online: { data: null, error: '', at: 0, loading: false, days: 7, tab: 'today' },
     reloading: false   /* 前端版本不一致时只自动 reload 一次 */
   };
 
@@ -138,6 +142,7 @@
   var qrPollTimer = null;    /* 等待扫码的 3 秒轮询 */
   var qrCountTimer = null;   /* 二维码倒计时 */
   var qrGenTimer = null;     /* 生成中的「已等待 N 秒」进度 */
+  var onlineTimer = null;    /* 在线时间页：30 秒自刷 */
 
   /* ---------------- 基础工具 ---------------- */
 
@@ -586,9 +591,17 @@
 
     var molly = $('#pillMolly');
     if (molly) {
-      if (!p.reachable) {
+      /* 读超时 ≠ 掉线：宿主在跑模型/写记忆时 /state 会慢 3~5 秒，
+         后端已把「45 秒内曾在线」记成 qq.stale，这里跟着降级成「读取超时」。 */
+      var qqForPill = qqStatus(ov);
+      if (!p.reachable && qqForPill && qqForPill.stale) {
+        molly.className = 'pill pill-warn';
+        molly.innerHTML = '<i class="dot"></i>Molly 在线（读取超时）';
+        molly.title = '宿主这会儿在跑模型或写记忆，读数慢了一点，不是掉线。';
+      } else if (!p.reachable) {
         molly.className = 'pill pill-idle';
         molly.innerHTML = '<i class="dot"></i>插件不可达';
+        molly.title = '';
       } else if (p.link && p.link.ready) {
         molly.className = 'pill pill-ok';
         molly.innerHTML = '<i class="dot"></i>Molly 在线';
@@ -3349,7 +3362,7 @@
         /* 触发重启后最多等 60 秒：别让「等待中」无限转下去 */
         if (lg.triggered && lg.triggeredAt && Date.now() - lg.triggeredAt > 60_000) {
           lg.triggered = false;
-          lg.hint = '还没等到 QQ 登录。看「运维」页的 SnowLuma 启动/运行日志（G:\\Molly\\qq-whale\\out\\snowluma-boot.log、snowluma-runtime.out.log），也可以去「守护」检查插件连接。';
+          lg.hint = '还没等到 QQ 登录。看「运维」页的 SnowLuma 启动/运行日志（qq-whale\\out\\snowluma-boot.log、snowluma-runtime.out.log），也可以去「守护」检查插件连接。';
           stopLoginPoll();
         }
         safe(renderLogin);
@@ -4538,18 +4551,46 @@
       });
   }
 
+  /* 「刷新」按钮以前只 poll() 一下 overview，页内数据（在线时间、待核实、表情包…）
+     根本不动，主人点了以为坏了。现在按当前页把该页的数据源强制重拉。 */
+  function reloadPageData(notify) {
+    poll();
+    var p = state.page;
+    if (p === 'online') loadOnline(true);
+    else if (p === 'memory') { loadMemory(true); loadMemoryReadOnly(); }
+    else if (p === 'pending') loadPending(true);
+    else if (p === 'stickers') loadStickers(true);
+    else if (p === 'switches') loadSwitches();
+    else if (p === 'ops') { loadOpsHeartbeat(); if ($('#opsLogBody')) loadOpsLogs(); }
+    else if (p === 'external') loadExternal();
+    else if (p === 'qq') enterLoginPage();
+    else if (p === 'settings') refreshSleep();
+    else if (p === 'about') loadHealth();
+    else if (p === 'feedback') loadFeedback(true);
+    if (notify) toast('已刷新当前页');
+  }
+
   function startTimers() {
     stopTimers();
     pollTimer = setInterval(poll, POLL_MS);
     tickTimer = setInterval(function () { safe(updateLinkPill); }, 1000);
     /* 待核实计数单独一条慢轮询：它只在需要时读一遍，不跟 4 秒的 overview 绑在一起 */
     pendTimer = setInterval(function () { safe(pollPending); }, PEND_POLL_MS);
+    /* 在线时间：停在那一页时才每 30 秒自己拉一次（后端也有 30 秒缓存），
+       切走就停，别在后台白打插件。 */
+    onlineTimer = setInterval(function () {
+      if (state.page !== 'online') return;
+      if (document.visibilityState !== 'visible') return;
+      if (state.online && state.online.loading) return;
+      loadOnline(true);
+    }, ONLINE_POLL_MS);
   }
 
   function stopTimers() {
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
     if (pendTimer) { clearInterval(pendTimer); pendTimer = null; }
+    if (onlineTimer) { clearInterval(onlineTimer); onlineTimer = null; }
   }
 
   /* ---------------- 运维 / 外部服务（task-58） ----------------
@@ -5428,6 +5469,246 @@
     });
   }
 
+  /* ---------------- 问题反馈（2026-11-06，主人 m08871） ----------------
+     一页做完三件事：填表 → 本机落盘 → 尽力发到论坛。
+     站长还没放权匿名提交时，后端回 forumError，这里把可粘贴的 Markdown 摆出来，
+     主人自己贴一次就行；等论坛开了匿名口子，同一张表直接成帖，前端一行都不用改。
+     动作：feedback/meta（探活 + 读配置）、feedback/submit（落盘 + 提交 + 推送）、feedback/list（本机存档）。 */
+
+  var fbState = { meta: null, list: [], dir: '', error: '', loading: false, busy: false, at: 0 };
+
+  function fbPad2(n) { return (n < 10 ? '0' : '') + n; }
+
+  /* datetime-local 要的是 2026-11-06T23:05，不是 ISO 的带 Z 那种 */
+  function fbNowLocal() {
+    var d = new Date();
+    return d.getFullYear() + '-' + fbPad2(d.getMonth() + 1) + '-' + fbPad2(d.getDate()) +
+      'T' + fbPad2(d.getHours()) + ':' + fbPad2(d.getMinutes());
+  }
+
+  function fbFmtAt(v) {
+    if (!v) return '—';
+    var d = asDate(v);
+    if (!d) return String(v).slice(0, 16);
+    return (d.getMonth() + 1) + '-' + fbPad2(d.getDate()) + ' ' + fbPad2(d.getHours()) + ':' + fbPad2(d.getMinutes());
+  }
+
+  /* bot 名称只存在本机：同一台机器反复提反馈不用每次重打 */
+  function fbSavedBot() {
+    try { return localStorage.getItem('molly-fb-bot') || ''; } catch (e) { return ''; }
+  }
+
+  function fbRememberBot(name) {
+    try { if (name) localStorage.setItem('molly-fb-bot', name); } catch (e) { /* 隐私模式下写不进去，无所谓 */ }
+  }
+
+  function fbSetStatus(text, kind) {
+    var el = $('#fbStatus');
+    if (!el) return;
+    el.textContent = text || '';
+    el.className = 'fb-status' + (kind ? ' is-' + kind : '');
+  }
+
+  function fbCheckedLogs() {
+    var out = [];
+    $$('#fbLogs input[type="checkbox"]').forEach(function (c) { if (c.checked) out.push(c.value); });
+    return out;
+  }
+
+  function fbSizeText(n) {
+    var b = Number(n) || 0;
+    if (b < 1024) return b + ' B';
+    if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+    return (b / 1048576).toFixed(1) + ' MB';
+  }
+
+  function fbRenderList() {
+    var box = $('#fbList');
+    if (!box) return;
+    var dir = $('#fbDir');
+    if (dir) {
+      if (fbState.dir) dir.textContent = '存档目录：' + fbState.dir;
+      else if (fbState.error) dir.textContent = '读不到后端：' + fbState.error;
+      else dir.textContent = fbState.loading ? '读取中…' : '—';
+    }
+    if (!fbState.list.length) {
+      box.innerHTML = '<div class="fb-empty">' + (fbState.loading ? '读取中…' : '还没有提交过的反馈。') + '</div>';
+      return;
+    }
+    box.innerHTML = fbState.list.map(function (it) {
+      return '<button class="fb-row" type="button" data-path="' + esc(it.path || '') + '">' +
+        '<span class="fb-row-main">' +
+        '<span class="fb-row-title">' + esc(it.title || it.name || '未命名') + '</span>' +
+        '<span class="fb-row-sub">' + esc(fbFmtAt(it.at)) + ' · ' + esc(fbSizeText(it.size)) + '</span>' +
+        '</span><span class="fb-row-go">复制路径</span></button>';
+    }).join('');
+  }
+
+  function renderFeedback() {
+    var at = $('#fbAt');
+    if (at && !at.value) at.value = fbNowLocal();
+    var bot = $('#fbBot');
+    if (bot && !bot.value) bot.value = fbSavedBot();
+    /* 进页自己没有数据源：meta 为空或过期就自己去拉一次（meta + 本机存档列表） */
+    if (!fbState.loading && (!fbState.meta || Date.now() - fbState.at > 60000)) loadFeedback(false);
+    /* 论坛那条只做提示，不拦着提交：发不出去也能存本机 */
+    var forumState = '';
+    if (fbState.meta && fbState.meta.forum) {
+      var f = fbState.meta.forum;
+      forumState = f.reachable === false
+        ? '论坛现在连不上（' + esc(f.error || '网络不通') + '），提交会先存本机'
+        : '帖子 ' + (fbState.meta.config && fbState.meta.config.postId ? '#' + fbState.meta.config.postId : '') + ' 可以打开；论坛若还没放权匿名提交，会先存本机并给你现成的 Markdown';
+    }
+    /* 已经出过提交结果的，别用论坛提示把结果行盖掉 */
+    var resBox = document.getElementById('fbResult');
+    var resultShown = !!(resBox && !resBox.hidden);
+    if (forumState && !fbState.busy && !resultShown) fbSetStatus(forumState, fbState.meta && fbState.meta.forum && fbState.meta.forum.reachable === false ? 'warn' : '');
+    fbRenderList();
+  }
+
+  function loadFeedback(force) {
+    if (fbState.loading) return;
+    if (!force && fbState.meta && Date.now() - fbState.at < 60000) { renderFeedback(); return; }
+    fbState.loading = true;
+    safe(fbRenderList);
+    Promise.all([apiPost('feedback/meta', {}), apiPost('feedback/list', {})]).then(function (r) {
+      fbState.loading = false;
+      fbState.at = Date.now();
+      var m = r[0];
+      var l = r[1];
+      if (m && m.ok) { fbState.meta = m.data || null; fbState.error = ''; }
+      else { fbState.meta = null; fbState.error = (m && m.error) || '接口没响应'; }
+      if (l && l.ok) {
+        fbState.list = (l.data && l.data.items) || [];
+        fbState.dir = (l.data && l.data.dir) || '';
+      } else {
+        fbState.list = [];
+        fbState.dir = '';
+      }
+      safe(renderFeedback);
+      if (force) toast('反馈页已刷新');
+    });
+  }
+
+  function submitFeedback() {
+    if (fbState.busy) return;
+    var botEl = $('#fbBot');
+    var titleEl = $('#fbTitle');
+    var descEl = $('#fbDesc');
+    var bot = ((botEl && botEl.value) || '').trim();
+    var title = ((titleEl && titleEl.value) || '').trim();
+    var desc = ((descEl && descEl.value) || '').trim();
+    if (!bot) { fbSetStatus('先写 bot 名称 —— 站长靠它认出是哪一台部署', 'bad'); if (botEl) botEl.focus(); return; }
+    if (!title) { fbSetStatus('还差一句话标题', 'bad'); if (titleEl) titleEl.focus(); return; }
+    if (!desc) { fbSetStatus('「发生了什么」不能空着', 'bad'); if (descEl) descEl.focus(); return; }
+
+    fbState.busy = true;
+    var btn = $('#fbSubmit');
+    if (btn) { btn.disabled = true; btn.textContent = '提交中…'; }
+    fbSetStatus('正在提交…', 'busy');
+
+    apiPost('feedback/submit', {
+      bot: bot,
+      title: title,
+      kind: ($('#fbKind') && $('#fbKind').value) || 'bug',
+      when: ($('#fbAt') && $('#fbAt').value) || '',
+      desc: desc,
+      steps: ($('#fbSteps') && $('#fbSteps').value) || '',
+      logs: fbCheckedLogs()
+    }).then(function (res) {
+      fbState.busy = false;
+      if (btn) { btn.disabled = false; btn.textContent = '提交反馈'; }
+      if (!res || !res.ok) {
+        fbSetStatus('提交失败：' + ((res && res.error) || '接口没响应'), 'bad');
+        return;
+      }
+      var d = res.data || {};
+      fbRememberBot(bot);
+      var say;
+      if (d.posted) say = '已发到论坛，本机也留了存档';
+      else if (d.forumError) say = '已存到本机；论坛那边没放行，下面框里的内容复制过去贴一下';
+      else say = '已存到本机';
+      if (!d.saved) say += '（存档文件没写成，检查 out 目录权限）';
+      fbSetStatus(say, d.posted ? 'ok' : 'warn');
+
+      var box = $('#fbResult');
+      if (box) {
+        box.hidden = false;
+        var t = $('#fbResultTitle');
+        if (t) t.textContent = d.posted ? '已提交（论坛 + 本机存档）' : '已存到本机（论坛要手动贴）';
+        var md = $('#fbMarkdown');
+        if (md) md.value = d.markdown || '';
+        var open = $('#fbOpen');
+        if (open) open.setAttribute('data-url', d.forumUrl || '');
+        /* 论坛没发出去就多给一条路：GitHub 部署者用这个 */
+        var iss = $('#fbIssue');
+        if (iss) iss.hidden = !!d.posted;
+      }
+      loadFeedback(true);
+    });
+  }
+
+  function fbCopyMarkdown() {
+    var md = $('#fbMarkdown');
+    if (!md || !md.value) { toast('还没有可复制的内容'); return; }
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(md.value).then(function () { toast('已复制，去论坛贴一下'); },
+          function () { try { md.select(); } catch (e) { } toast('已选中，按 Ctrl+C'); });
+        return;
+      }
+    } catch (e) { /* 老 WebView 没有 clipboard API，走下面的兜底 */ }
+    try { md.select(); document.execCommand('copy'); toast('已复制'); } catch (e2) { toast('复制失败，手动选一下'); }
+  }
+
+  /* 桌面壳里 window.open 会被 OnNewWindowRequested 接到系统浏览器，浏览器里就是新标签页 */
+  function fbOpenForum() {
+    var open = $('#fbOpen');
+    var url = (open && open.getAttribute('data-url')) || (fbState.meta && fbState.meta.forumUrl) || '';
+    if (!url) { toast('还没有论坛地址'); return; }
+    window.open(url, '_blank');
+  }
+
+  /* 第二通道：仓库 issues 页面预填标题和正文，不需要任何后端权限 */
+  var FB_ISSUE_BASE = 'https://github.com/3150481853/molly-qq-whale/issues/new';
+  function fbOpenIssue() {
+    var md = $('#fbMarkdown');
+    var body = ((md && md.value) || '').trim();
+    if (!body) { toast('先提交一次，这里就有现成的内容了'); return; }
+    var bot = (($('#fbBot') && $('#fbBot').value) || 'Molly').trim();
+    var title = (($('#fbTitle') && $('#fbTitle').value) || '问题反馈').trim();
+    if (body.length > 6000) body = body.slice(0, 6000) + '\n\n…（已截断，完整版在控制台「问题反馈」页的本机存档里）';
+    var url = FB_ISSUE_BASE + '?title=' + encodeURIComponent('[' + bot + '] ' + title) + '&body=' + encodeURIComponent(body);
+    window.open(url, '_blank');
+  }
+
+  function bindFeedback() {
+    var submit = $('#fbSubmit');
+    if (submit) submit.addEventListener('click', function () { safe(submitFeedback); });
+    var reload = $('#fbReload');
+    if (reload) reload.addEventListener('click', function () { loadFeedback(true); });
+    var copy = $('#fbCopy');
+    if (copy) copy.addEventListener('click', fbCopyMarkdown);
+    var open = $('#fbOpen');
+    if (open) open.addEventListener('click', fbOpenForum);
+    var issue = $('#fbIssue');
+    if (issue) issue.addEventListener('click', fbOpenIssue);
+    var list = $('#fbList');
+    if (list) list.addEventListener('click', function (ev) {
+      var row = ev.target && ev.target.closest ? ev.target.closest('.fb-row') : null;
+      if (!row) return;
+      var p = row.getAttribute('data-path') || '';
+      if (!p) return;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(p).then(function () { toast('已复制路径'); }, function () { toast(p); });
+          return;
+        }
+      } catch (e) { /* 兜底就是把它读出来 */ }
+      toast(p);
+    });
+  }
+
   function renderPageNow() {
     switch (state.page) {
       case 'overview': renderOverview(); break;
@@ -5437,10 +5718,12 @@
       case 'watchdog': renderWatchdog(); break;
       case 'ops': renderOps(); break;
       case 'external': renderExternal(); break;
+      case 'online': renderOnline(); break;
       /* 合并成一页：QQ 连接 = 链路状态 + 扫码登录（原独立「登录」页已删） */
       case 'qq': renderQq(); renderLogin(); break;
       case 'settings': renderSettings(); break;
       case 'about': renderAbout(); break;
+      case 'feedback': renderFeedback(); break;
       case 'switches': if (!swInputFocused()) renderSwitches(); break;
       default: break;
     }
@@ -5524,6 +5807,8 @@
     /* 运维 / 外部服务：进页各拉一次，别让 4 秒轮询拖着外部请求走 */
     if (name === 'ops') loadOpsHeartbeat();
     if (name === 'external') loadExternal();
+    /* 在线时间：进页拉一次，60 秒内切回来不重复打插件 */
+    if (name === 'online') loadOnline();
     if (name === 'switches') loadSwitches();
     /* 作息：进「设置」页必须现拉一次。以前只靠 loadHealth 的 then 里顺手刷，
        启动时若 state.page 还没变成 settings 就永远不刷，表单一直是 HTML 里的
@@ -5534,6 +5819,517 @@
     /* 扫码轮询只挂在「QQ 连接」页：离开就停，别在后台空转 */
     if (name === 'qq') enterLoginPage();
     else stopLoginPoll();
+  }
+
+  /* ---------------- 在线时间页（2026-11-06） ----------------
+     数据只有一份：一次 POST online/stats（days=30）就拿齐分天/分时/热力/轨迹；
+     切「今天/昨天/近 7 天」只重绘分时柱，不再打接口（spec §3.2）。
+     柱子、热力格、轨迹全用 div 的高度与背景色画，不用 canvas：玻璃质感靠 CSS。 */
+
+  var ON_WEEK = ['一', '二', '三', '四', '五', '六', '日'];
+  var ON_TABS = [['today', '今天'], ['yesterday', '昨天'], ['week', '近 7 天']];
+
+  function onClock(ms) {
+    var d = asDate(ms);
+    if (!d) return '—';
+    return pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+  }
+
+  function onDateText(ms) {
+    if (typeof ms === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(ms)) return ms.slice(5);
+    var d = asDate(ms);
+    if (!d) return '—';
+    return pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+  }
+
+  /* 毫秒 → 「23 小时 58 分」/「58 分」/「—」（spec §3.3 onFmtDur） */
+  function onFmtDur(ms) {
+    var total = Math.round(Number(ms) / 60000);
+    if (!isFinite(total) || total < 0) return '—';
+    if (total <= 0) return '0 分';
+    var h = Math.floor(total / 60);
+    var m = total % 60;
+    if (!h) return m + ' 分';
+    return m ? h + ' 小时 ' + m + ' 分' : h + ' 小时';
+  }
+
+  /* 同上，但单位小一号（KPI 大数字用）：23<small>小时</small>58<small>分</small> */
+  function onDurHtml(ms) {
+    var total = Math.round(Number(ms) / 60000);
+    if (!isFinite(total) || total < 0) return '<span class="on-num">—</span>';
+    if (total <= 0) return '<span class="on-num">0</span><small>分</small>';
+    var h = Math.floor(total / 60);
+    var m = total % 60;
+    if (!h) return '<span class="on-num">' + m + '</span><small>分</small>';
+    return '<span class="on-num">' + h + '</span><small>小时</small>'
+      + (m ? '<span class="on-num">' + m + '</span><small>分</small>' : '');
+  }
+
+  function onPct(v) {
+    var n = Number(v);
+    if (!isFinite(n)) return '—';
+    n = Math.round(n * 10) / 10;
+    return (String(n).indexOf('.') === -1 ? String(n) : n.toFixed(1)) + '%';
+  }
+
+  /* 可用率胶囊：≥99% 绿、≥95% 琥珀、其余红；没有采样走灰（spec §4.1） */
+  function onPill(pct, text) {
+    var n = Number(pct);
+    if (!isFinite(n) || n <= 0) return '<span class="on-pill is-idle">' + esc(text || '无数据') + '</span>';
+    var kind = n >= 99 ? 'ok' : (n >= 95 ? 'warn' : 'bad');
+    return '<span class="on-pill is-' + kind + '">' + esc(text || onPct(n)) + '</span>';
+  }
+
+  /* 可用率只给一个词，别在卡片上把同一个百分比印两遍（数值在中间那一行已经写了大号） */
+  function onQual(pct) {
+    var n = Number(pct);
+    if (!isFinite(n) || n <= 0) return '待采样';
+    return n >= 99 ? '稳定' : (n >= 95 ? '偶有中断' : '中断偏多');
+  }
+
+  function onKpi(label, valueHtml, note, pillHtml, extraClass) {
+    return '<div class="on-kpi' + (extraClass ? ' ' + extraClass : '') + '">'
+      + '<div class="on-kpi-head"><span class="on-kpi-label">' + esc(label) + '</span>' + (pillHtml || '') + '</div>'
+      + '<div class="on-kpi-value">' + valueHtml + '</div>'
+      + '<div class="on-kpi-note">' + (note || '') + '</div></div>';
+  }
+
+  function onKpis(data) {
+    var today = data.today || {};
+    var days = data.days || [];
+    var cov = Number(today.coverageMs) || 0;
+    var total = Number(today.totalMs) || 1;
+    var avail = cov > 0 ? Number(today.onlinePercent) || 0 : 0;
+
+    var k1 = onKpi('今日在线', cov ? onDurHtml(today.onlineMs) : '<span class="on-num">—</span>',
+      cov ? '采样覆盖 ' + onPct(cov / total * 100) : '今天还没有采样', '');
+
+    var k2 = onKpi('今日可用率', cov ? onPct(avail) : '<span class="on-num">—</span>',
+      cov ? '在线 ' + onFmtDur(today.onlineMs) + ' / 会话 ' + (Number(today.sessions) || 0) + ' 段' : '按已采样时段计算',
+      cov ? onPill(avail, onQual(avail)) : onPill(0, '待采样'));
+
+    var ongoing = Number(today.ongoingMs) || 0;
+    var k3;
+    if (ongoing > 0) {
+      var segs = today.timeline || [];
+      var since = segs.length ? segs[segs.length - 1].start : 0;
+      k3 = onKpi('当前连着', onDurHtml(ongoing),
+        since ? '从 ' + onClock(since) + ' 起一直在' : '现在在线',
+        '<span class="on-pill is-ok">在线</span>');
+    } else if (today.lastOfflineAt) {
+      k3 = onKpi('当前状态', '<span class="on-kpi-text">现在不在线</span>',
+        '最后在线到 ' + onClock(today.lastOfflineAt),
+        '<span class="on-pill is-idle">离线</span>');
+    } else {
+      k3 = onKpi('当前状态', '<span class="on-num">—</span>', '等一次采样', onPill(0, '待采样'));
+    }
+
+    /* 近 7 天：只按有采样的天平均，别让刚装的那天把均值拉低 */
+    var last7 = days.slice(-7);
+    var sumOnline = 0;
+    var sumCov = 0;
+    var n7 = 0;
+    for (var i = 0; i < last7.length; i++) {
+      var c = Number(last7[i].coverageMs) || 0;
+      sumOnline += Number(last7[i].onlineMs) || 0;
+      sumCov += c;
+      if (c > 0) n7++;
+    }
+    var avail7 = sumCov > 0 ? sumOnline / sumCov * 100 : 0;
+    var k4 = onKpi('近 7 天平均',
+      n7 ? onDurHtml(n7 ? sumOnline / n7 : 0) : '<span class="on-num">—</span>',
+      n7 ? n7 + ' 天有数据' : '这 7 天还没有采样',
+      n7 ? onPill(avail7, onQual(avail7)) : onPill(0, '待采样'));
+
+    return k1 + k2 + k3 + k4;
+  }
+
+  function onKpiSkeleton() {
+    var out = '';
+    for (var i = 0; i < 4; i++) {
+      out += '<div class="on-kpi"><div class="on-kpi-head"><span class="on-kpi-label">读取中</span></div>'
+        + '<div class="on-kpi-value"><span class="on-num">—</span></div>'
+        + '<div class="on-kpi-note">正在拉在线时间…</div></div>';
+    }
+    return out;
+  }
+
+  function onRangeTabs() {
+    var days = state.online.days;
+    var out = '';
+    var opts = [[7, '最近 7 天'], [30, '最近 30 天'], [90, '最近 90 天']];
+    for (var i = 0; i < opts.length; i++) {
+      var on = days === opts[i][0];
+      out += '<button type="button" role="tab" aria-selected="' + (on ? 'true' : 'false') + '"'
+        + ' class="on-tab' + (on ? ' is-active' : '') + '" data-on-range="' + opts[i][0] + '">'
+        + opts[i][1] + '</button>';
+    }
+    return out;
+  }
+
+  function onTabBar() {
+    var out = '';
+    for (var i = 0; i < ON_TABS.length; i++) {
+      var on = state.online.tab === ON_TABS[i][0];
+      out += '<button type="button" role="tab" aria-selected="' + (on ? 'true' : 'false') + '"'
+        + ' class="on-tab' + (on ? ' is-active' : '') + '" data-on-tab="' + ON_TABS[i][0] + '">'
+        + ON_TABS[i][1] + '</button>';
+    }
+    return out;
+  }
+
+  /* 分天模块的横幅：她一直在 / 今天断过 N 次 / 今天大半时间不在（spec §4.2） */
+  function onBanner(today) {
+    var cov = Number(today.coverageMs) || 0;
+    var avail = Number(today.onlinePercent) || 0;
+    var breaks = Number(today.offlineCount) || 0;
+    var cls;
+    var icon;
+    var title;
+    if (!cov) {
+      cls = 'is-idle';
+      icon = '◌';
+      title = '今天还没有采样';
+    } else if (avail < 60) {
+      cls = 'is-bad';
+      icon = '×';
+      title = '今天大半时间不在';
+    } else if (avail < 99.5) {
+      cls = 'is-warn';
+      icon = '!';
+      title = breaks > 0 ? '今天断过 ' + breaks + ' 次' : '今天有中断';
+    } else {
+      cls = 'is-ok';
+      icon = '✓';
+      title = '她一直在';
+    }
+    var sub = cov
+      ? '今日在线 ' + onFmtDur(today.onlineMs) + ' · 可用率 ' + onPct(avail)
+        + ' · 采样覆盖 ' + onPct(cov / (Number(today.totalMs) || 1) * 100)
+      : '采样跑起来之后，这里会显示她今天的状态';
+    return '<div class="on-banner ' + cls + '">'
+      + '<span class="on-banner-icon" aria-hidden="true">' + icon + '</span>'
+      + '<div class="on-banner-body"><div class="on-banner-title">' + esc(title) + '</div>'
+      + '<div class="on-banner-sub">' + esc(sub) + '</div></div></div>';
+  }
+
+  function onDayRow(name, icon, valueText, barsHtml) {
+    return '<div class="on-day-row">'
+      + '<div class="on-day-head"><span class="on-day-name"><i aria-hidden="true">' + icon + '</i>'
+      + esc(name) + '</span><span class="on-day-value">' + valueText + '</span></div>'
+      + '<div class="on-bars">' + barsHtml + '</div></div>';
+  }
+
+  function onDayBars(data) {
+    var days = data.days || [];
+    if (!days.length || !data.summary || !data.summary.daysWithData) {
+      return onBanner({}) + '<div class="on-empty">还没有采样数据，等一会儿再看</div>';
+    }
+    var onlineBars = '';
+    var coverBars = '';
+    var sumOnline = 0;
+    var sumCov = 0;
+    var sumTotal = 0;
+    var covDays = 0;
+    var firstCovIdx = -1;
+    var lastIdx = days.length - 1;
+    for (var i = 0; i < days.length; i++) {
+      var d = days[i];
+      var cov = Number(d.coverageMs) || 0;
+      var total = Number(d.totalMs) || 0;
+      var pct = cov > 0 ? Number(d.onlinePercent) || 0 : 0;
+      var dateText = onDateText(d.start) + ' 周' + ON_WEEK[Number(d.weekday) || 0];
+      var cls = !cov ? 'is-none' : (pct >= 99 ? 'is-ok' : (pct >= 95 ? 'is-warn' : 'is-bad'));
+      var tip = cov
+        ? dateText + ' · 在线 ' + onFmtDur(d.onlineMs) + ' · 可用率 ' + onPct(pct)
+          + ' · 会话 ' + (Number(d.sessions) || 0) + ' 段 · 最长 ' + onFmtDur(d.longestMs)
+        : dateText + ' · ' + (firstCovIdx < 0 || i < firstCovIdx ? '还没开始采样' : '这一天没有采样');
+      onlineBars += '<i class="on-bar ' + cls + (i === lastIdx ? ' is-today' : '') + '"'
+        + ' data-tip="' + esc(tip) + '"></i>';
+
+      var ratio = total > 0 ? Math.min(1, cov / total) : 0;
+      var alpha = cov > 0 ? 0.12 + 0.5 * ratio : 0.1;
+      coverBars += '<i class="on-bar is-cover' + (i === lastIdx ? ' is-today' : '') + '"'
+        + ' style="background:rgba(25,33,30,' + (Math.round(alpha * 100) / 100) + ')"'
+        + ' data-tip="' + esc(dateText + ' · 采样覆盖 ' + (total ? onPct(ratio * 100) : '—')
+          + ' · 覆盖 ' + onFmtDur(cov)) + '"></i>';
+
+      sumOnline += Number(d.onlineMs) || 0;
+      sumCov += cov;
+      sumTotal += total;
+      if (cov > 0) {
+        covDays += 1;
+        if (firstCovIdx < 0) firstCovIdx = i;
+      }
+    }
+    var availAll = sumCov > 0 ? sumOnline / sumCov * 100 : 0;
+    var row1 = onDayRow('Molly 在线', '✓', sumCov > 0 ? onPct(availAll) + ' 在线' : '—', onlineBars);
+    /* 覆盖度用「天数 · 时长」表达：它说的是数据够不够，不是在线率，别用百分比让人误读 */
+    var row2 = onDayRow('采样覆盖', '◌', covDays > 0 ? covDays + ' 天 · ' + onFmtDur(sumCov) : '—', coverBars);
+    var axis = '<div class="on-days-axis"><span>' + esc(onDateText(days[0].start)) + '</span>'
+      + '<span>' + esc(onDateText(days[lastIdx].start)) + '</span></div>';
+    var note = firstCovIdx > 0
+      ? '<div class="on-days-note">采样从 ' + esc(onDateText(days[firstCovIdx].start))
+        + ' 开始，之前的日期是空白（不是她掉线）</div>'
+      : '';
+    return onBanner(data.today || {})
+      + '<div class="on-day-rows' + (days.length <= 10 ? ' is-few' : '') + '">' + row1 + row2 + '</div>'
+      + axis + note;
+  }
+
+  /* 分时柱：今天/昨天用那一天的 hours，近 7 天用 hourProfile（spec §3.3） */
+  function onHourBars(data, tab) {
+    var days = data.days || [];
+    var day = null;
+    var markNow = false;
+    if (tab === 'yesterday') {
+      day = days[days.length - 2];
+      if (!day) return '<div class="on-empty">昨天还没有数据。</div>';
+    } else if (tab !== 'week') {
+      day = days[days.length - 1];
+      markNow = true;
+    }
+    if (!data.summary || !data.summary.daysWithData) return '<div class="on-empty">还没有采样数据，等一会儿再看</div>';
+
+    var nowHour = new Date().getHours();
+    var bars = '';
+    var axis = '';
+    for (var h = 0; h < 24; h++) {
+      var ratio = 0;
+      var covered = false;
+      var note = '';
+      if (day) {
+        var cell = (day.hours && day.hours[h]) || {};
+        var onMs = Number(cell.onlineMs) || 0;
+        var cov = onMs + (Number(cell.offlineMs) || 0);
+        covered = cov > 0;
+        ratio = covered ? onMs / cov : 0;
+        note = covered ? onFmtDur(onMs) + ' 在线' : '没有采样';
+      } else {
+        ratio = Number((data.hourProfile || [])[h]) || 0;
+        covered = ratio > 0;
+        note = Math.round(ratio * 100) + '% 在线';
+      }
+      var future = markNow && h > nowHour;
+      var tip = future ? pad2(h) + ':00 · 还没到这个点' : (pad2(h) + ':00 · ' + note);
+      var cls = 'on-hour' + (!covered ? ' is-none' : '') + (future ? ' is-future' : '')
+        + (markNow && h === nowHour ? ' is-now' : '');
+      bars += '<div class="' + cls + '" data-tip="' + esc(tip) + '">'
+        + (future ? '' : '<i style="height:' + Math.max(covered ? 3 : 2, Math.round(ratio * 72)) + 'px"></i>')
+        + '</div>';
+      var label = h === 0 || h === 6 || h === 12 || h === 18 || h === 23 ? String(h) : '';
+      axis += '<span' + (h === 23 ? ' class="is-end"' : '') + '>' + label + '</span>';
+    }
+    var title;
+    var sub;
+    if (tab === 'week') {
+      title = '近 7 天同一时刻';
+      sub = '只统计有采样的时段';
+    } else if (tab === 'yesterday') {
+      title = '昨天 ' + onDateText(day.start) + ' 周' + ON_WEEK[Number(day.weekday) || 0];
+      sub = '在线 ' + onFmtDur(day.onlineMs) + ' · 可用率 ' + (day.coverageMs ? onPct(day.onlinePercent) : '—');
+    } else {
+      var t = data.today || {};
+      title = '今天 ' + onDateText(t.start);
+      sub = '在线 ' + onFmtDur(t.onlineMs) + ' · 可用率 ' + (t.coverageMs ? onPct(t.onlinePercent) : '—');
+    }
+    return '<div class="on-hour-head"><div><div class="on-hour-title">' + esc(title) + '</div>'
+      + '<div class="on-hour-sub">' + esc(sub) + '</div></div></div>'
+      + '<div class="on-hours-grid">' + bars + '</div>'
+      + '<div class="on-hours-axis">' + axis + '</div>';
+  }
+
+  function onHeatmap(data) {
+    if (!data.summary || !data.summary.daysWithData) {
+      return '<div class="on-empty">还没有采样数据，等一会儿再看</div>';
+    }
+    var matrix = data.weekMatrix || [];
+    var head = '<div class="on-heat-row is-head"><span class="on-heat-label"></span>';
+    var rows = '';
+    for (var w = 0; w < 7; w++) {
+      rows += '<div class="on-heat-row"><span class="on-heat-label">周' + ON_WEEK[w] + '</span>';
+      for (var h = 0; h < 24; h++) {
+        var v = Number((matrix[w] || [])[h]) || 0;
+        var step = v <= 0 ? 0 : (v < 0.25 ? 0.25 : (v < 0.5 ? 0.5 : (v < 0.75 ? 0.75 : 1)));
+        var bg = step === 0 ? 'rgba(25,33,30,.05)' : 'rgba(41,79,62,' + step + ')';
+        var tip = '周' + ON_WEEK[w] + ' ' + pad2(h) + ':00 · 在线 ' + Math.round(v * 100) + '%';
+        rows += '<i class="on-heat-cell" style="background:' + bg + '" data-tip="' + esc(tip) + '"></i>';
+        if (w === 0) {
+          var label = h === 0 || h === 6 || h === 12 || h === 18 || h === 23 ? String(h) : '';
+          head += '<span class="on-heat-hour' + (h === 23 ? ' is-end' : '') + '">' + label + '</span>';
+        }
+      }
+      rows += '</div>';
+    }
+    head += '</div>';
+    return '<div class="on-heat-grid">' + head + rows + '</div>';
+  }
+
+  function onSegName(status) {
+    return status === 'online' ? '在线' : (status === 'offline' ? '离线' : '未知');
+  }
+
+  function onTimeline(data) {
+    var today = data.today || {};
+    var segs = today.timeline || [];
+    var dayStart = Number(today.start) || 0;
+    if (!dayStart || !segs.length) return '<div class="on-empty">今天还没有采样数据。</div>';
+    var body = '';
+    for (var i = 0; i < segs.length; i++) {
+      var seg = segs[i];
+      var left = Math.max(0, seg.start - dayStart) / 86400000 * 100;
+      var width = Math.max(0, seg.end - seg.start) / 86400000 * 100;
+      if (width <= 0) continue;
+      body += '<i class="on-seg is-' + (seg.status || 'unknown') + '" style="left:'
+        + (Math.round(left * 100) / 100) + '%;width:' + (Math.round(width * 100) / 100) + '%"'
+        + ' data-tip="' + esc(onClock(seg.start) + '–' + onClock(seg.end) + ' · ' + onSegName(seg.status)) + '"></i>';
+    }
+    if (!body) return '<div class="on-empty">今天还没有采样数据。</div>';
+    return '<div class="on-band">' + body + '</div>'
+      + '<div class="on-ticks"><span>0</span><span>6</span><span>12</span><span>18</span><span>24</span></div>';
+  }
+
+  function onSessions(data) {
+    var list = (data.today && data.today.sessionList) || [];
+    if (!list.length) return '<div class="on-empty on-empty-sm">今天还没有在线记录。</div>';
+    var max = 6;
+    var out = '';
+    for (var i = 0; i < list.length && i < max; i++) {
+      var s = list[i];
+      out += '<div class="on-session' + (s.ongoing ? ' is-ongoing' : '') + '">'
+        + '<span class="on-session-time">' + esc(onClock(s.start)) + '</span>'
+        + '<span class="on-session-dash">–</span>'
+        + '<span class="on-session-time">' + esc(s.ongoing ? '现在' : onClock(s.end)) + '</span>'
+        + '<span class="on-session-dur">' + esc(onFmtDur(s.durationMs)) + '</span></div>';
+    }
+    if (list.length > max) out += '<div class="on-session-more">还有 ' + (list.length - max) + ' 段</div>';
+    return out;
+  }
+
+  function renderOnline() {
+    var st = state.online;
+    var kpis = $('#onKpis');
+    if (!kpis) return;
+    var data = st.data;
+    if (!data) {
+      setHtml(kpis, onKpiSkeleton());
+      setHtml($('#onRange'), '');
+      var box = st.error
+        ? '<div class="on-empty"><p class="ar-error">' + esc(st.error) + '</p>'
+          + '<button class="btn btn-ghost btn-sm js-retry" type="button">重试</button></div>'
+        : '<div class="on-empty">正在读取在线时间…</div>';
+      setHtml($('#onDays'), box);
+      setHtml($('#onTabs'), '');
+      setHtml($('#onHours'), '');
+      setHtml($('#onHeat'), '');
+      setHtml($('#onTimeline'), '');
+      setHtml($('#onSessions'), '');
+      if (st.error) bindRetry($('#onDays'), function () { loadOnline(true); });
+      return;
+    }
+    setHtml(kpis, onKpis(data));
+    setHtml($('#onRange'), onRangeTabs());
+    setHtml($('#onDays'), onDayBars(data));
+    var hasData = !!(data.summary && data.summary.daysWithData);
+    var tabsBox = $('#onTabs');
+    /* 一条数据都没有时，别在分时卡里连贴三段空态：留一句就够 */
+    setHtml(tabsBox, hasData ? onTabBar() : '');
+    if (tabsBox) tabsBox.hidden = !hasData;
+    setHtml($('#onHours'), hasData
+      ? onHourBars(data, st.tab)
+      : '<div class="on-empty">还没有采样数据，等一会儿再看</div>');
+    setHtml($('#onHeat'), hasData ? onHeatmap(data) : '');
+    var heatTitle = document.querySelector('#onlinePage .on-sub-title');
+    if (heatTitle) heatTitle.hidden = !hasData;
+    setHtml($('#onTimeline'), onTimeline(data));
+    setHtml($('#onSessions'), onSessions(data));
+  }
+
+  function loadOnline(force) {
+    var st = state.online;
+    if (st.loading) return;
+    /* 60 秒内不重复拉：切页签回来不该再打一次插件（spec §3.2） */
+    if (!force && st.data && st.at && Date.now() - st.at < 60000) {
+      safe(renderOnline);
+      return;
+    }
+    st.loading = true;
+    if (!st.data) safe(renderOnline);
+    apiPost('online/stats', { days: st.days }).then(function (res) {
+      st.loading = false;
+      st.at = Date.now();
+      if (res && res.ok) {
+        st.data = res.data || null;
+        st.error = '';
+      } else {
+        st.error = (res && (res.error || (res.data && res.data.error))) || '在线时间读取失败';
+      }
+      safe(renderOnline);
+    });
+  }
+
+  /* 切「今天/昨天/近 7 天」只重绘分时区：数据在一次 days=30 响应里已经齐了 */
+  function onOnlineTab(id) {
+    if (state.online.tab === id) return;
+    state.online.tab = id;
+    var data = state.online.data;
+    if (!data) return;
+    setHtml($('#onTabs'), onTabBar());
+    setHtml($('#onHours'), onHourBars(data, id));
+  }
+
+  function onOnlineRange(days) {
+    if (state.online.days === days) return;
+    state.online.days = days;
+    state.online.at = 0;
+    safe(renderOnline);
+    loadOnline(true);
+  }
+
+  function bindOnline() {
+    var sec = $('#onlinePage');
+    if (!sec) return;
+    sec.addEventListener('click', function (ev) {
+      var t = ev.target;
+      var tab = t && t.closest ? t.closest('[data-on-tab]') : null;
+      if (tab) {
+        onOnlineTab(tab.getAttribute('data-on-tab'));
+        return;
+      }
+      var range = t && t.closest ? t.closest('[data-on-range]') : null;
+      if (range) onOnlineRange(Number(range.getAttribute('data-on-range')) || 30);
+    });
+
+    /* 悬浮提示只挂一个元素 + 一次委托，不逐格绑监听。
+       挂在 body 上而不是页面里：换页动画会给 .page 加 transform，fixed 会跑偏。 */
+    var tip = null;
+    function ensureTip() {
+      if (!tip) {
+        tip = document.createElement('div');
+        tip.className = 'on-tip';
+        tip.hidden = true;
+        document.body.appendChild(tip);
+      }
+      return tip;
+    }
+    sec.addEventListener('mouseover', function (ev) {
+      var el = ev.target && ev.target.closest ? ev.target.closest('[data-tip]') : null;
+      if (!el) return;
+      var node = ensureTip();
+      node.textContent = el.getAttribute('data-tip') || '';
+      node.hidden = false;
+      var r = el.getBoundingClientRect();
+      var top = r.top - node.offsetHeight - 8;
+      if (top < 8) top = r.bottom + 8;
+      var left = r.left + r.width / 2 - node.offsetWidth / 2;
+      left = Math.max(8, Math.min(window.innerWidth - node.offsetWidth - 8, left));
+      node.style.left = left + 'px';
+      node.style.top = top + 'px';
+    });
+    sec.addEventListener('mouseout', function (ev) {
+      var el = ev.target && ev.target.closest ? ev.target.closest('[data-tip]') : null;
+      if (el && tip && !el.contains(ev.relatedTarget)) tip.hidden = true;
+    });
   }
 
   /* ---------------- 事件绑定 ---------------- */
@@ -5589,7 +6385,7 @@
     if (swAudit) swAudit.addEventListener('click', onSwAction);
 
     var btnRefresh = $('#btnRefresh');
-    if (btnRefresh) btnRefresh.addEventListener('click', function () { poll(); });
+    if (btnRefresh) btnRefresh.addEventListener('click', function () { reloadPageData(true); });
 
     var memSearch = $('#memSearch');
     if (memSearch) memSearch.addEventListener('input', function () { safe(applyMemFilter); });
@@ -5789,7 +6585,8 @@
       if (document.visibilityState === 'hidden') {
         stopTimers();
       } else {
-        poll();
+        /* 从别的窗口切回来：当前页的数据也一起刷新，不然看到的是离开前的快照 */
+        reloadPageData(false);
         startTimers();
       }
     });
@@ -5856,7 +6653,11 @@
      策略落在服务端 out\mem-config.json —— 桌面壳和 Python 侧车读同一份，避免三套口径。
      这里只做「读状态 / 写配置 / 触发回收」，真正把模型卸出内存的是侧车的 /unload。 */
 
-  var memState = { config: null, mem: null, embed: null, busy: false };
+  var memState = { config: null, mem: null, embed: null, game: null, busy: false, at: 0 };
+  /* 设置页每 4 秒重绘一次，会顺手调 renderMem。mem/status 每次都要 spawn 一个
+     powershell.exe 采进程树（父进程是 GUI，conhost 会先建窗再隐藏 → 默认终端是
+     Windows Terminal 的机器上会闪黑框）。所以 20 秒内不重复拉，动作类调用传 force。 */
+  var MEM_VIEW_TTL = 20000;
 
   function memMb(n) {
     var v = Number(n);
@@ -5886,6 +6687,21 @@
         '</span><b class="mono">' + memMb(g.mb) + '</b></div>';
     });
     rows.push('<div class="mem-item is-total"><span>Molly 合计</span><b class="mono">' + memMb(m.totalMb) + '</b></div>');
+    /*
+     * 参考行（2026-11-06，主人 m07510）：主人问过「这些算不算 DSH / QQ / 浏览器」。
+     * 之前卡片只报 Molly 自己的四条进程树，看着像「整机就吃这么点」；这里把不相干但
+     * 同机的大头也列出来，最后一行给个全场合计，方便判断「到底是谁在吃内存」。
+     */
+    if (m.others && m.others.length) {
+      rows.push('<div class="mem-head">不计入 Molly（同机参考）</div>');
+      rows.push(m.others.map(function (o) {
+        return '<div class="mem-item is-ref"><span>' + esc(o.label) +
+          (o.count ? '<i class="mem-count">×' + o.count + '</i>' : '') +
+          '</span><b class="mono">' + memMb(o.mb) + '</b></div>';
+      }).join(''));
+      rows.push('<div class="mem-item is-total is-grand"><span>以上全部合计</span><b class="mono">' +
+        memMb(m.grandTotalMb) + '</b></div>');
+    }
     setHtml(box, rows.join(''));
   }
 
@@ -5901,16 +6717,26 @@
     if (guard) guard.checked = c.guard !== false;
     var susp = $('#memSuspend');
     if (susp) susp.checked = c.suspendOnMinimize !== false;
+    var game = $('#memGame');
+    if (game) {
+      var on = memState.game && typeof memState.game.on === 'boolean' ? memState.game.on : c.gameMode === true;
+      game.checked = Boolean(on);
+      var card = $('#memCard');
+      if (card) card.classList.toggle('is-game', Boolean(on));
+    }
   }
 
   function renderMem(force) {
     if (memState.busy && !force) return;
+    if (!force && memState.at && (Date.now() - memState.at) < MEM_VIEW_TTL) return;
     memPost('mem/status').then(function (j) {
       if (!j || !j.ok) throw new Error((j && j.error) || '状态读取失败');
       var d = j.data || {};
+      memState.at = Date.now();
       memState.config = d.config || null;
       memState.mem = d.mem || null;
       memState.embed = d.embed || null;
+      memState.game = d.game || null;
       renderMemTable();
       renderMemControls();
       var hint = $('#memHint');
@@ -5962,6 +6788,27 @@
     });
   }
 
+  function toggleGameMode(on) {
+    var box = $('#memGame');
+    var hint = $('#memHint');
+    if (box) box.disabled = true;
+    if (hint) hint.textContent = on ? '正在暂停语音与点歌…' : '正在恢复语音与点歌…';
+    memPost('mem/gamemode', { on: Boolean(on) }).then(function (j) {
+      if (!j || !j.ok) throw new Error((j && j.error) || '切换失败');
+      var d = j.data || {};
+      memState.config = d.config || memState.config;
+      memState.game = { on: Boolean(d.game && d.game.on) };
+      renderMemControls();
+      if (hint) hint.textContent = d.hint || '';
+      toast(d.hint || (on ? '游戏模式已开' : '游戏模式已关'));
+      safe(function () { renderMem(true); });
+    }).catch(function (err) {
+      if (box) box.checked = !on;
+      if (hint) hint.textContent = '';
+      toast('切换失败：' + (err && err.message ? err.message : err));
+    }).then(function () { if (box) box.disabled = false; });
+  }
+
   function bindMem() {
     var mode = $('#memRerankMode');
     if (mode) mode.addEventListener('change', function () { saveMem({ rerankMode: mode.value }, '重排方式'); });
@@ -5975,6 +6822,8 @@
     if (susp) susp.addEventListener('change', function () { saveMem({ suspendOnMinimize: susp.checked }, '最小化挂起'); });
     var trim = $('#memTrim');
     if (trim) trim.addEventListener('click', trimMemory);
+    var game = $('#memGame');
+    if (game) game.addEventListener('change', function () { toggleGameMode(game.checked); });
   }
 
   /* ---------------- 启动 ---------------- */
@@ -5987,8 +6836,10 @@
       bindQuickActions();
       bindOpsEvents();
       bindEvents();
+      bindOnline();
       bindChangelog();
       bindCommandPalette();
+      bindFeedback();
       setPage(currentPage());
       loadHealth();
       poll();

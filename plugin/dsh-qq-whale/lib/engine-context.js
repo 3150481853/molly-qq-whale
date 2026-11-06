@@ -119,9 +119,39 @@ export function buildSystemPrompt(input, deps) {
       sp +=
         '\n\n# 这会儿群里人多\n' +
         `最近半分钟有 ${crowd.speakers} 个人在说话（${crowd.count} 条）。\n` +
-        '- 这条回复**只接最近的那一条**（带引用框，引用框锁的是它）——别把别人刚说的话挤进同一个回答里。\n' +
-        '- 几条话都在等你，就先回最要紧、最新的那个，剩下的等下一轮。\n' +
+        '- 这条回复**只接一个人**：接那个真正在跟你说话的人、接他那句正事（引用框锁的就是它），别把别人刚说的话挤进同一个回答里。\n' +
+        '- 几条话都在等你，就先回最要紧的那个，剩下的等下一轮。\n' +
         '- 实在接不过来就直说「你们一下说这么多我跟不上」，点一两个名字接话，别硬答所有人。'
+    }
+
+    /*
+     * 同一路人连发好几条时，这一轮要接的到底是哪条（2026-11-06，主人 m00215
+     * 「为什么总是回下一条」）。
+     *
+     * 现场：18:09:46 他问「为什么总是回下一条」→ 18:09:54 又甩了张表情图 →
+     * 前一轮被 abort 掉，她从历史里只看见最新那条，回出来的是最后一句，
+     * 引用框也挂在最后一句上。她自己都认了「眼睛一看到下一条就先冲出去了」。
+     * 这里把被顶掉的那几条按时间列出来，明确要求：先答最前面那条的正事。
+     */
+    const thisTurn = Array.isArray(input.thisTurn) ? input.thisTurn.filter((t) => t && t.text) : []
+    if (thisTurn.length >= 2) {
+      const hhmm = (ms) => {
+        const n = Number(ms)
+        if (!Number.isFinite(n) || n <= 0) return '--:--'
+        const d = new Date(n)
+        return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+      }
+      const lines = thisTurn
+        .slice(-6)
+        .map((t, i) => `${i + 1}. [${hhmm(t.at)}] ${String(t.who || '对方')}：${String(t.text).replace(/\s+/g, ' ').slice(0, 120)}`)
+        .join('\n')
+      sp +=
+        '\n\n# 这一轮你要接的是这几条\n' +
+        '对方连着发了好几条（按时间先后）：\n' +
+        `${lines}\n` +
+        '- **先回答第 1 条里问的那件事**——那才是正题，后面的是补充、催你或者随口一句。\n' +
+        '- 别把前面那条当没看见、只接最后一条：对方最烦的就是「总是回下一条」，你也认过这个毛病。\n' +
+        '- 引用框已经钉在这串的第一条上；真答不了就直说，别硬接最后一句充数。'
     }
 
     /*
@@ -294,7 +324,7 @@ export function buildSystemPrompt(input, deps) {
 
     // 关系：你跟这人处到哪一步了。每轮都带上，它是语气的底噪。
     if (conv?.relationKey) {
-      const relText = deps.relations.contextFor(conv.relationKey)
+      const relText = deps.relations.contextFor(conv.relationKey, { ownerQq })
       if (relText) sp += `\n\n# 你俩的关系\n${relText}`
     }
 

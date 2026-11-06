@@ -1123,6 +1123,70 @@ export class WebWidget {
       }),
     })
 
+    /*
+     * ── 游戏模式（2026-11-06，主人 m07510）─────────────────────────────────
+     *
+     * 打游戏时最怕「突然一卡」：TTS（SoVITS 吃显存）和点歌（RVC 分段重跑）都是
+     * 秒级以上的重活。这里只翻两个运行时开关，不动磁盘配置：
+     *   - `this.config.voiceEnabled = false` → maybeVoice（engine.js:3340）与
+     *     resolveVoiceRequests（engine.js:3292）都按调用时读配置，立刻不再合成
+     *   - `this.config.singingEnabled = false` → maybeSing（engine.js:3968）立刻返回 false
+     * 关掉时按开启前记下的原值恢复，不会把「本来就关着」的东西打开。
+     */
+    const gameModeState = () => ({ on: this._gameMode?.on === true })
+    add({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/gamemode`,
+      ...wrap(async (req, res) => {
+        if (req.method === 'GET') {
+          sendJson(res, 200, { ok: true, data: gameModeState() })
+          return
+        }
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          return
+        }
+        const raw = await readBody(req)
+        let want
+        try {
+          want = JSON.parse(raw || '{}')
+        } catch {
+          sendJson(res, 400, { ok: false, error: 'bad json' })
+          return
+        }
+        const on = want?.on
+        if (typeof on !== 'boolean') {
+          sendJson(res, 400, { ok: false, error: 'on must be boolean' })
+          return
+        }
+        if (!this._gameMode) this._gameMode = { on: false, backup: null }
+        if (on && !this._gameMode.on) {
+          this._gameMode.backup = {
+            voiceEnabled: this.config.voiceEnabled !== false,
+            singingEnabled: this.config.singingEnabled !== false,
+          }
+          this.config.voiceEnabled = false
+          this.config.singingEnabled = false
+          this._gameMode.on = true
+          this.logger('warn', '游戏模式 → 开（语音合成 / 点歌热禁用）')
+        } else if (!on && this._gameMode.on) {
+          const b = this._gameMode.backup || {}
+          this.config.voiceEnabled = b.voiceEnabled !== false
+          this.config.singingEnabled = b.singingEnabled !== false
+          this._gameMode.on = false
+          this.logger('info', '游戏模式 → 关（语音合成 / 点歌恢复）')
+        }
+        sendJson(res, 200, {
+          ok: true,
+          data: {
+            ...gameModeState(),
+            voiceEnabled: this.config.voiceEnabled !== false,
+            singingEnabled: this.config.singingEnabled !== false,
+          },
+        })
+      }),
+    })
+
     add({
       kind: 'exact',
       path: `${ROUTE_PREFIX}/recheck`,

@@ -13,6 +13,7 @@
  */
 
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 // ── 子模块加载（热重载的关键）───────────────────────────────────────────
 // 不用静态 `import`，是因为静态 import 的 URL 永远不变，Node 的 ESM 缓存会一直
@@ -471,6 +472,10 @@ export class ChatEngine {
       quoteAtDropped: 0,
       // 引用目标太旧（gap ≥ 4）主动不挂引用的次数（2026-11-05，主人 m07124）
       quoteStale: 0,
+      // 引用框钉在「这一轮真正的正题」上的次数（2026-11-06，主人 m00215）
+      quoteAnchored: 0,
+      // 被打断后合并进下一轮的消息条数（2026-11-06，主人 m00215）
+      carryMerged: 0,
       quoteLast: null,
       // 引用回复里语音段降级成文字的次数（2026-10-25，主人 m03353）
       voiceDemoted: 0,
@@ -2026,6 +2031,22 @@ export class ChatEngine {
     this.traceReply(String(key || ''), 'recall', { removed, aborted, dropped, author })
     this.logger('debug', `撤回 ${mid}（${key}）：清历史 ${removed} 条、作废排队 ${dropped} 条、中止生成=${aborted}`)
 
+    /*
+     * 私有撤回钩子（2026-11-05，主人 m03430）：
+     * 搜图途中那张图被撤回时，先问一句「还要继续找吗」，别再闷头把结果发出来。
+     * 谁返回 true 就算处理完，跳过下面那条通用轻回（否则会两句叠在一起）。
+     */
+    try {
+      await this.loadPrivateHooks()
+      for (const fn of this._privateRecallHooks || []) {
+        if (await fn({ engine: this, ev, mid, key, author })) {
+          return { acted: true, removed, aborted, dropped, private: true }
+        }
+      }
+    } catch (err) {
+      this.logger('warn', `私有撤回钩子执行失败：${err?.message || err}`)
+    }
+
     // 探针/自测默认不真发轻回（opts.whisper=false），免得在别人群里冒一句
     if (opts?.whisper !== false) {
       this.scheduleRecallWhisper({ key, ev, type, author, baselineUserAt: conv?.lastUserAt || 0 })
@@ -2565,6 +2586,74 @@ export class ChatEngine {
     return { text, source }
   }
 
+  /**
+   * 私有钩子加载（2026-11-05，主人 m03202）。
+   *
+   * 背景：有些功能主人明确要求**不上传 GitHub**（例如私人的识图指令）。
+   * 发布脚本 `tools/build-publish.mjs` 是白名单复制，`lib/` 整段会被带走，
+   * 所以这类功能不放在 lib 里，而是放在数据目录 `<dataDir>/private/hooks.mjs`，
+   * 由这里动态加载。宿主这份代码里只留「一个通用加载器」，不含任何具体功能。
+   *
+   * 契约：`hooks.mjs` 导出 `handlers = [fn, ...]`（或 default 单个函数）；
+   * 每个 fn 收到 `{ engine, ev, norm, scene }`，同步/异步都行，
+   * 返回 `true` 表示这条消息已处理完，onMessage 直接 return，不进模型。
+    * 另有可选导出 `recallHandlers = [fn, ...]`（2026-11-05，主人 m03430）：
+    * 撤回通知会调它，收到 `{ engine, ev, mid, key, author }`，返回 true = 已处理。
+   *
+   * 加载失败只记 debug：没这个目录是常态（干净安装 / 发布版），不该报错。
+   * 用文件的 mtime 做缓存键，改完 hooks.mjs 不用重启插件。
+   */
+  async loadPrivateHooks() {
+    // 多候选根目录：不同宿主版本把数据目录放在 dataDir / memoryDir / 实例字段上，
+    // 这里挨个探一遍，谁下面有 private/hooks.mjs 就用谁（都没有属常态）。
+    const roots = []
+    const pushRoot = (v) => {
+      const s = String(v || '').trim()
+      if (s && !roots.includes(s)) roots.push(s)
+    }
+    pushRoot(this.config?.dataDir)
+    pushRoot(this.config?.memoryDir)
+    pushRoot(this.dataDir)
+    pushRoot(this.memoryDir)
+    if (this.config?.memoryDir) pushRoot(path.resolve(String(this.config.memoryDir), '..'))
+    let file = ''
+    for (const r of roots) {
+      const cand = path.join(r, 'private', 'hooks.mjs')
+      try {
+        if (fs.statSync(cand).isFile()) { file = cand; break }
+      } catch {}
+    }
+    this._privateHooksFile = file
+    let stamp = ''
+    try {
+      stamp = String(fs.statSync(file).mtimeMs ?? '')
+    } catch {
+      this._privateHooks = []
+      this._privateRecallHooks = []
+      this._privateHooksStamp = ''
+      return this._privateHooks
+    }
+    if (this._privateHooksStamp === stamp) return this._privateHooks
+    const list = []
+    try {
+      const mod = await import(`${pathToFileURL(file).href}?mtime=${stamp}`)
+      for (const fn of mod.handlers || []) if (typeof fn === 'function') list.push(fn)
+      if (typeof mod.default === 'function') list.push(mod.default)
+      const recalls = []
+      for (const fn of mod.recallHandlers || []) if (typeof fn === 'function') recalls.push(fn)
+      this._privateRecallHooks = recalls
+      this.logger('debug', `私有钩子已加载 ${list.length} 个：${file}`)
+    } catch (err) {
+      this.logger('warn', `私有钩子加载失败（不影响其它功能）：${err?.message || err}`)
+      try {
+        fs.appendFileSync(path.join(String(this.config?.dataDir || ''), 'private', 'hook-debug.log'), `LOAD-FAIL ${new Date().toISOString()} ${String(err?.stack || err)}` + `\n`)
+      } catch {}
+    }
+    this._privateHooks = list
+    this._privateHooksStamp = stamp
+    return list
+  }
+
   async onMessage(ev) {
     // 双保险：调用方可能忘了过滤自己发的消息，这里再挡一次。
     // 自己发的话如果被当成用户输入回灌，会导致「自己跟自己聊」的死循环。
@@ -2630,6 +2719,31 @@ export class ChatEngine {
         return false
       })
       if (driftHandled) return
+    }
+    /*
+     * 私有钩子分发点（2026-11-05）。
+     *
+     * 有些功能主人明确要求**不进发布仓库**。这类功能不放在 lib/ 里，而是放在
+     * `<dataDir>/private/hooks.mjs`，由这里动态加载；宿主这份代码只保留一个通用
+     * 分发点，不含任何具体功能的实现。谁返回 true，这条消息就不再往下走
+     * （不进模型、不进记忆、不攒批）。
+     *
+     * 位置选在这里而不是 routeAndDispatch 里，是因为「下单 → 等图 → 收图」
+     * 这类交互需要看到**图片段**（norm.images），而 routeAndDispatch 之后那条消息
+     * 可能已经被别的前置分支截走（语音转写、偷表情、记历史）。
+     * 加载失败/没有该目录都是常态，只记 debug，不影响聊天。
+     */
+    const hooksList = await this.loadPrivateHooks()
+    try {
+      // 临时观测（2026-11-06）：把「钩子有没有被调用」写进文件，排查「命令没反应」。
+      fs.appendFileSync(path.join(String(this.config?.dataDir || this.config?.memoryDir || '' ), 'private', 'hook-debug.log'), `${new Date().toISOString()} hooks=${hooksList.length} file=${this._privateHooksFile || '-'} dataDir=${this.config?.dataDir || '-'} memDir=${this.config?.memoryDir || '-'} photos=${(norm.images || []).length}` + `\n`)
+    } catch {}
+    for (const hook of hooksList) {
+      try {
+        if (await hook({ engine: this, ev, norm, scene: ev.message_type === 'private' ? SCENE_PRIVATE : SCENE_MENTION })) return
+      } catch (err) {
+        this.logger('warn', `私有钩子执行失败：${err?.message || err}`)
+      }
     }
     /*
      * 入站语音转文字（2026-10-25，主人 m04041「Molly好像还是不能读语音」）。
@@ -4713,6 +4827,43 @@ export class ChatEngine {
     if (next) next.resolve()
   }
 
+  /*
+   * 被新消息顶掉的那一轮，消息不能丢（2026-11-06，主人 m00215「为什么总是回下一条」）。
+   *
+   * 原来 abort 之后那条消息就彻底没人回答了：她最后回的、引用框挂的永远是后一条，
+   * 主人看到的就是「你总在回我下一句」。这里先把丢掉的那条记在 jobId 上，
+   * 等同一泳道的下一轮开始时（debounce 之后、真去生成之前）取出来一起接。
+   */
+  stashCarry(jobId, trigger) {
+    if (!trigger || !trigger.ev) return
+    if (!this._carry) this._carry = new Map()
+    const k = String(jobId)
+    const list = this._carry.get(k) || []
+    list.push(trigger)
+    while (list.length > 3) list.shift()
+    this._carry.set(k, list)
+  }
+
+  /**
+   * 取出「这一轮要一起接的前几条」。
+   * 只认同一个人、20 秒以内的——不同人连着说的话合并起来会变成串台。
+   */
+  takeCarry(jobId, ev) {
+    if (!this._carry) return []
+    const k = String(jobId)
+    const list = this._carry.get(k)
+    if (!list || !list.length) return []
+    this._carry.delete(k)
+    const now = Date.now()
+    const uid = String(ev?.user_id ?? '')
+    return list.filter((t) => {
+      if (!t || !t.ev) return false
+      if (uid && String(t.ev.user_id ?? '') !== uid) return false
+      if (now - Number(t.at || 0) > 20000) return false
+      return true
+    })
+  }
+
   async scheduleReply({ ev, norm, scene, conv, userName, groupName, mood }) {
     const key = conv.key
     /*
@@ -4730,6 +4881,12 @@ export class ChatEngine {
     if (existing?.phase === 'thinking') {
       // 还在想，没发出去：作废重来
       existing.controller.abort()
+      /*
+       * 2026-11-06（主人 m00215「为什么总是回下一条」）：
+       * 原来这里 abort 完就当那条消息没存在过——被顶掉的那条永远没人回答，
+       * 她最后回的、引用框挂的永远是后一条。现在把它记下来交给下一轮一起接。
+       */
+      this.stashCarry(jobId, existing.trigger)
       this.logger('debug', `打断未发出的回复（${key}）`)
     } else if (existing?.phase === 'sending') {
       // 正在发：让新消息等这一轮结束（由 pending 队列驱动）
@@ -4753,7 +4910,15 @@ export class ChatEngine {
      * 撤回时靠它判断「在途的到底是撤回那条的回复，还是更新的一条」——
      * 只作废来源被撤回的那个 job，别把别人新消息的回复也一起打断。
      */
-    const job = { phase: 'thinking', controller, pending: [], triggerMid: String(ev?.message_id ?? ''), lane }
+    const job = {
+      phase: 'thinking',
+      controller,
+      pending: [],
+      triggerMid: String(ev?.message_id ?? ''),
+      lane,
+      // 这一轮的触发消息原样留着：被下一条打断时要把它带进新一轮（见 stashCarry）
+      trigger: { ev, norm, scene, userName, groupName, at: Date.now() },
+    }
     this.jobs.set(jobId, job)
     // 耗时起点：从"决定开口"算到最后一个气泡落地（含防抖等待与模型生成）。
     // metrics.onReplied 只认毫秒数，别再传时间戳（2026-10-21 修）。
@@ -4793,6 +4958,12 @@ export class ChatEngine {
         return
       }
 
+      // 被打断过的前几条（同一路人连着发的），这一轮要一起接
+      const carry = this.takeCarry(jobId, ev)
+      if (carry.length) {
+        this.stats.carryMerged = (this.stats.carryMerged || 0) + carry.length
+        this.traceReply(key, 'carry', { n: carry.length, anchor: carry[0]?.ev?.message_id })
+      }
       const reply = await this.generate({
         ev,
         norm,
@@ -4804,6 +4975,7 @@ export class ChatEngine {
         signal: controller.signal,
         groupEcho: echo,
         groupCrowd,
+        carry,
       })
       if (controller.signal.aborted) {
         this.traceReply(key, 'aborted', { where: 'generate' })
@@ -4874,7 +5046,15 @@ export class ChatEngine {
 
       job.phase = 'sending'
       // 发送串行：同一会话的另一条泳道可能正在发，气泡不能交叉（引用会挂错）
-      await this.serialSend(conv.key, () => this.deliver({ ev, scene, conv, reply, signal: controller.signal }))
+      await this.serialSend(conv.key, () => this.deliver({
+        ev,
+        scene,
+        conv,
+        reply,
+        signal: controller.signal,
+        // 这一串消息里最早的那条才是她真正要接的（见 deliver 里的 quotePick.anchored）
+        anchorId: carry.length ? String(carry[0]?.ev?.message_id ?? '') : '',
+      }))
       if (!controller.signal.aborted) {
         this.stats.replies++
         /*
@@ -4988,7 +5168,7 @@ export class ChatEngine {
   /**
    * 组织上下文并调用模型，拿到切分后的回复计划。
    */
-  async generate({ ev, norm, scene, conv, userName, groupName, mood, signal, groupEcho = null, groupCrowd = null }) {
+  async generate({ ev, norm, scene, conv, userName, groupName, mood, signal, groupEcho = null, groupCrowd = null, carry = [] }) {
     /*
      * 免费额度用完了没有？这是每轮的第一道判断。
      *
@@ -5106,6 +5286,22 @@ export class ChatEngine {
       this.lastResearch = null
     }
 
+    /*
+     * 这一轮到底在接哪几条（2026-11-06，主人 m00215「为什么总是回下一条」）。
+     *
+     * 同一路人连着发几条时，前面那些会被新消息 abort 掉——这里把被顶掉的
+     * 一并列出来，明确告诉她：先回最前面那条里的问题，后面的当补充。
+     * 引用框也由 anchorId 钉在最前面那条上（见 deliver）。
+     */
+    const thisTurn = []
+    for (const c of Array.isArray(carry) ? carry : []) {
+      const text = String(c?.norm?.text ?? '').trim()
+      if (!text) continue
+      thisTurn.push({ at: Number(c?.at || 0), who: String(c?.userName || ''), text })
+    }
+    const nowText = String(norm?.text ?? '').trim()
+    if (nowText) thisTurn.push({ at: this.now(), who: String(userName || ''), text: nowText })
+
     let system = this.buildSystemPrompt({
       scene,
       userName,
@@ -5129,6 +5325,8 @@ export class ChatEngine {
       groupEcho: Boolean(groupEcho?.active),
       // 2026-10-26：群里人多时，让她只接最近那一条（引用框会锁定它）
       groupCrowd,
+      // 2026-11-06：这一串消息里她要接的是哪几条（连发时前面那条也算）
+      thisTurn,
     })
     if (stall.hardStop) system += `\n\n${this.stallStopSection(stall.misses)}`
     // 超预算不等于降智：上下文照给全量，只是换车道（见上面的注释）。
@@ -5227,6 +5425,8 @@ export class ChatEngine {
 
     const parts = this.persona.splitReply(replyText, {
       maxStickersPerReply: this.config.maxStickersPerReply ?? 2,
+      // 2026-11-06 主人 m00667：一条一句，最多几条。默认 5，可配置调。
+      maxTextBubblesPerReply: this.config.maxTextBubblesPerReply ?? 5,
     })
     if (parts.length === 0) {
       this.traceReply(conv?.key, 'empty-parts', { raw: String(replyText || '').slice(0, 80) })
@@ -6589,7 +6789,7 @@ export class ChatEngine {
   }
 
   /** 按活人节奏把回复发出去 */
-  async deliver({ ev, scene, conv, reply, signal }) {
+  async deliver({ ev, scene, conv, reply, signal, anchorId = '' }) {
     const key = ev.message_type === 'group' ? ev.group_id : ev.user_id
     const isGroup = ev.message_type === 'group'
 
@@ -6701,6 +6901,8 @@ export class ChatEngine {
           explicitAt,
           config: this.config,
           nowMs: this.now(),
+          // 2026-11-06：这一轮真正要接的那条（连发时是这串的第一条）
+          anchorId,
         })
       : null
     /*
@@ -6709,11 +6911,18 @@ export class ChatEngine {
      * pickQuoteTarget 现在会把「引用目标之后又进来几条别人的消息」算成 gap。
      * gap 越大，说明这句话越可能是在答更新的那条——这时候挂引用框就是在指错人。
      * 规矩：gap ≥ 4 就不挂（宁可只发文字），并在 stats 里记一笔，方便看真实分布。
+     *
+     * 2026-11-06 补充：anchor 是她的调用方钉死的「这一轮就接这条」，
+     * 关系到「总是回下一条」这件事本身——这种情况 gap 再大也照样挂，
+     * 否则被顶掉的那条永远等不到一个引用框。
      */
-    const quoteStale = Boolean(quotePick && Number(quotePick.gap) >= 4)
+    const quoteStale = Boolean(quotePick && !quotePick.anchored && Number(quotePick.gap) >= 4)
     if (quoteStale) {
       this.stats.quoteStale = (this.stats.quoteStale || 0) + 1
       this.logger('debug', `引用目标太旧（差 ${quotePick.gap} 条），这轮不挂引用：${quotePick.messageId}`)
+    }
+    if (quotePick && !quoteStale && anchorId && String(quotePick.messageId || '') === String(anchorId)) {
+      this.stats.quoteAnchored = (this.stats.quoteAnchored || 0) + 1
     }
     const quoteTarget = quotePick && !quoteStale ? (quotePick.messageId || '') : ''
     const triggerNudge = isGroup && isPureNudge(ev)

@@ -7,6 +7,31 @@
 
 ---
 
+## 2026-11-06 · v1.1.8-preview.2：「总是回下一条」——被打断的那条不再被丢掉
+
+> 只动插件侧文件（`lib/engine.js`、`lib/quote-at.js`、`lib/engine-context.js`、`lib/persona.js`、`lib/relations.js`）。完整说明见 `docs/RELEASE-1.1.8-preview.2.md`，技术记录见 `docs/quote-anchor-carry-2026-11-06.md`。
+
+**改了什么**
+
+- **调度（`lib/engine.js`）**：`scheduleReply()` 现在把每个 job 的 `trigger` 存下来；同泳道 abort 时 `stashCarry()` 留存，下一轮 debounce 结束后 `takeCarry()` 取回并合并（**同一个人、20 秒内、最多 3 条**），`generate()` 与 `deliver()` 多收 `carry` / `anchorId`。被打断那条消息不再永久消失。
+- **引用目标（`lib/quote-at.js`）**：`pickQuoteTarget()` 新增 `anchorId` 入参与 `anchored` 出参，优先级 `explicit-at > anchor > nudge > 触发条(≤1) > newest`；`lastMessageFrom()` / `lastOtherMessage()` 新增 `excludeId`——nudge 分支终于能排除「叫醒那条」去找叫他的人真正的上一条（11-05 的第①条修复是死代码，本轮修活）。
+- **悬空引用豁免（`lib/engine.js`）**：`quoteStale = gap >= 4` 的丢弃规则对 `anchored` 命中豁免，否则刚接回来的正题又会因 gap 大而不挂引用。
+- **提示词（`lib/engine-context.js`）**：新增「# 这一轮你要接的是这几条」段（`thisTurn ≥ 2` 时编号列出，要求**先回答第 1 条**、别只接最后一条）；群体噪声段从「只接最近的那一条」改成「只接一个人、接他那句正事」。
+- **可观测**：`stats.carryMerged` / `stats.quoteAnchored` 两个计数器，`replyTrace` 新增 `carry` 阶段。
+
+**为什么**
+
+实测 18:09:46 主人问「为什么总是回下一条」，18:09:54 补一张图 → 同泳道 abort → 第一句从未被回答，18:10:27 的回复引用挂在图上。生成要 20–58 秒，这个 abort 几乎必然发生。
+
+**怎么退回**
+
+见发布说明第六节：可单独退「合并」或「anchor」，或整包退到 1.1.8-preview.1 的三个文件。
+
+**验证**
+
+`tools/test-quote-anchor.mjs` 33 / `tools/test-carry.mjs` 7 / `tools/test-this-turn.mjs` 5 / `tools/test-engine-text.mjs` 7，全绿；三个 lib 文件 `node --check` 通过。
+
+---
 ## 2026-11-05 · v1.1.8-preview.1：引用不再挂错、称呼不再乱叫主人
 
 > 只动插件侧三件事，控制台界面与桌面外壳与 1.1.7 完全一致。完整说明见 `docs/RELEASE-1.1.8-preview.1.md`。

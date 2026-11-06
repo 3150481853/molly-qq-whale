@@ -213,7 +213,7 @@ export class RelationStore {
   }
 
   /** 给模型看的关系段落。没有记录时返回空串，别让 prompt 里出现空的"关系：" */
-  contextFor(key) {
+  contextFor(key, { ownerQq = '' } = {}) {
     const r = this.data[key]
     if (!r) return ''
     this.applyDecay(r)
@@ -221,9 +221,25 @@ export class RelationStore {
     const lines = []
     lines.push(`你和这个人的关系：${b.label}（亲密度 ${Math.round(r.closeness)}/100，聊过 ${r.talkCount || 0} 次）`)
     lines.push(`相处方式：${b.tip}`)
-    if (r.impression?.length) {
+    /*
+     * 2026-11-06：印象里但凡提到「主人」，只对主人本人成立。
+     * 真机事故：group:666666666:3329150495（白日梦制造商）的 impression 里
+     * 写死了一条「他是你的主人」，每轮都渲染成「你对他的印象：- 他是你的主人」，
+     * 直接盖过 engine-context 里那段「他不是你主人」的护栏。
+     * 这里按 QQ 号过滤：说话人不是 ownerUin，就不把这类印象喂进去。
+     */
+    const owner = String(ownerQq || '').trim()
+    const speakerQq = String(key || '').split(':').pop()
+    const impressions = (r.impression || [])
+      .slice(-5)
+      .filter((it) => {
+        const text = String(it?.text || '')
+        if (!/主人/.test(text)) return true
+        return Boolean(owner) && speakerQq === owner
+      })
+    if (impressions.length) {
       lines.push('你对他的印象：')
-      for (const it of r.impression.slice(-5)) lines.push(`- ${it.text}`)
+      for (const it of impressions) lines.push(`- ${it.text}`)
     }
     if (r.insideJokes?.length) {
       lines.push('你们之间的梗（可以自然地拿出来用，别硬塞）：')

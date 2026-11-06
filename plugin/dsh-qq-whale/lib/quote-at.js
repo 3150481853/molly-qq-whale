@@ -108,8 +108,9 @@ export function recentSpeakers(history, limit = QUOTE_DEFAULTS.atWindowMessages)
  * @param {number} [limit]
  * @returns {{messageId:string, userId:string, who:string}|null}
  */
-export function lastOtherMessage(history, limit = 40) {
+export function lastOtherMessage(history, limit = 40, excludeId = '') {
   const list = Array.isArray(history) ? history : []
+  const skip = excludeId == null ? '' : String(excludeId)
   let seen = 0
   for (let i = list.length - 1; i >= 0 && seen < limit; i--) {
     const h = list[i]
@@ -117,6 +118,7 @@ export function lastOtherMessage(history, limit = 40) {
     seen++
     const id = h.messageId == null ? '' : String(h.messageId)
     if (!id || id.startsWith('self-')) continue
+    if (skip && id === skip) continue
     return { messageId: id, userId: String(h.userId || ''), who: String(h.who || '') }
   }
   return null
@@ -134,9 +136,10 @@ export function lastOtherMessage(history, limit = 40) {
  * @param {number} [limit]
  * @returns {{messageId:string, userId:string, who:string}|null}
  */
-export function lastMessageFrom(history, userId, limit = 40) {
+export function lastMessageFrom(history, userId, limit = 40, excludeId = '') {
   const qq = String(userId || '')
   if (!qq) return null
+  const skip = excludeId == null ? '' : String(excludeId)
   const list = Array.isArray(history) ? history : []
   let seen = 0
   for (let i = list.length - 1; i >= 0 && seen < limit; i--) {
@@ -146,6 +149,8 @@ export function lastMessageFrom(history, userId, limit = 40) {
     if (String(h.userId || '') !== qq) continue
     const id = h.messageId == null ? '' : String(h.messageId)
     if (!id || id.startsWith('self-')) return null
+    // 2026-11-06：叫醒那条本身通常也在历史里——跳过它才是「他上一条」
+    if (skip && id === skip) continue
     return { messageId: id, userId: qq, who: String(h.who || '') }
   }
   return null
@@ -207,10 +212,17 @@ export function pickQuoteTarget(input = {}) {
   const nudge = isPureNudge(ev)
   const crowd = crowdStats(history, Number(input.nowMs ?? Date.now()), { windowSeconds })
   const crowded = crowd.count >= minMessages && crowd.speakers >= minSpeakers
+  /*
+   * anchorId（2026-11-06，主人 m00215「为什么总是回下一条」）：
+   * engine 把「这一轮真正要接的那条」传进来——同一路人连发几条时，
+   * 是这一串里的第一条（他真正问的那句），不是最后那条。
+   */
+  const anchorId = input.anchorId == null ? '' : String(input.anchorId)
   const reasons = []
   if (nudge) reasons.push('nudge')
   if (crowded) reasons.push('crowded')
   if (input.explicitAt) reasons.push('explicit-at')
+  if (anchorId) reasons.push('anchor')
   if (!reasons.length) return null
 
   const triggerId = ev.message_id == null ? '' : String(ev.message_id)
@@ -244,12 +256,26 @@ export function pickQuoteTarget(input = {}) {
     const named = lastMessageFrom(history, input.explicitAt)
     if (named && named.messageId !== triggerId) target = named
   }
+  /*
+   * ①.5 这一轮真正要接的那条（2026-11-06）。
+   *
+   * 真机现场（主人 m00215 截图）：18:09:46 他问「为什么总是回下一条」→ 她开始想；
+   * 18:09:54 他又甩了张表情图 → 同一泳道 abort 重来、只留后一条；33 秒后她回出来了，
+   * 内容其实在答那句问题，引用框却挂在表情图上。下面这几步本来想「引她实际接的那条」，
+   * 可最后一步永远是 newest —— 她自己也认了「我眼睛一看到下一条就先冲出去了」。
+   * 所以现在由 engine 明确传 anchorId（这一串消息里的第一条），优先于下面所有猜测。
+   */
+  let anchored = false
+  if (!target && anchorId && !anchorId.startsWith('self-') && indexOf(anchorId) >= 0) {
+    target = { messageId: anchorId }
+    anchored = true
+  }
   // ② 纯叫醒：引「叫她那个人」自己上一条；他没有上一条才退「最后一条非自己」
   if (!target && nudge) {
     const caller = String(ev.user_id || '')
-    const mine = caller ? lastMessageFrom(history, caller) : null
+    const mine = caller ? lastMessageFrom(history, caller, 40, triggerId) : null
     if (mine && mine.messageId !== triggerId) target = mine
-    if (!target) target = lastOtherMessage(history)
+    if (!target) target = lastOtherMessage(history, 40, triggerId)
   }
   // ③ 兜底：这一轮触发那条——但它要是已经被刷过去两条以上，就改引最新那条，
   //    因为她生成时读的是最新历史，回答的也是新的那句，「只接最近那一条」是提示词本身就写了的口径。
@@ -271,6 +297,8 @@ export function pickQuoteTarget(input = {}) {
     speakers: crowd.speakers,
     /** 引用目标之后又进来了几条别人的消息（0 = 就是最新那条） */
     gap,
+    /** 是否由 engine 指定的 anchor（「这一轮要接的第一条」）选中 */
+    anchored,
   }
 }
 

@@ -8,7 +8,7 @@
     <AssemblyName>Molly</AssemblyName>
     <RootNamespace>MollyDesktop</RootNamespace>
     <Product>Molly</Product>
-    <Version>1.1.8-preview.1</Version>
+    <Version>1.1.8-preview.2</Version>
     <ApplicationIcon>Assets\Molly.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>

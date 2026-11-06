@@ -3165,3 +3165,444 @@ button.command-result>span:last-child{white-space:nowrap}
 .mem-toggles { display: flex; flex-direction: column; gap: 2px; margin-top: 12px; }
 html[data-glass="true"] .mem-item { border-bottom-color: rgba(25, 33, 30, .08); }
 html[data-glass="true"] .mem-item.is-total { border-top-color: rgba(25, 33, 30, .14); }
+
+/* §40 同机参考行 + 游戏模式（2026-11-06，主人 m07510）
+   参考行故意比 Molly 自己的行淡一档：读的时候先看「Molly 合计」，需要判断整机才往下看。 */
+.mem-head {
+  padding: 14px 2px 4px;
+  font-size: 11px; letter-spacing: .08em; color: var(--stone);
+}
+.mem-item.is-ref { color: var(--ink-soft, #4a554e); }
+.mem-item.is-ref b { font-weight: 500; color: var(--stone); }
+.mem-item.is-grand { font-weight: 650; }
+.mem-game { margin-top: 14px; }
+#memCard.is-game { box-shadow: inset 0 0 0 1px rgba(41, 79, 62, .22); }
+.mem-game b { display: inline-flex; align-items: center; gap: 6px; }
+#memCard.is-game .mem-game b::after {
+  content: "已开启";
+  padding: 0 7px; border-radius: 999px;
+  font-size: 10px; font-weight: 500; line-height: 1.7;
+  color: #fff; background: var(--primary);
+}
+
+/* ==========================================================================
+   §41 在线时间页（2026-11-06）
+   只作用于 online 页（.on- 前缀），不改上面任何既有规则。
+   柱子 / 热力格 / 轨迹段都是真 div：圆角、发丝线、玻璃高光全部走 CSS，
+   所以没有 canvas 的锯齿，也不用为 retina 再画一份。
+   ========================================================================== */
+
+.on-page .page-sub { max-width: 760px; }
+
+/* 四张小卡片：数字大、单位小一号，右上角挂可用率胶囊（spec §4.1） */
+.on-kpis {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.on-kpi {
+  min-width: 0;
+  padding: 15px 16px 14px;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: var(--canvas);
+  box-shadow: 0 1px 2px rgba(30, 45, 35, .015);
+}
+html[data-shell="desktop"][data-glass="true"] .on-kpi {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .55),
+    0 1px 2px rgba(30, 45, 35, .04),
+    0 18px 36px -26px rgba(30, 45, 35, .28);
+}
+.on-kpi-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 20px;
+}
+.on-kpi-label {
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: .06em;
+  color: var(--stone);
+  white-space: nowrap;
+}
+.on-kpi-value {
+  margin-top: 8px;
+  font-size: 30px;
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -.035em;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.on-kpi-value small {
+  margin: 0 2px 0 3px;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--stone);
+}
+.on-kpi-value .on-num { font-variant-numeric: tabular-nums; }
+.on-kpi-text {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -.01em;
+}
+.on-kpi-note {
+  margin-top: 7px;
+  font-size: 11.5px;
+  color: var(--steel);
+  font-variant-numeric: tabular-nums;
+}
+
+.on-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: var(--r-full);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.on-pill.is-ok { background: var(--tint-mint); color: var(--success); }
+.on-pill.is-warn { background: var(--tint-peach); color: var(--warning); }
+.on-pill.is-bad { background: var(--tint-rose); color: var(--error); }
+.on-pill.is-idle { background: var(--tint-gray); color: var(--steel); }
+
+.on-card { margin-bottom: 16px; }
+.on-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 15px;
+}
+.on-card-head .card-title { margin-bottom: 0; }
+
+/* 范围 / 时段切换：胶囊分段控件，不做阴影外发光 */
+.on-range,
+.on-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-full);
+  background: var(--surface);
+}
+.on-tab {
+  height: 24px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: var(--r-full);
+  background: transparent;
+  color: var(--steel);
+  font: 11.5px/1 var(--font);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .12s ease, color .12s ease;
+}
+.on-tab:hover { color: var(--ink); }
+.on-tab.is-active {
+  background: var(--canvas);
+  color: var(--ink);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(30, 45, 35, .08);
+}
+
+/* 分天：横幅 + 两条「系统状态」细柱 */
+.on-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 13px 16px;
+  border-radius: 10px;
+}
+.on-banner.is-ok { background: rgba(41, 79, 62, .13); box-shadow: inset 0 0 0 1px rgba(41, 79, 62, .10); }
+.on-banner.is-warn { background: rgba(184, 134, 43, .14); box-shadow: inset 0 0 0 1px rgba(184, 134, 43, .12); }
+.on-banner.is-bad { background: rgba(176, 74, 63, .11); box-shadow: inset 0 0 0 1px rgba(176, 74, 63, .10); }
+.on-banner.is-idle { background: rgba(25, 33, 30, .05); }
+.on-banner.is-ok .on-banner-title { color: #1f4433; }
+.on-banner-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  border-radius: 50%;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1;
+}
+.on-banner.is-ok .on-banner-icon { background: rgba(41, 79, 62, .14); color: var(--success); }
+.on-banner.is-warn .on-banner-icon { background: rgba(184, 134, 43, .18); color: var(--warning); }
+.on-banner.is-bad .on-banner-icon { background: rgba(176, 74, 63, .16); color: var(--error); }
+.on-banner.is-idle .on-banner-icon { background: rgba(25, 33, 30, .07); color: var(--stone); }
+.on-banner-body { min-width: 0; }
+.on-banner-title {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -.01em;
+  color: var(--ink);
+}
+.on-banner-sub {
+  margin-top: 4px;
+  font-size: 12.5px;
+  color: var(--stone);
+  font-variant-numeric: tabular-nums;
+}
+
+.on-days-wrap { min-width: 0; overflow-x: auto; }
+.on-day-rows { display: grid; gap: 15px; }
+.on-day-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.on-day-name {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13.5px;
+  color: var(--ink);
+}
+.on-day-name i {
+  width: 12px;
+  font-style: normal;
+  font-size: 12px;
+  text-align: center;
+  color: var(--stone);
+}
+.on-day-value {
+  font-size: 12px;
+  color: var(--steel);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 一天一根细柱、2px 缝，整条像一根被切成小段的带子（status.deepseek.com 的观感）。
+   30 天时每根自然变宽、90 天时自动变细 —— 不要用 max-width 卡死再用 space-between 摊开，
+   那样 30 天会变成「一排疏开的牙齿」，中间大片空白，反而不像状态页。 */
+.on-bars {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  height: 26px;
+}
+/* 天数少（≤10）时把缝拉开一点，别让柱子粘成一整条实心带 */
+.on-day-rows.is-few .on-bars { gap: 8px; }
+.on-bar {
+  display: block;
+  flex: 1 1 0;
+  min-width: 2px;
+  height: 26px;
+  border-radius: 2px;
+  background: var(--hairline);
+}
+.on-bar.is-ok { background: rgba(41, 79, 62, .88); }
+.on-bar.is-warn { background: #b8862b; }
+.on-bar.is-bad { background: #b04a3f; }
+.on-bar.is-none { background: rgba(25, 33, 30, .055); }
+.on-bar.is-cover { min-width: 4px; }
+.on-bar.is-today { box-shadow: 0 0 0 1px var(--primary); }
+.on-days-note {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.on-days-axis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 7px;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 分时：24 列等宽，柱高 = 该小时在线比例 × 72px */
+.on-hour-head { margin-bottom: 12px; }
+.on-hour-title { font-size: 12.5px; font-weight: 600; color: var(--charcoal); }
+.on-hour-sub { margin-top: 3px; font-size: 11.5px; color: var(--stone); font-variant-numeric: tabular-nums; }
+.on-hours-grid {
+  display: grid;
+  grid-template-columns: repeat(24, 1fr);
+  gap: 4px;
+  align-items: end;
+  height: 72px;
+}
+.on-hour {
+  display: flex;
+  align-items: flex-end;
+  height: 72px;
+  border-radius: 2px;
+}
+.on-hour i {
+  display: block;
+  width: 52%;
+  margin: 0 auto;
+  min-height: 2px;
+  border-radius: 3px;
+  background: rgba(41, 79, 62, .78);
+}
+.on-hour.is-none i { background: rgba(25, 33, 30, .10); }
+/* 还没到的钟点：不画 0 高的假柱子，也不铺整列灰块（右边会像一块脏底），
+   只留一小截 3px 的淡色起点，跟柱子的 52% 宽度对齐。 */
+.on-hour.is-future {
+  background: transparent;
+  border-radius: 0;
+  position: relative;
+}
+.on-hour.is-future::after {
+  content: "";
+  display: block;
+  width: 52%;
+  height: 3px;
+  margin: 0 auto 1px;
+  border-radius: 2px;
+  background: rgba(25, 33, 30, .06);
+}
+/* 当前钟点：不用硬描边（会像选中态），改成柱底一条细线 + 淡底 */
+.on-hour.is-now {
+  background: rgba(41, 79, 62, .05);
+  border-radius: 3px;
+  box-shadow: inset 0 -2px 0 -1px rgba(41, 79, 62, .55);
+}
+.on-hours-axis {
+  display: grid;
+  grid-template-columns: repeat(24, 1fr);
+  gap: 4px;
+  margin-top: 6px;
+  font-size: 10.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.on-hours-axis .is-end { text-align: right; }
+
+.on-sub-title {
+  margin: 22px 0 11px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--charcoal);
+}
+
+/* 热力：7 行 × 24 列，5 档透明度，空格给一条极淡的底 */
+.on-heat-grid { display: flex; flex-direction: column; gap: 2px; }
+.on-heat-row {
+  display: grid;
+  grid-template-columns: 28px repeat(24, 1fr);
+  gap: 2px;
+  align-items: center;
+}
+.on-heat-label {
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.on-heat-cell { display: block; height: 16px; border-radius: 3px; }
+.on-heat-row.is-head .on-heat-cell { display: none; }
+.on-heat-hour { font-size: 10.5px; line-height: 14px; color: var(--muted); }
+.on-heat-hour.is-end { text-align: right; }
+
+/* 轨迹：28px 的一条带子 + 0/6/12/18/24 刻度 + 今天的会话列表 */
+.on-band {
+  position: relative;
+  height: 28px;
+  border-radius: 6px;
+  background: rgba(25, 33, 30, .05);
+  overflow: hidden;
+}
+.on-seg { position: absolute; top: 0; bottom: 0; display: block; min-width: 1px; }
+.on-seg.is-online { background: rgba(41, 79, 62, .85); }
+.on-seg.is-offline { background: rgba(25, 33, 30, .26); }
+.on-seg.is-unknown {
+  background: repeating-linear-gradient(45deg, rgba(25, 33, 30, .12) 0 2px, transparent 2px 5px);
+}
+.on-ticks {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 6px;
+  font-size: 10.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.on-sessions { margin-top: 14px; display: flex; flex-direction: column; }
+.on-session {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--hairline-soft);
+  font-size: 12px;
+  color: var(--charcoal);
+  font-variant-numeric: tabular-nums;
+}
+.on-session:last-child { border-bottom: 0; }
+.on-session-dash { color: var(--muted); }
+.on-session-dur { margin-left: auto; color: var(--steel); }
+.on-session.is-ongoing .on-session-dur { color: var(--primary); font-weight: 600; }
+.on-session-more { padding-top: 9px; font-size: 11.5px; color: var(--stone); }
+
+.on-empty {
+  padding: 30px 12px;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--stone);
+}
+.on-empty-sm { padding: 16px 10px; }
+.on-empty .ar-error { margin: 0 0 12px; }
+
+/* 悬浮卡：挂在 body 上（换页动画会给 .page 加 transform，fixed 放在里面会跑偏） */
+.on-tip {
+  position: fixed;
+  z-index: 60;
+  max-width: 320px;
+  padding: 6px 9px;
+  border-radius: 6px;
+  background: #1f2724;
+  color: #f4f5f2;
+  font-size: 11.5px;
+  line-height: 1.5;
+  box-shadow: 0 8px 22px rgba(20, 30, 25, .22);
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+.on-tip[hidden] { display: none; }
+
+@media (max-width: 900px) {
+  .on-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .on-card-head { flex-wrap: wrap; }
+  .on-kpi-value { font-size: 26px; }
+  .on-kpi-text { font-size: 16px; }
+  .on-hours-grid,
+  .on-hours-axis { gap: 3px; }
+  .on-heat-row { grid-template-columns: 24px repeat(24, 1fr); gap: 1px; }
+  .on-heat-cell { height: 14px; }
+}
+
+@media (max-width: 640px) {
+  .on-kpis { gap: 10px; }
+  .on-kpi { padding: 13px 13px 12px; }
+  .on-kpi-value { font-size: 23px; }
+  .on-banner { padding: 12px 13px; }
+  .on-day-value { font-size: 11.5px; }
+}
+
+/* §41 补：.on-tabs / .on-range 自带 display，得显式让 hidden 生效（空态时藏起页签） */
+.on-tabs[hidden],
+.on-range[hidden] { display: none; }
+
+
+

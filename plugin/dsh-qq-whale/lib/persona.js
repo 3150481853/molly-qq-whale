@@ -130,7 +130,7 @@ export class PersonaStore {
     }
     lines.push('')
     lines.push('# 输出格式')
-    lines.push('直接说话。要分几条发就用 <sep/> 隔开，每条都是你正常会说的一口气。')
+    lines.push('直接说话。要分几条发就用 <sep/> 或者换行隔开——**一条一句**，别把两句话塞进同一条；每条都是你正常会说的一口气。')
     /*
      * 表情包的口径比早先强得多（用户 m03900：「要让他学会用表情包代替回文字」）。
      *
@@ -401,12 +401,33 @@ export class PersonaStore {
         parts.push(c)
         continue
       }
-      // 文本块：按 <sep/> 切；没有 <sep/> 时保留整段（哪怕长），
-      // 因为"一口气发长消息"也是真人行为，不该被机械切碎。
+      // 文本块：先按 <sep/> 切，再把换行也当分隔符。
+      // （2026-11-06 主人 m00667「不要多句话揉在一起，分开回复」：
+      //  模型经常不写 <sep/>、只用换行，以前换行会整段留在同一个气泡里，
+      //  群里就看到两句话挤在一条——现在一行一条。）
       const pieces = c.text.split(/<sep\s*\/?>/i)
       for (const p of pieces) {
         const t = p.replace(/<br\s*\/?>/gi, '\n').trim()
-        if (t) parts.push({ type: 'text', text: t })
+        if (!t) continue
+        for (const line of t.split('\n')) {
+          const one = line.trim()
+          if (one) parts.push({ type: 'text', text: one })
+        }
+      }
+    }
+    /*
+     * 文字气泡上限（2026-11-06 主人 m00667）。
+     * 一行一条之后，模型要是吐十行就会连发十条——从「揉在一起」变成「刷屏」。
+     * 超出的并回最后一条文字气泡里：宁可少几条，也不刷屏。
+     */
+    const maxTextBubbles = Math.max(1, Number(options.maxTextBubblesPerReply) || 5)
+    const textParts = parts.filter((p) => p.type === 'text')
+    if (textParts.length > maxTextBubbles) {
+      const lastKept = textParts[maxTextBubbles - 1]
+      for (const o of textParts.slice(maxTextBubbles)) {
+        lastKept.text = `${lastKept.text}\n${o.text}`
+        const idx = parts.indexOf(o)
+        if (idx >= 0) parts.splice(idx, 1)
       }
     }
     // 兜底：如果模型一个字没吐，别发空消息

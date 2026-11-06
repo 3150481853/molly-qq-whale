@@ -135,7 +135,7 @@ const PORT = Number(pick('MOLLY_CONSOLE_PORT', 'port', 19392)) || 19392;
 // 控制台版本：以插件 package.json 为唯一真源，别在这里写死（2026-10-25 主人 m03522：
 // 左下角一直显示 v1.0.0 就是这一行写死的；发布版本与插件版本从此自动同步）。
 // exe 模式读不到 package.json 时退回 FALLBACK_VERSION，保证打包版也有版本号。
-const FALLBACK_VERSION = '1.1.8-preview.1';
+const FALLBACK_VERSION = '1.1.8-preview.2';
 const VERSION = (() => {
   try {
     const pkg = JSON.parse(
@@ -498,17 +498,30 @@ async function resolveHostBase() {
   return hostProbing;
 }
 
+/* DSH 重启后端口会变。缓存里的旧 base 只会 180 秒后自然过期，而这段时间界面全是
+   「插件不可达」——用户看到的就是"刚重启完控制台瞎了"。连不上就立刻作废缓存重探一次。 */
+function forgetHost() {
+  hostCache = { base: null, port: 0, at: 0 };
+}
+
 // ── /api/overview 聚合（契约 §3.2：任何上游挂了都返回 200）───────────────────
 async function buildOverview() {
   // build 让前端能判断自己跑的是不是最新前端文件（不一致就自动 reload）
   const out = { ok: true, at: Date.now(), build: consoleBuild() };
 
   // 1) 插件（DSH 宿主 /dsh-qq-whale/state）——端口后置位，先用 7053
-  const pluginBase = await resolveHostBase();
+  let pluginBase = await resolveHostBase();
+  let stateRes = pluginBase ? await jget(`${pluginBase}/dsh-qq-whale/state`, 6000) : null;
+  if (pluginBase && stateRes && !stateRes.ok && !stateRes.status) {
+    /* 端口变了（宿主重启）：立刻丢掉缓存重探，别等 180 秒过期 */
+    forgetHost();
+    pluginBase = await resolveHostBase();
+    stateRes = pluginBase ? await jget(`${pluginBase}/dsh-qq-whale/state`, 6000) : null;
+  }
   if (!pluginBase) {
     out.plugin = { reachable: false, error: '没探到 DSH 宿主端口（1024-65535）' };
   } else {
-    const r = await jget(`${pluginBase}/dsh-qq-whale/state`, 3000);
+    const r = stateRes;
     if (!r.ok) {
       out.plugin = { reachable: false, error: r.error, base: pluginBase };
     } else {
@@ -814,7 +827,19 @@ async function buildNapcat() {
 // 客户端探测缓存：4 秒轮询下不能每轮都等一次连接超时（不可达时尤其慢）。
 const clientProbeCache = { key: '', at: 0, reachable: false };
 const CLIENT_PROBE_TTL = 10_000;
-const CLIENT_PROBE_TIMEOUT = 800;
+/* 800ms 太紧：SnowLuma 在扫码/重连那几秒里 HTTP 会排队，探测一超时界面就翻成
+   「Molly 还没连上」，主人 2026-11-06 反馈「时不时变成已登录未连接」就是这个。
+   给到 1.5s，同时靠下面的 bridgeGrace 兜住偶发超时。 */
+const CLIENT_PROBE_TIMEOUT = 1_500;
+
+/*
+ * 桥接状态记忆（2026-11-06）：宿主在跑模型 / 写记忆时 /dsh-qq-whale/state 偶尔
+ * 3~5 秒才回，控制台 3 秒就判「插件不可达」，于是 QQ 状态从「在线」翻成
+ * 「QQ 在运行·Molly 未连」，几秒后又自己变回来 —— 是读超时，不是真断线。
+ * 记住「最近一次在线」的时刻，45 秒内读不到就沿用这个结论，并标 stale。
+ */
+const BRIDGE_GRACE_MS = 45_000;
+const lastBridge = { at: 0, online: false, state: 'unknown' };
 
 async function probeClientWebui() {
   const backend = currentBackend();
@@ -844,9 +869,26 @@ async function probeClientWebui() {
 async function buildQqStatus(plugin, napcat) {
   const backend = currentBackend();
   const link = (plugin && plugin.link) || {};
-  const bridgeState = link.state || 'unknown';
-  const bridgeReady = link.ready === true;
-  const bridgeOnline = bridgeReady && bridgeState === 'online';
+  const pluginReachable = Boolean(plugin && plugin.reachable !== false);
+  let bridgeState = link.state || 'unknown';
+  let bridgeReady = link.ready === true;
+  let bridgeOnline = bridgeReady && bridgeState === 'online';
+  let stale = false;
+  if (bridgeOnline) {
+    lastBridge.at = Date.now();
+    lastBridge.online = true;
+    lastBridge.state = bridgeState;
+  } else if (!pluginReachable && lastBridge.online && Date.now() - lastBridge.at < BRIDGE_GRACE_MS) {
+    // 读超时：沿用最近一次「在线」，别把「读不到」当成「断了」
+    bridgeOnline = true;
+    bridgeReady = true;
+    bridgeState = lastBridge.state;
+    stale = true;
+  } else if (pluginReachable) {
+    lastBridge.at = Date.now();
+    lastBridge.online = false;
+    lastBridge.state = bridgeState;
+  }
   // 客户端进程的两种证据：WebUI 能应答，或 OneBot HTTP 已经回过话
   //（回过话说明 SnowLuma 进程活着，哪怕 QQ 还没登录）。任一成立都算「进程可达」。
   const webuiOk = await probeClientWebui();
@@ -855,25 +897,32 @@ async function buildQqStatus(plugin, napcat) {
   const level = bridgeOnline
     ? (clientReachable ? 'connected' : 'bridge-only')
     : (clientReachable ? 'client-only' : 'offline');
-  const text = {
-    connected: 'Molly 已连接 QQ',
-    'bridge-only': 'Molly 已连接 QQ（客户端状态信息不可用）',
-    'client-only': 'QQ 在运行，但 Molly 还没连上',
-    offline: 'QQ 未连接',
-  }[level];
-  const nextStep = {
-    connected: '',
-    'bridge-only': '链路已通，消息能正常收发就不用管；持续异常去「运维」看日志。',
-    'client-only': '到「执行块」点「重新检查连接」；刚重启过 QQ 就等 10~25 秒再刷新，或去「守护」看 watchdog 结论。',
-    offline: '点「重新登录 QQ（扫码）」（「QQ 连接」页，或总览页的提示条）。',
-  }[level];
+  const text = stale
+    ? 'Molly 已连接 QQ（本次读取超时，沿用上次结果）'
+    : {
+      connected: 'Molly 已连接 QQ',
+      'bridge-only': 'Molly 已连接 QQ（客户端状态信息不可用）',
+      'client-only': 'QQ 在运行，但 Molly 还没连上',
+      offline: 'QQ 未连接',
+    }[level];
+  const nextStep = stale
+    ? '宿主在跑模型或写记忆时会读得慢，偶发超时不用管；连续一两分钟都这样再去「运维」看日志。'
+    : {
+      connected: '',
+      'bridge-only': '链路已通，消息能正常收发就不用管；持续异常去「运维」看日志。',
+      'client-only': '到「执行块」点「重新检查连接」；刚重启过 QQ 就等 10~25 秒再刷新，或去「守护」看 watchdog 结论。',
+      offline: '点「重新登录 QQ（扫码）」（「QQ 连接」页，或总览页的提示条）。',
+    }[level];
   return {
     level,
     text,
     nextStep,
+    stale,
     bridgeState,
     bridgeReady,
     bridgeOnline,
+    bridgeLastOkAt: lastBridge.online ? lastBridge.at : 0,
+    pluginReachable,
     clientReachable,
     clientLogin,
     backend,
@@ -1920,6 +1969,34 @@ async function proxyPlugin(method, ep, payload, ms = 20_000) {
   return { ok: true, data: d ?? null };
 }
 
+/* 在线时间统计的 30 秒内存缓存：切页 / 换区间会连着问几次，而插件那边要扫全量采样。 */
+const onlineStatsCache = new Map();
+
+/**
+ * 读插件自己的 JSON 接口（路径不带 /dsh-qq-whale 前缀）。
+ *
+ * 为什么不用 proxyPlugin：它的前缀写死成 /dsh-qq-whale，而在线时间插件挂在
+ * /dsh-online-time 下，且返回的是裸 JSON（没有 { ok, data } 外壳）。这里只做
+ * 「拼宿主 base + 取 JSON」，业务解包交给调用方。失败一律给 { ok:false, error }。
+ */
+async function pluginJson(path, ms = 8000) {
+  let base = await resolveHostBase();
+  if (!base) return { ok: false, status: 503, error: '没探到 DSH 宿主端口' };
+  let r = await fetchJson(base + path, {}, ms);
+  if (!r.ok && !r.status) {
+    /* 连不上（多半是 DSH 换端口了）：作废缓存、重新探一次再试 */
+    forgetHost();
+    base = await resolveHostBase();
+    if (base) r = await fetchJson(base + path, {}, ms);
+  }
+  if (!r.ok) {
+    const d = r.data;
+    const msg = (d && (d.error || d.message)) || (r.status ? `HTTP ${r.status}` : r.error) || '插件请求失败';
+    return { ok: false, status: r.status || 502, error: msg, data: d ?? null };
+  }
+  return { ok: true, data: r.data ?? null };
+}
+
 /** 每个动作返回 { ok, data?, stdout?, stderr?, error?, status? } */
 /**
  * 把一条控制台自己的操作日志追加到 out/console.log。
@@ -2072,6 +2149,7 @@ const MEM_DEFAULTS = Object.freeze({
   sovitsIdleMin: 10,       // 语音服务空闲多少分钟退出（0 = 不退出）
   guard: true,             // 内存守卫：紧张时先卸载重排
   suspendOnMinimize: true, // 桌面窗口最小化时挂起 WebView2
+  gameMode: false,         // 游戏模式：热禁用语音、唱歌，顺便把重排卸掉
 });
 const MEM_WATCH = [
   { key: 'shell', label: '桌面外壳 + WebView2', names: ['Molly.exe', 'msedgewebview2.exe'] },
@@ -2099,7 +2177,7 @@ function writeMemConfig(patch) {
     const n = Number(patch[k]);
     if (Number.isFinite(n) && n >= 0 && n <= 240) next[k] = Math.round(n);
   }
-  for (const k of ['guard', 'suspendOnMinimize']) {
+  for (const k of ['guard', 'suspendOnMinimize', 'gameMode']) {
     if (typeof patch[k] === 'boolean') next[k] = patch[k];
   }
   try {
@@ -2119,6 +2197,9 @@ function sampleMemory() {
     at: Date.now(),
     groups: MEM_WATCH.map((g) => ({ key: g.key, label: g.label, count: 0, mb: 0 })),
     totalMb: 0,
+    others: [],
+    othersMb: 0,
+    grandTotalMb: 0,
   };
   if (process.platform !== 'win32') return empty;
   let list = [];
@@ -2185,7 +2266,25 @@ function sampleMemory() {
     totalMb += s.mb;
     return { key: g.key, label: g.label, count: s.count, mb: s.mb };
   });
-  return { at: Date.now(), groups, totalMb };
+
+  /*
+   * 参考行：不算在 Molly 头上，但主人问过「整机这些加起来多少」。
+   * 三条来源各自成树、互不重叠：
+   *   - DSH 宿主（DeepSeek Harness.exe，含它自己的 Chromium 子进程）
+   *   - QQ 客户端（QQ.exe，所有登录号都在里面，Molly 那个号也算）
+   *   - 其它 WebView2：既不在 Molly 树、也不在 DSH/QQ 树里的 msedgewebview2
+   */
+  const dshPids = add((p) => p.name === 'deepseek harness.exe');
+  const qqPids = add((p) => p.name === 'qq.exe');
+  const claimed = new Set([...shellPids, ...consolePids, ...dshPids, ...qqPids]);
+  const webviewPids = add((p) => p.name === 'msedgewebview2.exe' && !claimed.has(p.pid));
+  const others = [
+    { key: 'dsh', label: 'DSH 宿主（DeepSeek Harness）', ...sumOf(dshPids) },
+    { key: 'qq', label: 'QQ 客户端（含 Molly 这个号）', ...sumOf(qqPids) },
+    { key: 'webview', label: '其它 WebView2 进程', ...sumOf(webviewPids) },
+  ];
+  const othersMb = others.reduce((n, o) => n + o.mb, 0);
+  return { at: Date.now(), groups, totalMb, others, othersMb, grandTotalMb: totalMb + othersMb };
 }
 
 // 侧车（8791）的调用口：连不上不算错，只回报 reached:false —— 控制台不能因为侧车没起就打不开
@@ -2504,7 +2603,35 @@ const ACTIONS = {
   'mem/status': async () => {
     const mem = sampleMemory();
     const embed = await embedCall('/stats', null, 4000);
-    return { ok: true, data: { config: readMemConfig(), mem, embed, configPath: MEM_CONFIG_FILE } };
+    const config = readMemConfig();
+    /*
+     * 游戏模式是插件里的运行时开关，DSH 或插件一重载就回默认（语音开着）。
+     * 配置里记着 gameMode=true 时，这里顺手补一次，免得「昨天开了今天又自己说话」。
+     */
+    let game = null;
+    try {
+      const got = await proxyPlugin('GET', '/gamemode', null, 4000);
+      /*
+       * proxyPlugin 回来的是插件整包 { ok, data: { ok, data } }，真正的开关在第三层。
+       * 之前写成 got.data?.on，永远是 undefined → 恒判「插件是关的」，
+       * 于是每轮 status 都白发一次 reapply，界面也跟着显示关。
+       */
+      const gameOn = (resp) => Boolean(
+        resp && resp.ok !== false && (resp.data?.data?.on ?? resp.data?.on),
+      );
+      if (got && got.ok !== false) {
+        const on = gameOn(got);
+        if (config.gameMode && !on) {
+          const fixed = await proxyPlugin('POST', '/gamemode', { on: true }, 6000);
+          game = { on: gameOn(fixed), reapplied: gameOn(fixed) };
+        } else {
+          game = { on };
+        }
+      }
+    } catch {
+      game = null;
+    }
+    return { ok: true, data: { config, mem, embed, game, configPath: MEM_CONFIG_FILE } };
   },
 
   'mem/config': async (body) => {
@@ -2534,6 +2661,61 @@ const ACTIONS = {
         error: r.reached ? undefined : (r.error || '嵌入服务没在跑，暂时没有可回收的内存'),
       },
     };
+  },
+
+  /*
+   * 游戏模式（2026-11-06，主人 m07510）：打游戏时热禁用语音合成与点歌，
+   * 顺便把重排卸掉（重排按需能装回来，不影响记忆读写，只影响召回的排序精度）。
+   * 插件端 `/gamemode` 只翻运行时开关，不改磁盘配置；这里把选择写进 mem-config.json
+   * 当「意图」，DSH 重载后由 mem/status 自愈补一次。
+   */
+  'mem/gamemode': async (body) => {
+    const on = body?.on;
+    if (typeof on !== 'boolean') return { ok: false, status: 400, error: 'on 必须是 true 或 false' };
+    const plugin = await proxyPlugin('POST', '/gamemode', { on }, 8000);
+    const okPlugin = Boolean(plugin && plugin.ok !== false);
+    if (!okPlugin) {
+      return {
+        ok: false,
+        status: plugin?.status === 404 ? 409 : 502,
+        error: plugin?.status === 404
+          ? '插件还没加载「游戏模式」端点：重启一次 DSH 后可用'
+          : (plugin?.error || '插件没响应，语音/唱歌状态没变'),
+        data: { plugin },
+      };
+    }
+    const config = writeMemConfig({ gameMode: on });
+    let freedMb = 0;
+    if (on && body?.unload !== false) {
+      const before = sampleMemory();
+      await embedCall('/unload', { rerank: true, embed: false }, 20_000);
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      freedMb = Math.max(0, before.totalMb - sampleMemory().totalMb);
+    }
+    return {
+      ok: true,
+      data: {
+        config,
+        game: { on },
+        freedMb,
+        hint: on
+          ? `游戏模式已开：语音合成与点歌暂停${freedMb ? `，顺手回收约 ${freedMb} MB` : ''}，打完关掉即可`
+          : '游戏模式已关：语音合成与点歌恢复',
+      },
+    };
+  },
+
+  /* 在线时间（2026-11-06）：插件 /dsh-online-time/api/stats，只读统计，30 秒缓存。 */
+  'online/stats': async (body) => {
+    const days = Math.min(90, Math.max(1, Math.round(Number(body?.days) || 30)));
+    const key = String(days);
+    const cached = onlineStatsCache.get(key);
+    if (cached && Date.now() - cached.at < 30_000) return { ok: true, data: cached.data, cached: true };
+    const r = await pluginJson(`/dsh-online-time/api/stats?days=${days}`, 8000);
+    if (!r.ok) return { ok: false, status: 502, error: '在线时间插件没响应（DSH 重启后可能需要几秒）' };
+    onlineStatsCache.set(key, { at: Date.now(), data: r.data });
+    if (onlineStatsCache.size > 8) for (const old of onlineStatsCache.keys()) { if (old !== key) { onlineStatsCache.delete(old); break; } }
+    return { ok: true, data: r.data };
   },
 
   // ── CRUD 8 条（契约 §3）：全部透传插件，代理层只做本地参数校验 ──────────────

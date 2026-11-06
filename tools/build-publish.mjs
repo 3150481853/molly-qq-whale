@@ -75,6 +75,8 @@ const FILES = [
    */
   ['docs/RELEASE-1.1.7.md', 'docs/RELEASE-1.1.7.md'],
   ['docs/RELEASE-1.1.8-preview.1.md', 'docs/RELEASE-1.1.8-preview.1.md'],
+  ['docs/RELEASE-1.1.8-preview.2.md', 'docs/RELEASE-1.1.8-preview.2.md'],
+  ['docs/quote-anchor-carry-2026-11-06.md', 'docs/quote-anchor-carry-2026-11-06.md'],
   ['docs/quote-target-and-owner-naming-2026-11-05.md', 'docs/quote-target-and-owner-naming-2026-11-05.md'],
   ['docs/desktop-app.md', 'docs/desktop-app.md'],
   ['docs/console-glass-v3-integration.md', 'docs/console-glass-v3-integration.md'],

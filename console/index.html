@@ -24,6 +24,7 @@
       <div class="nav-group">
         <div class="nav-group-title">Molly 的日常</div>
         <a class="nav-item" href="#/chats" data-page="chats"><span class="nav-icon" aria-hidden="true">◌</span><span>会话与消息</span></a>
+        <a class="nav-item" href="#/online" data-page="online"><span class="nav-icon" aria-hidden="true">◷</span><span>在线时间</span></a>
         <a class="nav-item" href="#/memory" data-page="memory"><span class="nav-icon" aria-hidden="true">❀</span><span>Jasmine 记忆</span></a>
         <a class="nav-item" href="#/pending" data-page="pending"><span class="nav-icon" aria-hidden="true">✓</span><span>待核实</span><span class="nav-badge" id="pendBadge" hidden>0</span></a>
         <a class="nav-item" href="#/stickers" data-page="stickers"><span class="nav-icon" aria-hidden="true">☺</span><span>表情包</span></a>
@@ -93,6 +94,41 @@
         </div>
         <div class="stat-grid" id="ovStats"></div>
         <div class="card-grid" id="ovCards"></div>
+      </section>
+
+      <!-- 在线时间（2026-11-06）：分天 + 分时，数据只来自 dsh-online-time 插件的采样 -->
+      <section class="page on-page" data-page="online" id="onlinePage" hidden>
+        <div class="page-head">
+          <h1>在线时间</h1>
+          <p class="page-sub">只统计插件自己的采样。采样空档、以及 DSH / QQ 没开着的时段记为「未知」，不算离线。</p>
+        </div>
+        <div class="on-kpis" id="onKpis"></div>
+
+        <div class="card on-card">
+          <div class="on-card-head">
+            <div class="card-title">系统状态</div>
+            <div class="on-range" id="onRange" role="tablist" aria-label="统计范围"></div>
+          </div>
+          <div class="on-days-wrap">
+            <div class="on-days" id="onDays"></div>
+          </div>
+        </div>
+
+        <div class="card on-card">
+          <div class="on-card-head">
+            <div class="card-title">一天里的分布</div>
+            <div class="on-tabs" id="onTabs" role="tablist" aria-label="分时范围"></div>
+          </div>
+          <div class="on-hours" id="onHours"></div>
+          <div class="on-sub-title">一周里的分布</div>
+          <div class="on-heat" id="onHeat"></div>
+        </div>
+
+        <div class="card on-card">
+          <div class="card-title">今天的轨迹</div>
+          <div class="on-timeline" id="onTimeline"></div>
+          <div class="on-sessions" id="onSessions"></div>
+        </div>
       </section>
 
       <!-- 会话与消息 -->
@@ -382,6 +418,7 @@
         <div class="card card-block" id="memCard">
           <h2 class="card-title">储存与占用</h2>
           <p class="card-sub">给别的部署者用：按这台机器的内存调策略，改完立刻写进 <span class="mono">out\mem-config.json</span>。内存宽裕就保持默认——默认值不牺牲任何功能。</p>
+          <label class="glass-setting mem-game" for="memGame"><span><b>游戏模式</b><small>打游戏时打开：语音合成与点歌立刻暂停（这两件最吃显存），顺手把重排卸掉；关掉马上恢复，不用重启。</small></span><input type="checkbox" id="memGame"><i aria-hidden="true"></i></label>
           <div class="mem-table" id="memTable"><div class="mem-item is-muted"><span>正在读取…</span><b>—</b></div></div>
           <div class="row-actions mem-row">
             <label class="mem-field">重排

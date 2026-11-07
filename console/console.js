@@ -5729,8 +5729,12 @@
       return;
     }
     box.innerHTML = rows.map(function (it) {
-      return '<button class="fb-recent-row" type="button" data-url="' + esc(it.url || '') + '">' +
-        '<span class="fb-recent-title"><b>[' + esc(it.bot || '未知') + ']</b> ' + esc(it.title || '未命名') + '</span>' +
+      /* 站长标过「已处理」的：整行压暗 + 前面挂个灰标，跟论坛页一致 */
+      var done = String(it.status || '') === 'done';
+      return '<button class="fb-recent-row' + (done ? ' is-done' : '') + '" type="button" data-url="' + esc(it.url || '') + '">' +
+        '<span class="fb-recent-title">' +
+        (done ? '<span class="fb-recent-badge">已处理</span>' : '') +
+        '<b>[' + esc(it.bot || '未知') + ']</b> ' + esc(it.title || '未命名') + '</span>' +
         '<span class="fb-recent-meta">' + esc(fbFmtAt(it.when)) +
         '<span class="fb-recent-kind">' + esc(fbKindLabel(it.kind)) + '</span></span>' +
         '</button>';

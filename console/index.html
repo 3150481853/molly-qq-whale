@@ -89,13 +89,15 @@
           <span>⚠️ Molly 还没连上 QQ —— 点这里看怎么处理</span>
           <span class="ov-login-banner-go">去 QQ 连接 →</span>
         </a>
+        <!-- 参数摆最上面：进总览第一眼要看到的是数值，不是体检报告（体检卡挪到页面底部） -->
+        <div class="stat-grid" id="ovStats"></div>
         <div class="quick-strip" aria-label="常用操作">
           <div><strong>接下来想做什么？</strong><span>常用操作已放在这里，不必翻找设置。</span></div>
           <div class="quick-actions"><a class="btn btn-primary" href="#/memory">记一件事</a><a class="btn btn-ghost" href="#/stickers">整理表情包</a><a class="btn btn-ghost" href="#/qq">检查 QQ 连接</a></div>
         </div>
-        <div class="card ov-health" id="ovHealth"></div>
-        <div class="stat-grid" id="ovStats"></div>
         <div class="card-grid" id="ovCards"></div>
+        <!-- 体检：六项只读检查，属于「出问题才看」的东西，压到页面末尾；侧栏「一键体检」会滚到这里 -->
+        <div class="card ov-health" id="ovHealth"></div>
       </section>
 
       <!-- 在线时间（2026-11-06）：分天 + 分时，数据只来自 dsh-online-time 插件的采样 -->

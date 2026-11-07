@@ -47,7 +47,11 @@ function h({ role = 'user', userId = '222222222', who = 'example', messageId = '
 ok('纯 @ 算叫醒', isPureNudge(ev({ segs: [{ type: 'at', data: { qq: SELF } }] })))
 ok('@ + 空白算叫醒', isPureNudge(ev({ segs: [{ type: 'at', data: { qq: SELF } }, { type: 'text', data: { text: '  ' } }] })))
 ok('@ + 句子不算叫醒', !isPureNudge(ev({ segs: [{ type: 'at', data: { qq: SELF } }, { type: 'text', data: { text: ' 你看这个' } }] })))
-ok('纯图片算叫醒', isPureNudge(ev({ segs: [{ type: 'image', data: { file: 'a.jpg' } }] })))
+/*
+ * 2026-11-07 改口：纯图片不算「叫醒」——图片本身就是内容。
+ * 旧用例断言 isPureNudge(纯图片) === true，而那正是「引用挂到别人旧消息」的病根。
+ */
+ok('纯图片不算叫醒（2026-11-07 修正）', !isPureNudge(ev({ segs: [{ type: 'image', data: { file: 'a.jpg' } }] })))
 ok('只有标点算叫醒', isPureNudge(ev({ segs: [{ type: 'text', data: { text: '？？……' } }] })))
 ok('raw_message 兜底', isPureNudge({ message_id: 1, raw_message: '[CQ:at,qq=1] ' }))
 ok('普通句子不算叫醒', !isPureNudge(ev({ segs: [{ type: 'text', data: { text: '今天好热' } }] })))
@@ -192,6 +196,50 @@ ok('普通句子不算叫醒', !isPureNudge(ev({ segs: [{ type: 'text', data: { 
     nowMs: now,
   })
   ok('叫醒 → 引叫他那个人自己上一条（不是乙的下一条）', n && n.messageId === '811', JSON.stringify(n))
+}
+
+// ── 9. 纯图片/语音触发不能引到「上一条别人的消息」（2026-11-07，主人 m01382）──
+{
+  const now = Date.now()
+  // 现场复刻（群 666666666）：17:18:52 主人发了张动图；17:20:49 管理员只发一张截图触发这一轮。
+  // 旧逻辑把这张截图当「空叫醒」→ 引到 17:18:52 别人那张动图上，答的和引的对不上。
+  const hist = [
+    h({ userId: '222222222', who: '主人', messageId: '821', at: now - 120000 }),
+    h({ userId: '222222222', who: '主人', messageId: '822', at: now - 110000 }), // 别人的旧动图
+    h({ userId: '208197338', who: '管理员', messageId: '823', at: now - 2000 }), // 截图（触发这条）
+  ]
+  const shot = ev({
+    segs: [{ type: 'image', data: { file: 'shot.jpg', sub_type: 0 } }],
+    messageId: '823',
+    userId: '208197338',
+  })
+  ok('纯图片不算叫醒', !isPureNudge(shot))
+  const t = pickQuoteTarget({ ev: shot, history: hist, config: {}, nowMs: now })
+  ok('纯图片触发 → 引这张图本身，不引别人两分钟前的动图', t && t.messageId === '823' && t.why.includes('media'), JSON.stringify(t))
+  ok('纯图片触发的 why 里没有 nudge', t && !t.why.includes('nudge'), String(t && t.why))
+  // 语音 / 文件 / 转发 / 动画表情同理，都算「有内容」
+  ok('语音算有内容', !isPureNudge(ev({ segs: [{ type: 'record', data: { file: 'a.amr' } }] })))
+  ok('文件算有内容', !isPureNudge(ev({ segs: [{ type: 'file', data: { file: 'a.pdf' } }] })))
+  ok('转发算有内容', !isPureNudge(ev({ segs: [{ type: 'forward', data: { id: '1' } }] })))
+  ok('动画表情（image sub_type=1）算有内容', !isPureNudge(ev({ segs: [{ type: 'image', data: { file: 'st.gif', sub_type: 1 } }] })))
+  // 只有小表情、只有 @ 仍然算叫醒（老行为不变）
+  ok('只有表情仍是叫醒', isPureNudge(ev({ segs: [{ type: 'face', data: { id: '12' } }] })))
+  // raw_message 兜底也要认图片
+  ok('raw_message 里是图片 → 不算叫醒', !isPureNudge({ message_id: 2, raw_message: '[CQ:image,file=abc.jpg,subType=0]' }))
+  // 图片已经被刷过去两条以上 → 退回最新那条（作答时读的就是最新历史）
+  const late = [
+    h({ userId: '1', who: '甲', messageId: '831', at: now - 20000 }),
+    h({ userId: '208197338', who: '管理员', messageId: '832', at: now - 15000 }), // 截图
+    h({ userId: '2', who: '乙', messageId: '833', at: now - 10000 }),
+    h({ userId: '3', who: '丙', messageId: '834', at: now - 2000 }),
+  ]
+  const lateT = pickQuoteTarget({
+    ev: ev({ segs: [{ type: 'image', data: { file: 's.jpg' } }], messageId: '832', userId: '208197338' }),
+    history: late,
+    config: {},
+    nowMs: now,
+  })
+  ok('图片被刷过去多条 → 引最新那条', lateT && lateT.messageId === '834', JSON.stringify(lateT))
 }
 
 console.log(`\n${pass} PASS / ${fail} FAIL`)

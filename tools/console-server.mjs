@@ -2992,6 +2992,9 @@ const ACTIONS = {
         when: (it && (it.when || it.createdAt || it.created_at || it.at)) || null,
         /* 论坛已经把 qq 打码后才公开，这里原样转给前端 */
         qq: String((it && it.qq) || ''),
+        /* 站长在后台标过之后才有 done；公开列表只出 open / done，
+           done 在论坛页是置灰带「已处理」，前端跟着做同样的处理 */
+        status: String((it && it.status) || 'open'),
         url: (it && typeof it.url === 'string' && /^https?:\/\//i.test(it.url))
           ? it.url
           : `${cfg.pageUrl}#${id == null ? '' : id}`,

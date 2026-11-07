@@ -124,11 +124,22 @@ if (existing?.phase === 'thinking') existing.controller.abort()   // 旧 job 直
 2. **答过就别答 `rememberAnswered()` / `alreadyAnswered()`**：每次发送成功后记下这一轮答了哪几条（触发消息 + 合并进来的 + 下笔时历史里**同一个人**已说过的那几条），另一条道开口前先查一次，全都答过就 trace `skip-covered` 闭嘴。只认同一个人——别人的 `@` 不能被顺手记成「答过了」，否则就真漏回了。
 3. **carry 改成按会话攒**：原来按 `jobId`（会话+泳道）攒，闲聊道被掐掉的句子永远交不到 `@` 那条手上，两条道就各答一遍。现在 key 换成会话，跨泳道能接上，同一条重复塞入也会去重。
 
+### 8. 只发一张图、一条语音时，引用框也挂在它自己身上（`lib/quote-at.js`）
+
+现场（群 666666666，17:20:49 → 17:21:10）：管理员只发了一张微博截图、一个字没打，她答「这截图谁扒出来的啊」——引用框却挂在 **17:18:52 别人那张动图**上，看着就像答错了人。
+
+根因在 `isPureNudge()`：它只统计 **text** 段有几个实字，纯图片消息没有 text 段、实字数恒为 0，于是被判成「空的叫醒」→ 走上「引上一条别人的消息」那条分支。
+
+改法两条：
+
+1. `isPureNudge()` 先看有没有**内容段**（`image` / `mface` / `record` / `video` / `file` / `forward` / `ark` / `json` / `xml` / `music` / `contact` / `markdown` / `lightapp`，含 `raw_message` 里的同名 CQ 码）——有就不算叫醒；只有 `at` / `face`（小表情）/ 空白 / 标点才算。
+2. `pickQuoteTarget()` 新增 `media` 理由：图片/语音/文件/转发的触发消息照样给引用框，而且引用框落在**它自己**上（走原来第 ③ 步），被刷过去两条以上才退回最新那条。
+
 ## 四、验证
 
 | 测试 | 结果 |
 | --- | --- |
-| `tools/test-quote-anchor.mjs`（新增，含复刻 18:09 现场与 nudge 排除触发条） | **33 / 33** |
+| `tools/test-quote-anchor.mjs`（新增，含复刻 18:09 现场与 nudge 排除触发条） | **43 / 43** |
 | `tools/test-carry.mjs`（新增：取出/清空/不同人不合并/超 20 秒不合并/最多 3 条/顺序） | **7 / 7** |
 | `tools/test-this-turn.mjs`（新增：两条时输出该段并编号、单条不输出） | **5 / 5** |
 | `tools/test-lane-dedupe.mjs`（新增：撞车裁决 7 条 + 答过别再答 8 条 + 跨泳道 carry 3 条） | **18 / 18** |
@@ -152,14 +163,16 @@ if (existing?.phase === 'thinking') existing.controller.abort()   // 旧 job 直
 - 模型仍然可能无视提示词去答最后一条——这是概率问题，不是必定；`quoteAnchored` 与 `carryMerged` 就是用来量化它到底听不听的；
 - 引用框只会挂在**第一颗气泡**上（一轮回复拆成多颗时，后面几颗本来就没有引用框，属于既有行为）；
 - 「一条一句」之后**条内换行没有了**：模型要用多行排版的内容会变成多条气泡；想调整连发条数改 `maxTextBubblesPerReply`（默认 5），设 1 就退回「一条消息装全部」的旧行为；
-- 去重是有代价的：同一个人在 30 秒内先闲扯、紧接着 `@` 她时，那句闲聊会被并进 `@` 的回答里（不再单独应一句）；想放宽就把 `laneMergeMs` 调小（比如 3000），想关掉就把 `laneMergeMs` 设 0。
+- 去重是有代价的：同一个人在 30 秒内先闲扯、紧接着 `@` 她时，那句闲聊会被并进 `@` 的回答里（不再单独应一句）；想放宽就把 `laneMergeMs` 调小（比如 3000），想关掉就把 `laneMergeMs` 设 0；
+- 只发图/语音/文件时，引用框挂在**那条消息本身**；要是它后面又被刷了两条以上的话，引用会改挂最新那条（她作答时读的是最新历史）；
 
 ## 六、怎么退回
 
 1. 只退「合并」：把 `scheduleReply()` 里的 `takeCarry` 返回值改成 `[]`，其余不变；
 2. 只退「anchor」：`deliver()` 调用里去掉 `anchorId` 参数（`pickQuoteTarget` 的 anchor 分支没有输入就不会命中）；
 3. 只退「双泳道去重」：把 `config.laneMergeMs` 设 0，并在 `scheduleReply()` 里去掉 `alreadyAnswered` / `rememberAnswered` 两处调用；
-4. 全退：用 1.1.8-preview.1 的文件覆盖回去（`lib/engine.js`、`lib/quote-at.js`、`lib/engine-context.js`、`lib/persona.js`、`lib/relations.js`），重启 DSH。
+4. 只退「图片触发不挂错引用」：把 `quote-at.js` 里 `isPureNudge()` 开头那句 `if (hasContentSegment(segs)) return false` 删掉即可回到旧行为（纯图片重新算作「空叫醒」）；
+5. 全退：用 1.1.8-preview.1 的文件覆盖回去（`lib/engine.js`、`lib/quote-at.js`、`lib/engine-context.js`、`lib/persona.js`、`lib/relations.js`），重启 DSH。
 
 ## 七、升级方式
 

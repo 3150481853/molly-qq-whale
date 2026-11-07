@@ -21,6 +21,7 @@
 - **双泳道去重（`lib/engine.js`，2026-11-07 追加）**：同一个人半分钟内先闲扯再 `@` 她时，两条泳道会各答一遍（群里同一件事回两次、引用各挂一条）。新增 `laneMergeDecision()` 裁决（`@我` 赢、闲聊让位）、`rememberAnswered()` / `alreadyAnswered()` 记「这几条答过了」、`carry` 的 key 从 `jobId` 改成会话 key（跨泳道能接上）。trace 新增 `lane-merge` / `lane-yield` / `skip-covered`。
 - **一条一句（`lib/persona.js` + `lib/engine.js`）**：`splitReply()` 换行也分条（原来只认 `<sep/>`，两句话会挤在一个气泡里），新增 `maxTextBubblesPerReply`（默认 5）兜住刷屏。
 - **印象里的「主人」（`lib/relations.js` + `lib/engine-context.js`）**：`contextFor()` 接收 `ownerQq`，非主人说话时过滤掉含「主人」的印象——`relations.json` 里「他是你的主人」这类脏印象不再盖掉认人护栏。
+- **纯图片触发不挂错引用（`lib/quote-at.js`，2026-11-07 追加）**：`isPureNudge()` 原来只数 text 段的实字，**纯图片消息实字数恒为 0、被判成「空叫醒」**，于是引用框退到「上一条别人的消息」（真机：17:20:49 管理员只发一张截图，17:21:10 她的回复引到 17:18:52 别人的动图上）。现在 `image` / `mface` / `record` / `video` / `file` / `forward` / `ark` / `json` / `xml` / `music` / `contact` / `markdown` / `lightapp`（含 `raw_message` 里的同名 CQ 码）都算「有内容」，不算叫醒；`pickQuoteTarget()` 新增 `media` 理由，让这类触发照样挂引用、且挂在**它自己**上。
 
 **为什么**
 
@@ -32,7 +33,7 @@
 
 **验证**
 
-`tools/test-quote-anchor.mjs` 33 / `tools/test-carry.mjs` 7 / `tools/test-this-turn.mjs` 5 / `tools/test-engine-text.mjs` 7，全绿；三个 lib 文件 `node --check` 通过。
+`tools/test-quote-anchor.mjs` 43 / `tools/test-carry.mjs` 7 / `tools/test-this-turn.mjs` 5 / `tools/test-lane-dedupe.mjs` 18 / `tools/test-split-reply.mjs` 8 / `tools/test-relations-owner.mjs` 4 / `tools/test-engine-text.mjs` 7 / `tools/test-quote.mjs` 32 / `tools/test-command-fixes.mjs` 12，全绿；改动的 5 个 lib 文件 `node --check` 通过。
 
 ---
 ## 2026-11-05 · v1.1.8-preview.1：引用不再挂错、称呼不再乱叫主人

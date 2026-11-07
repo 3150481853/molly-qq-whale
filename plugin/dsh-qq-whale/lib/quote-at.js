@@ -25,6 +25,48 @@ export const QUOTE_DEFAULTS = {
   atWindowMessages: 20,
 }
 
+/*
+ * 这些段本身就带内容：图片、语音、视频、文件、转发、卡片……
+ * 哪怕一个字都没有，也**不是**「空的叫醒」。
+ *
+ * 2026-11-07 真机事故（主人 m01382 截图）：17:20:49 管理员只发了一张微博截图（没打字），
+ * 她被判成「纯叫醒」→ 走上「引上一条别人的消息」那条路 → 17:21:10 引用框挂到
+ * 17:18:52 别人的动图上，而她的回答「这截图谁扒出来的啊」明明在说这张截图本身。
+ * 病根就在下面 isPureNudge 只数 text 段：纯图片消息的实字数恒为 0。
+ */
+const CONTENT_SEGMENT_TYPES = new Set([
+  'image',
+  'mface',
+  'record',
+  'video',
+  'file',
+  'forward',
+  'ark',
+  'json',
+  'xml',
+  'music',
+  'contact',
+  'markdown',
+  'lightapp',
+])
+
+/** 这条消息里有没有「有内容」的段（图片/语音/文件/转发…） */
+export function hasContentSegment(segs) {
+  const list = Array.isArray(segs) ? segs : []
+  for (const seg of list) {
+    if (!seg || typeof seg !== 'object') continue
+    if (CONTENT_SEGMENT_TYPES.has(String(seg.type ?? '').toLowerCase())) return true
+  }
+  return false
+}
+
+/** raw_message 兜底：里面写着图片/语音这类 CQ 码，同样算有内容 */
+function rawHasContent(raw) {
+  return /\[CQ:(image|mface|record|video|file|forward|json|xml|music|contact|markdown|lightapp)[,\]]/i.test(
+    String(raw || ''),
+  )
+}
+
 /** 去掉占位/标点/空白之后还剩多少「实字」 */
 function coreLength(text) {
   return String(text || '')
@@ -37,12 +79,16 @@ function coreLength(text) {
  * 触发消息是不是「纯叫醒」：只有 @（可能带个表情或空白），没有一个字的正文。
  * 这种消息不该被当作「她要回的那个人」——她接的是上下文里的上一条。
  *
+ * 注意（2026-11-07）：带图片/语音/文件/转发的消息**不算**纯叫醒——它本身就是内容。
+ * 只发一张图 @ 她，她要接的就是这张图，不是上一条别人的消息。
+ *
  * @param {object} ev OneBot 原始事件（SnowLuma 会给 ev.message 数组）
  * @returns {boolean}
  */
 export function isPureNudge(ev) {
   if (!ev || typeof ev !== 'object') return false
   const segs = Array.isArray(ev.message) ? ev.message : []
+  if (hasContentSegment(segs)) return false
   let text = ''
   let hasSeg = false
   for (const seg of segs) {
@@ -52,7 +98,11 @@ export function isPureNudge(ev) {
     text += String(seg.data?.text ?? '')
   }
   // 兜底：没有 segments 时看 raw_message（先剥 CQ 码）
-  if (!hasSeg) text = String(ev.raw_message || '').replace(/\[CQ:[^\]]*\]/g, '')
+  if (!hasSeg) {
+    const raw = String(ev.raw_message || '')
+    if (rawHasContent(raw)) return false
+    text = raw.replace(/\[CQ:[^\]]*\]/g, '')
+  }
   return coreLength(text) <= 1
 }
 
@@ -210,6 +260,12 @@ export function pickQuoteTarget(input = {}) {
   const minSpeakers = Number(config.groupQuoteMinSpeakers ?? QUOTE_DEFAULTS.minSpeakers)
   const history = Array.isArray(input.history) ? input.history : []
   const nudge = isPureNudge(ev)
+  /*
+   * 触发消息本身是图片/语音/文件/转发（2026-11-07，主人 m01382）：
+   * 这种消息没有正文、但内容就是它自己，所以要像「有话说」一样给引用框，
+   * 而且引用框该落在这条本身（走下面第 ③ 步），不要退到「上一条别人的消息」。
+   */
+  const media = hasContentSegment(Array.isArray(ev.message) ? ev.message : [])
   const crowd = crowdStats(history, Number(input.nowMs ?? Date.now()), { windowSeconds })
   const crowded = crowd.count >= minMessages && crowd.speakers >= minSpeakers
   /*
@@ -220,6 +276,7 @@ export function pickQuoteTarget(input = {}) {
   const anchorId = input.anchorId == null ? '' : String(input.anchorId)
   const reasons = []
   if (nudge) reasons.push('nudge')
+  if (media) reasons.push('media')
   if (crowded) reasons.push('crowded')
   if (input.explicitAt) reasons.push('explicit-at')
   if (anchorId) reasons.push('anchor')
@@ -293,6 +350,7 @@ export function pickQuoteTarget(input = {}) {
     messageId: String(target.messageId),
     why: reasons.join('+'),
     nudge,
+    media,
     count: crowd.count,
     speakers: crowd.speakers,
     /** 引用目标之后又进来了几条别人的消息（0 = 就是最新那条） */

@@ -3664,18 +3664,24 @@ html[data-shell="desktop"][data-glass="true"] .on-kpi {
 }
 
 /* ===== 44 · 信息架构第一期：总览「一键体检」卡 + 设置页「高级」入口 ===== */
-.ov-health { margin: 0 0 20px; }
+/* 2026-11-07：体检卡从总览顶部挪到页尾（主人要求「一眼看到参数」），
+   横排改成两列，六项压成三行，避免它独占一整屏。 */
+.ov-health { margin: 24px 0 0; }
 .hc-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s-3); }
 .hc-head .card-title { margin: 0; }
-.hc-list { margin-top: 4px; }
+.hc-list { margin-top: 4px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: var(--s-6); }
 .hc-row { display: grid; grid-template-columns: 96px 88px minmax(0, 1fr); align-items: center; gap: 12px;
   padding: 9px 0; border-top: 1px solid var(--hairline-soft); font-size: var(--fs-sub); color: var(--steel); }
-.hc-row:first-child { border-top: 0; }
+.hc-row:first-child, .hc-row:nth-child(2) { border-top: 0; }
 .hc-name { color: var(--ink); white-space: nowrap; }
 .hc-pill { display: flex; }
 .hc-note { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #advancedCard .row-actions { margin-top: 4px; }
 .btn.is-disabled, .btn[aria-disabled='true'] { opacity: .6; cursor: default; pointer-events: none; }
+@media (max-width: 1080px) {
+  .hc-list { grid-template-columns: minmax(0, 1fr); }
+  .hc-row:nth-child(2) { border-top: 1px solid var(--hairline-soft); }
+}
 @media (max-width: 640px) {
   .hc-row { grid-template-columns: 84px 78px minmax(0, 1fr); gap: 8px; }
   .hc-note { white-space: normal; }
@@ -3789,6 +3795,22 @@ html[data-shell="desktop"][data-glass="true"] .on-kpi {
   border-radius: var(--r-sm);
   background: var(--surface);
   color: var(--steel);
+}
+/* 已处理：整行压暗但不隐形（还要能点开看），标题前的灰标是唯一的色块 */
+.fb-recent-row.is-done{ opacity: .62; }
+.fb-recent-row.is-done:hover{ opacity: 1; }
+.fb-recent-row.is-done .fb-recent-title b{ color: var(--steel); }
+.fb-recent-badge{
+  display: inline-block;
+  margin-right: 5px;
+  padding: 0 5px;
+  border-radius: var(--r-full);
+  border: 1px solid var(--hairline);
+  background: var(--surface-soft);
+  color: var(--stone);
+  font-size: var(--fs-micro);
+  line-height: 15px;
+  vertical-align: 1px;
 }
 .fb-recent-empty{
   padding: var(--s-4) 0;

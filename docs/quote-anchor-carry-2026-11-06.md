@@ -58,9 +58,16 @@ if (existing?.phase === 'thinking') {
 
 ## 四、验收
 
-- `tools/test-quote-anchor.mjs`（33）、`tools/test-carry.mjs`（7）、`tools/test-this-turn.mjs`（5）、`tools/test-engine-text.mjs`（7）全绿；
+- `tools/test-quote-anchor.mjs`（43）、`tools/test-carry.mjs`（7）、`tools/test-this-turn.mjs`（5）、`tools/test-lane-dedupe.mjs`（18）、`tools/test-split-reply.mjs`（8）、`tools/test-relations-owner.mjs`（4）、`tools/test-engine-text.mjs`（7）、`tools/test-quote.mjs`（32）全绿；
 - 重启后：`stats.carryMerged > 0`、`stats.quoteAnchored > 0`、`quoteLast.why` 出现 `anchor`、`replyTrace` 出现 `carry`；
-- 抽样看回复是否「先答第 1 条」，而不是只答最后一条。
+- 同一个人连发（先闲扯再 `@`）时 trace 里应出现 `lane-merge` / `lane-yield` / `skip-covered`；
+- 有人只发一张图/一条语音 `@` 她时，`quoteLast.why` 出现 `media`，引用框挂在那条图片本身。
+
+## 四·补：纯图片触发为什么也会挂错（2026-11-07 追加）
+
+`isPureNudge()` 原来只数 **text** 段的实字：纯图片消息没有 text 段 → 实字数 0 → 判成「空的叫醒」→ `pickQuoteTarget()` 走 ②「引上一条别人的消息」。现场 17:20:49 管理员只发一张截图，17:21:10 她的回答引用框挂在 17:18:52 别人那张动图上。
+
+现在 `isPureNudge()` 先看内容段（`image`/`mface`/`record`/`video`/`file`/`forward`/`ark`/`json`/`xml`/`music`/`contact`/`markdown`/`lightapp`，`raw_message` 里的同名 CQ 码也算），有内容就不是叫醒；`pickQuoteTarget()` 新增 `media` 理由，这类触发照样挂引用，且挂在它自己身上（被刷过去两条以上才退回最新那条）。
 
 ## 五、退回
 

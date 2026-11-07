@@ -9,7 +9,7 @@
 
 ## 2026-11-06 · v1.1.8-preview.2：「总是回下一条」——被打断的那条不再被丢掉
 
-> 只动插件侧文件（`lib/engine.js`、`lib/quote-at.js`、`lib/engine-context.js`、`lib/persona.js`、`lib/relations.js`）。完整说明见 `docs/RELEASE-1.1.8-preview.2.md`，技术记录见 `docs/quote-anchor-carry-2026-11-06.md`。
+> 只动插件侧文件（`lib/engine.js`、`lib/quote-at.js`、`lib/engine-context.js`、`lib/persona.js`、`lib/relations.js`；回复流水只写到数据目录 `<dataDir>/trace/`，不进仓库）。完整说明见 `docs/RELEASE-1.1.8-preview.2.md`，技术记录见 `docs/quote-anchor-carry-2026-11-06.md`。
 
 **改了什么**
 
@@ -22,6 +22,7 @@
 - **一条一句（`lib/persona.js` + `lib/engine.js`）**：`splitReply()` 换行也分条（原来只认 `<sep/>`，两句话会挤在一个气泡里），新增 `maxTextBubblesPerReply`（默认 5）兜住刷屏。
 - **印象里的「主人」（`lib/relations.js` + `lib/engine-context.js`）**：`contextFor()` 接收 `ownerQq`，非主人说话时过滤掉含「主人」的印象——`relations.json` 里「他是你的主人」这类脏印象不再盖掉认人护栏。
 - **纯图片触发不挂错引用（`lib/quote-at.js`，2026-11-07 追加）**：`isPureNudge()` 原来只数 text 段的实字，**纯图片消息实字数恒为 0、被判成「空叫醒」**，于是引用框退到「上一条别人的消息」（真机：17:20:49 管理员只发一张截图，17:21:10 她的回复引到 17:18:52 别人的动图上）。现在 `image` / `mface` / `record` / `video` / `file` / `forward` / `ark` / `json` / `xml` / `music` / `contact` / `markdown` / `lightapp`（含 `raw_message` 里的同名 CQ 码）都算「有内容」，不算叫醒；`pickQuoteTarget()` 新增 `media` 理由，让这类触发照样挂引用、且挂在**它自己**上。
+- **命令 / 状态回执不接话（`lib/quote-at.js` + `lib/engine.js`，2026-11-07 追加）**：群里有两个机器人时，主人发 `#茶茶`、茶茶回了一行「茶茶（987654321） · 在线 · v1.1.7-preview.1 · 已运行 1天22小时」，这行回执被当成普通群消息起了一轮回复；那一轮被打断后回执进了 carry，下一轮的 `anchorId` 就取到它 → 引用框挂到状态回执上、她对着系统信息接话。新增 `looksLikeEchoLine()`（整条 `#`/`/` 指令，或「括号里 5–12 位 QQ 号 + 在线/已运行等状态词 + 分隔符」三条件同时成立），在 `shouldRespond()` 之前拦掉（trace 记 `skip-echo`），并且不许进 carry。顺带把回复流水落盘：`stats` 增 `replyStarts` / `replyDelivered` / `replyAborted` / `modelNull` / `skipEcho`，`traceReply()` 追加 `<dataDir>/trace/replies-YYYY-MM-DD.jsonl`——内存环只有 30 条、重启就没了，`model-null` 比例以前根本没法统计。
 
 **为什么**
 
@@ -33,7 +34,7 @@
 
 **验证**
 
-`tools/test-quote-anchor.mjs` 43 / `tools/test-carry.mjs` 7 / `tools/test-this-turn.mjs` 5 / `tools/test-lane-dedupe.mjs` 18 / `tools/test-split-reply.mjs` 8 / `tools/test-relations-owner.mjs` 4 / `tools/test-engine-text.mjs` 7 / `tools/test-quote.mjs` 32 / `tools/test-command-fixes.mjs` 12，全绿；改动的 5 个 lib 文件 `node --check` 通过。
+`tools/test-quote-anchor.mjs` 51 / `tools/test-carry.mjs` 7 / `tools/test-this-turn.mjs` 5 / `tools/test-lane-dedupe.mjs` 18 / `tools/test-split-reply.mjs` 8 / `tools/test-relations-owner.mjs` 4 / `tools/test-engine-text.mjs` 7 / `tools/test-quote.mjs` 32 / `tools/test-command-fixes.mjs` 12，全绿；改动的 5 个 lib 文件 `node --check` 通过。回复流水（`trace/replies-*.jsonl`）只写到数据目录，不进仓库。
 
 ---
 ## 2026-11-05 · v1.1.8-preview.1：引用不再挂错、称呼不再乱叫主人

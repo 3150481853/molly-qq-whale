@@ -91,7 +91,38 @@ export const MEMORY_WINDOW_PROFILES = Object.freeze({
   }),
 })
 
+function coreRank(e) {
+  const t = String(e?.text || '')
+  let s = 0
+  if (/名字|全名/.test(t)) s += 3
+  if (/叫[\u4e00-\u9fa5]{1,4}(，|,|。|$)/.test(t)) s += 2
+  if (/\d{1,3}\s*岁/.test(t)) s += 3
+  if (/职业|做的是|上班|工作|在读|学生/.test(t)) s += 2
+  if (/住在|老家|城市|省|市/.test(t)) s += 2
+  if (t.length <= 60) s += 2
+  if (t.length > 120) s -= 2
+  if (/今天|昨天|前天|（\d{1,2}月\d{1,2}日/.test(t)) s -= 3
+  return s
+}
+
 export const MEMORY_WINDOW = MEMORY_WINDOW_PROFILES[WINDOW_PROFILE]
+
+/*
+ * 核心档案保底位。
+ *
+ * 为什么需要：写入侧越写越多以后，人名、年龄、职业这种「最不该丢」的条目会被
+ * 一屋子一次性细节挤出窗口 —— 实测问「我叫什么、多大了」，候选池只进来 1 条称呼，
+ * 她于是答「你全名和年龄我都没记过」，直接从「记得」翻成「错否」。
+ *
+ * 做法：不论问什么，只要库里有一条关于本人的稳定身份条目（kind=person、权重够、
+ * 正文含名字/年龄/职业/所在地这类词、没被取代），就固定占窗口最前面 1 个位置。
+ * 只占位置，不改正文、不改打分、不算 hit。
+ * 可用 MOLLY_CORE_SLOTS=0 关闭；MOLLY_CORE_SLOTS=2 可占两位。
+ */
+const CORE_SLOTS = Number(process.env.MOLLY_CORE_SLOTS ?? 1)
+const CORE_KINDS = new Set(['person'])
+const CORE_MIN_WEIGHT = 5
+const CORE_TEXT_RE = /名字|叫[^，。]{0,6}|\d{1,3}\s*岁|生日|职业|工作|上班|上学|住|城市|老家|省|市|在广州|在上海|在北京/
 
 // 配错档位名会静默变成 undefined，进而让 engine 里 limit=undefined 变成"不限"，
 // 那是灾难级 bug；这里宁可启动就炸，也不要带着错配置跑。
@@ -287,7 +318,17 @@ export function effectiveWeight(entry, activeDays = 0) {
   if (base <= floor) return base
   const now = Math.max(0, Math.round(Number(activeDays) || 0))
   const last = Math.max(0, Math.round(Number(entry?.lastActiveDay) || 0))
-  const idle = Math.max(0, now - last)
+  /*
+   * 复习加成（2026-11-07 v0.8）。
+   *
+   * 原来 hits 只用来置 lastActiveDay，权重一点不涨：实测 hits=0 和 hits>=10 的 fact
+   * 衰减完全一样（6.0 → 3.0），"被反复问过的事更牢"这件事根本没实现。
+   * 这里让常被召回的条目**老得慢一点**：hits>=3 起，idle 最多打七折（封顶 30%），
+   * 只改衰减斜率，不改 base、不动下限，所以不会把旧事顶成新事。
+   */
+  const hits = Math.max(0, Math.round(Number(entry?.hits) || 0))
+  const keep = hits >= 3 ? Math.min(0.3, Math.log2(hits) * 0.06) : 0
+  const idle = Math.max(0, now - last) * (1 - keep)
   const grace = GRACE_ACTIVE_DAYS[kind] ?? DECAY_STEP_DAYS
   if (!Number.isFinite(grace) || idle <= grace) return base
   const steps = Math.floor((idle - grace) / DECAY_STEP_DAYS)
@@ -829,7 +870,16 @@ export class MemoryStore {
     // 计划 / 已发生分开（见 detectTense 的注释）：写路径不加模型调用，纯词面判断
     const tenseInfo = TENSE_ON ? detectTense(t, k, Date.now()) : { tense: '', dueAt: 0 }
     const src = normalizeSource(source)
-    if (src === 'assistant' && (k === 'fact' || k === 'person')) {
+    /*
+     * v0.5（2026-11-06）：放行「她自己说过的话」。
+     *
+     * 原来的闸门是「助手自述一律不许写成 fact/person」，为的是防幻觉——
+     * 她不能把自己瞎编的东西当成用户的客观事实。那个担心仍然成立，
+     * 所以只放行**带「我说过：」前缀**的：前缀由抽取模型显式打上，
+     * 语义是「这是我自己说过的话」，不是「用户的事实」。
+     */
+    const selfQuote = /^我说过[:：]/.test(t)
+    if (src === 'assistant' && (k === 'fact' || k === 'person') && !selfQuote) {
       this.logger('warn', `拒绝写入：助手自述不能写成 ${k}（${t.slice(0, 24)}）`)
       return null
     }
@@ -941,6 +991,14 @@ export class MemoryStore {
       // 语气与到期：只有判出来才写，没判出来保持老条目形状（不影响老数据）
       ...(tenseInfo.tense ? { tense: tenseInfo.tense } : {}),
       ...(tenseInfo.tense === 'plan' && tenseInfo.dueAt ? { dueAt: tenseInfo.dueAt } : {}),
+    }
+    /* v1.0：状态翻新（「还没报价」→「已发来报价」），旧的降权不删 */
+    const pendingOld = this.findPendingUpdate({ who: name, qq: q, text: t })
+    if (pendingOld) {
+      pendingOld.supersededBy = entry.id
+      pendingOld.supersededAt = entry.at
+      this.stateUpdated = (Number(this.stateUpdated) || 0) + 1
+      this.logger('debug', `状态翻新：${String(pendingOld.text).slice(0, 20)} -> ${t.slice(0, 20)}`)
     }
     this.entries.push(entry)
     if (conflicting && conflictEntry) {
@@ -1089,6 +1147,38 @@ export class MemoryStore {
    * @param {{who?: string, qq?: string, text?: string}} probe
    * @returns {object|null}
    */
+  /**
+   * v1.0：找「被翻新的旧状态」——「还没报价」→「已发来报价」。
+   *
+   * 和 findConflict 的区别：改口是「同一件事两种相反说法」，这里是
+   * 「事情往前走了」——旧条目没错，只是过期了。所以判据不同：
+   *   1. 旧条目里带「还没 / 尚未 / 还在等」这类未完成标记；
+   *   2. 新条目里带「已经 / 发来 / 改到 / 定下来」这类完成标记；
+   *   3. 两条共享 ≥2 个实词（同一件事），同一个人。
+   * 命中就把旧条目标 supersededBy——召回降权，正文保留（可回溯）。
+   */
+  findPendingUpdate({ who = '', qq = '', text = '' } = {}) {
+    if (process.env.MOLLY_STATE_UPDATE === '0') return null
+    const t = String(text || '')
+    if (!PENDING_DONE_RE.test(t)) return null
+    const q = normalizeQq(qq)
+    const name = String(who || '').trim()
+    let best = null
+    let bestScore = 0
+    for (const e of this.entries) {
+      if (e.supersededBy) continue
+      if (e.kind === 'meme' || e.kind === 'address') continue
+      if (!sameIdentity({ who: name, qq: q }, e)) continue
+      if (!PENDING_OPEN_RE.test(String(e.text || ''))) continue
+      const n = sharedKeywordCount(e.text, t)
+      if (n >= 2 && n > bestScore) {
+        best = e
+        bestScore = n
+      }
+    }
+    return best
+  }
+
   findConflict({ who = '', qq = '', text = '', kind = '' } = {}) {
     const q = normalizeQq(qq)
     const name = String(who || '').trim()
@@ -2125,6 +2215,7 @@ export class MemoryStore {
     qq = '',
     query = '',
     queryVector = null,
+    mention = [],
     limit = MEMORY_WINDOW.contextLimit,
     charBudget = MEMORY_WINDOW.charBudget,
   } = {}) {
@@ -2160,6 +2251,16 @@ export class MemoryStore {
     const name = String(who || '').trim()
     // 名字切出来的词（「白饭鱼」→ 白饭/饭鱼）：身份命中后这些词不再重复计分，见下面 scored
     const nameWords = new Set(name ? tokenize(name) : [])
+    const mentionList = (Array.isArray(mention) ? mention : [mention]).filter(Boolean)
+    const mentionNames = mentionList
+      .map((x) => (typeof x === 'object' ? x.who || '' : x))
+      .map((x) => String(x || '').trim())
+      .filter(Boolean)
+    const mentionQqs = new Set(
+      mentionList
+        .map((x) => (typeof x === 'object' ? String(x.qq || '') : ''))
+        .filter(Boolean),
+    )
 
     /*
      * 身份匹配（2026-10-19 用户需求：「who 是名字，qq 是唯一身份」）。
@@ -2176,6 +2277,20 @@ export class MemoryStore {
       const eQq = normalizeQq(e.qq)
       const qqHit = Boolean(qqStr) && eQq === qqStr
       const differentPerson = Boolean(qqStr) && Boolean(eQq) && eQq !== qqStr
+      /*
+       * 群聊点名（2026-11-07 v0.7）：
+       * 「白饭鱼今天说了啥」——问的人不是白饭鱼，但话里点了他。
+       * 旧逻辑只会把白饭鱼的条目按跨人 0.05 清零，于是群里问谁都问不出别人说过的话
+       * （轴 A3 实测 0/48）。这里把「被点名的人」认出来，单独放行。
+       */
+      /*
+       * mention 里既可以放名字，也可以放 { qq }（引擎从 [CQ:at,qq=…] 里解析出来的）。
+       * QQ 是硬身份，比名字可靠——群里有同名的人时不会认错。
+       */
+      const mentioned =
+        (Boolean(eQq) && mentionQqs.has(String(eQq))) ||
+        (Boolean(e.who) &&
+          mentionNames.some((mn) => e.who === mn || e.who.includes(mn) || mn.includes(e.who)))
       const sameName = Boolean(name) && e.who === name && !differentPerson
       const nameContains =
         Boolean(name) &&
@@ -2183,7 +2298,7 @@ export class MemoryStore {
         !differentPerson &&
         Boolean(e.who) &&
         (e.who.includes(name) || name.includes(e.who))
-      return { qqHit, sameName, nameContains, differentPerson }
+      return { qqHit, sameName, nameContains, differentPerson, mentioned }
     }
 
     /*
@@ -2257,6 +2372,7 @@ export class MemoryStore {
        */
       const crossPerson = id.differentPerson
       const mentionsTarget = crossPerson && Boolean(name) && String(e.text).includes(name)
+      const mentionedPerson = crossPerson && id.mentioned
       let hit = false
       let strongHit = false
       /*
@@ -2307,7 +2423,10 @@ export class MemoryStore {
       if (id.qqHit || id.sameName) strongHit = true
       // 跨人条目：不许占关键词语义名额（正文里提到了这个人时放行一半，见上面注释）
       if (crossPerson) {
-        if (mentionsTarget) kw *= 0.5
+        if (mentionedPerson) {
+          // 群聊里被点名的人：不给跨人罚，补一个略高于「熟人级 2 分」的加成
+          kw += MENTION_PERSON_KW
+        } else if (mentionsTarget) kw *= 0.5
         else {
           kw *= CROSS_PERSON_KW_PENALTY
           kwStrong = false
@@ -2405,7 +2524,7 @@ export class MemoryStore {
         const fallback = active
           .filter((e) => {
             const id = identity(e)
-            return (id.qqHit || id.sameName || !e.who) && kinds.includes(e.kind)
+            return (id.qqHit || id.sameName || id.mentioned || !e.who) && kinds.includes(e.kind)
           })
           .sort(
             (a, b) =>
@@ -2453,7 +2572,7 @@ export class MemoryStore {
         const v = this.vectors.get(e.id)
         if (!v) continue
         const id = identity(e)
-        if ((qqStr || name) && id.differentPerson && !(name && String(e.text).includes(name))) continue
+        if ((qqStr || name) && id.differentPerson && !id.mentioned && !(name && String(e.text).includes(name))) continue
         cand.push({ e, s: cosineSimilarity(queryVector, v) || 0 })
       }
       cand.sort((a, b) => b.s - a.s)
@@ -2617,9 +2736,50 @@ export class MemoryStore {
           .join(' > ')}`,
       )
     }
-    const picked = this.applyCharBudget(pool.slice(0, limit).map((x) => x.e), charBudget)
+    const base = pool.slice(0, limit).map((x) => x.e)
+    const coreSlots = this.pickCoreProfile({
+      who,
+      qq,
+      limit: CORE_SLOTS,
+      exclude: new Set(base.map((e) => e.id)),
+    })
+    /*
+     * 保底位占的是「额外」预算，不挤占原有 1200 字窗口。
+     * v1.1 里它直接顶掉一条普通记忆，结果是身份题涨了、偏好/约定题掉得更狠
+     * （偏好 −7、带条件偏好 −7、相似事件 −8）—— 等于拿别人的位置换档案的位置。
+     * 档案只有几十字，单独给它算长度、预算按需加长，两条路就都不吃亏。
+     */
+    const coreCost = coreSlots.reduce((n, e) => n + String(e.text || '').length, 0)
+    const picked = this.applyCharBudget(coreSlots.concat(base), charBudget + coreCost)
     this.markHits(picked)
     return picked
+  }
+
+  /**
+   * 挑「核心档案」：关于本人的、稳定的身份类条目（名字/年龄/职业/所在地）。
+   * 与打分无关，纯按 weight → 新旧排序，结果稳定、不会每轮抖动。
+   */
+  pickCoreProfile({ who = '', qq = '', limit = CORE_SLOTS, exclude = new Set() } = {}) {
+    const n = Math.max(0, Math.min(4, Number(limit) || 0))
+    if (!n) return []
+    if (!who && !qq) return []
+    const target = { name: String(who || ''), qq: String(qq || ''), who: String(who || '') }
+    const alive = new Set(this.entries.filter((e) => e && e.id).map((e) => e.id))
+    return this.entries
+      .filter((e) => {
+        if (!e || !e.text) return false
+        if (exclude.has(e.id)) return false
+        if (!CORE_KINDS.has(e.kind)) return false
+        if (Number(e.weight) < CORE_MIN_WEIGHT) return false
+        if (!CORE_TEXT_RE.test(String(e.text || ''))) return false
+        // 兜底写进来的原话（「他说过：…」）是碎句，不能当档案
+        if (/^他说过[:：]/.test(String(e.text || ''))) return false
+        if (e.supersededBy && alive.has(e.supersededBy)) return false
+        const id = sameIdentity(e, target)
+        return id === 'qq' || id === 'name' || String(e.who || '') === String(who || '')
+      })
+      .sort((a, b) => coreRank(b) - coreRank(a) || Number(b.weight) - Number(a.weight) || Number(a.at || 0) - Number(b.at || 0))
+      .slice(0, n)
   }
 
   /**
@@ -2694,6 +2854,28 @@ export class MemoryStore {
   }
 
   /** 给模型看的记忆段落 */
+  /**
+   * 库里出现过的说话人（2026-11-07 v0.7，给"群聊点名"用）。
+   *
+   * 引擎拿不到全群成员名单，但记忆里有：扫一遍活条目，按 qq 去重，按条数排。
+   * 只要名字，不碰正文，也不算贵（4578 条实测 <5ms），而且可以按需缓存。
+   */
+  knownSpeakers({ limit = 200 } = {}) {
+    const m = new Map()
+    for (const e of this.entries || []) {
+      const qq = String(e.qq || '')
+      const who = String(e.who || '').trim()
+      if (!qq || !who) continue
+      if (e.supersededBy) continue
+      const k = qq + '|' + who
+      m.set(k, (m.get(k) || 0) + 1)
+    }
+    return [...m.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, limit)
+      .map(([k]) => ({ qq: k.split('|')[0], who: k.split('|')[1] }))
+  }
+
   contextFor({ who = '', qq = '', query = '', limit = MEMORY_WINDOW.contextLimit } = {}) {
     // 称谓单列一段（engine-context 里每轮必带），这里必须滤掉：
     // 否则「他自称茶茶」会混进「你记得的事」，又变成可被当成称呼的证据。
@@ -2864,9 +3046,24 @@ function fmtMonthDay(ms) {
   return `${d.getMonth() + 1}月${d.getDate()}日`
 }
 
+/**
+ * v0.5：日期后面带上周几。
+ *
+ * 为什么：官方 714 题里「时间题 15/48、相对日期 15/44」，失败样例多数不是
+ * 「不知道哪天」，而是问「那天是周几 / 隔了几天」——只给日期，模型得自己
+ * 心算，算错就成「编造」；周几写进正文，它是**看得见**的，不用推。
+ */
+function fmtDateWeekday(ms) {
+  const d = new Date(ms)
+  const wd = '日一二三四五六'[d.getDay()]
+  return `${d.getMonth() + 1}月${d.getDate()}日，周${wd}`
+}
+
 export function normalizeRelativeDates(text, at) {
   let out = String(text || '')
   if (!out) return out
+  /* 表情包的名字里常带「周五」这类词（学到了表情包：蓝发少女_打鼓_庆祝周五），那是标签不是日期 */
+  if (/^学到了表情包/.test(out)) return out
   const base = Number(at) || Date.now()
   /*
    * 凌晨（0–5 点）说的「明天」，口语里指的是**天亮后的这一天**，不是日历意义上的明天。
@@ -2881,6 +3078,15 @@ export function normalizeRelativeDates(text, at) {
    */
   const alreadyDated = (rest) => /^（\d{1,2}月\d{1,2}日/.test(rest)
   /*
+   * 2026-11-07：括号**里面**的日期词不算正文（「（9月18日，周五）」里的「周五」），
+   * 否则每装载一次就再补一层括号，幂等直接崩掉。
+   */
+  const insideParen = (full, offset) => {
+    const open = full.lastIndexOf('（', offset - 1)
+    const close = full.lastIndexOf('）', offset - 1)
+    return open > close
+  }
+  /*
    * 历史遗留：早期版本的幂等判断认不出「（10月19日那一周）」，每次装载都再补一遍，
    * 生产里有 7 条被补成了「（10月19日那一周）」×5。这里先把相邻重复的括号合并掉，
    * 再往下走——归一函数自己修自己，不需要额外的迁移脚本。
@@ -2888,24 +3094,66 @@ export function normalizeRelativeDates(text, at) {
   out = out.replace(/(（\d{1,2}月\d{1,2}日[^）]{0,8}）)\1+/g, '$1')
   out = out.replace(/(今天|今日|明天|明日|昨天|昨日|前天|后天)/g, (m, _g, offset, full) => {
     if (alreadyDated(full.slice(offset + m.length))) return m
+    if (insideParen(full, offset)) return m
     let offsetDays = RELATIVE_DAY_OFFSET[m]
     if ((m === '明天' || m === '明日') && hour < 5) offsetDays = 0
     if ((m === '昨天' || m === '昨日') && hour < 5) offsetDays = -2
-    return `${m}（${fmtMonthDay(base + offsetDays * 86400000)}）`
+    return `${m}（${fmtDateWeekday(base + offsetDays * 86400000)}）`
   })
-  // 「上周三」「下周一」「这周」：以周一为一周起点换算
-  out = out.replace(/(上|下|本|这)周([一二三四五六日天])?/g, (m, dir, wd, offset, full) => {
+  /*
+   * 周几换算（2026-11-07 重写）。旧版三个病：裸「周三」不处理、「上周五」在周日被算成
+   * 9 天前、「下周一」在周日被算成 7 天后。现在按真人怎么说话来：
+   *   上周X = 本周那个只要还没过就用它，否则减 7 天
+   *   下周X = 本周那个只要还没到就用它，否则加 7 天
+   *   裸周X = 本周那个 ±7 天三选一，取离今天最近的
+   *   这周/本周X = 本周那个
+   * 周日记成 7（ISO 口径），一周从周一起算。
+   */
+  const DAY = 86400000
+  const dayStart = (ms) => {
+    const d = new Date(ms)
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+  }
+  out = out.replace(/(?:(上|下|本|这)周([一二三四五六日天])?|周([一二三四五六日天]))/g, (m, dir, wdWithDir, wdAlone, offset, full) => {
     if (alreadyDated(full.slice(offset + m.length))) return m
-    const shift = dir === '上' ? -1 : dir === '下' ? 1 : 0
-    const d = new Date(base)
-    const weekday = d.getDay() === 0 ? 7 : d.getDay() // 周日记成 7
-    const monday = base - (weekday - 1) * 86400000
-    if (wd) {
-      const target = WEEKDAY_INDEX[wd]
-      return `${m}（${fmtMonthDay(monday + (shift * 7 + target - 1) * 86400000)}）`
+    if (insideParen(full, offset)) return m
+    /*
+     * 防误伤（2026-11-07）：这些都不是"某一天"，写上去反而污染记忆。
+     *   「一周一次」「两周三次」——前面是数量词；
+     *   「每周一」「第一周」——表示循环或序数，折算不出单日；
+     *   「这周边」「周末」这类——后面还接着别的字，就不是整周/周几。
+     */
+    const prev = full[offset - 1] || ''
+    const next = full[offset + m.length] || ''
+    if (/[每第半一两二三四五六七八九十几多零0-9]/.test(prev)) return m
+    if (/[次遍回天个周整]/.test(next)) return m
+    const dir2 = dir || ''
+    const wd = wdWithDir || wdAlone || ''
+    const today = dayStart(base)
+    const weekday = new Date(base).getDay() === 0 ? 7 : new Date(base).getDay()
+    const monday = today - (weekday - 1) * DAY
+    const shift = dir2 === '上' ? -1 : dir2 === '下' ? 1 : 0
+    if (!wd) {
+      // 「上周/下周/这周」不带周几：后面必须紧跟标点/空白/句尾，否则不算整周
+      if (!/^[\s，。！？、；：）】」』…—~～\/|]/.test(next) && next !== '') return m
+      return `${m}（${fmtMonthDay(monday + shift * 7 * DAY)}那一周）`
     }
-    return `${m}（${fmtMonthDay(monday + shift * 7)}那一周）`
+    const target = WEEKDAY_INDEX[wd]
+    const thisWeek = monday + (target - 1) * DAY
+    let stamp
+    if (dir2 === '上') stamp = thisWeek < today ? thisWeek : thisWeek - 7 * DAY
+    else if (dir2 === '下') stamp = thisWeek > today ? thisWeek : thisWeek + 7 * DAY
+    else if (dir2 === '本' || dir2 === '这') stamp = thisWeek
+    else {
+      // 裸周几：三个候选里取最近的（周期 7，不会打平）
+      const cands = [thisWeek - 7 * DAY, thisWeek, thisWeek + 7 * DAY]
+      let best = cands[0]
+      for (const c of cands) if (Math.abs(c - today) < Math.abs(best - today)) best = c
+      stamp = best
+    }
+    return `${m}（${fmtDateWeekday(stamp)}）`
   })
+
   return out
 }
 
@@ -3074,6 +3322,8 @@ const SUPERSEDED_PENALTY = 0.4
  * 剩下正文里根本没提这个人的，压到 0.05 ≈ 不许占语义名额。
  */
 const CROSS_PERSON_KW_PENALTY = 0.05
+/* 群聊里被点名的人（v0.7）：不加跨人罚，补一个略高于「熟人级 2 分」的加成 */
+const MENTION_PERSON_KW = 2.5
 /*
  * 同题合并（2026-11-02 主人 m01658：「研究写入侧的『同题合并』」）。
  *
@@ -3099,6 +3349,10 @@ const TOPIC_MERGE_WEIGHT_GAIN = 0.2
  * 打开才改变写入行为（`MOLLY_TOPIC_MERGE=1`）；关着时 findSameTopic/mergeSameTopics 仍可手工调用做诊断。
  */
 const TOPIC_MERGE_ON = process.env.MOLLY_TOPIC_MERGE === '1'
+
+/* v1.0 状态翻新：未完成 -> 已完成 的词面标记 */
+const PENDING_OPEN_RE = /(还没|尚未|还没有|仍在|还在等|在等|没定|未定|待定)/
+const PENDING_DONE_RE = /(已经|已发|已到|发来了|发过来|改到|改成|换成|定下来|定了|确认了|完成了|到货|做好了)/
 /*
  * 全局事件（周信一类 who 为空的 event）在「点名问某人」时的折扣（2026-11-02 MH03）。
  * 一条 800 字的周信谁的事都写，问「示例成员F的真名叫什么」时它排第三，

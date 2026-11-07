@@ -304,10 +304,39 @@ export function buildSystemPrompt(input, deps) {
       /* 回传失败不影响拼提示词 */
     }
     if (lastUserText) {
+      /*
+       * 群聊点名（2026-11-07 v0.7）。
+       *
+       * 群里最常见的问法是「白饭鱼说过的那个事是什么」——问的人不是白饭鱼，
+       * 而 recall 只会捞"当前这个人"的桶，别人的条目一律被压死（自有轴实测 0/48）。
+       * 这里把话里点到的人解析出来传给 recall：
+       *   1. CQ 码里的 @（qq 是硬身份，最可靠）；
+       *   2. 记忆里出现过的名字，出现在这句话里（够用，且不需要群成员名单）。
+       *
+       * 只在群里生效：私聊里提到第三个人（"白饭鱼说要请我吃饭"）不该把那个人的
+       * 私事捞出来说——「不当私事披露」最爱出在这种地方。
+       */
+      const mention = []
+      if (groupName) {
+        try {
+          const atRe = /\[CQ:at,qq=(\d{5,})[^\]]*\]/g
+          let am
+          while ((am = atRe.exec(lastUserText))) mention.push({ qq: am[1] })
+          const speakers = typeof deps.memory.knownSpeakers === 'function' ? deps.memory.knownSpeakers({ limit: 200 }) : []
+          for (const sp of speakers) {
+            if (!sp.who || sp.who.length < 2) continue
+            if (qq && String(sp.qq) === String(qq)) continue // 本人不用点名
+            if (lastUserText.includes(sp.who)) mention.push(sp)
+          }
+        } catch {
+          /* 点名解析失败就当没点名，不影响主流程 */
+        }
+      }
       const recalled = deps.memory
         .recall({
           qq,
           query: lastUserText.slice(0, 40),
+          mention,
           limit: degraded ? deps.memoryWindow.degradedQueryLimit : deps.memoryWindow.queryLimit,
         })
         .filter(Boolean)
@@ -318,7 +347,9 @@ export function buildSystemPrompt(input, deps) {
       }
       const related = recalled.filter((e) => e.who !== userName && !(qq && String(e.qq || '') === String(qq)))
       if (related.length) {
-        sp += `\n\n# 其他相关记忆\n${related.map((e) => `- ${e.text}`).join('\n')}`
+        sp += `\n\n# 其他相关记忆\n${related
+          .map((e) => (e.who ? `- （${e.who}说过）${e.text}` : `- ${e.text}`))
+          .join('\n')}`
       }
     }
 

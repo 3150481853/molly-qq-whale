@@ -135,11 +135,23 @@ if (existing?.phase === 'thinking') existing.controller.abort()   // 旧 job 直
 1. `isPureNudge()` 先看有没有**内容段**（`image` / `mface` / `record` / `video` / `file` / `forward` / `ark` / `json` / `xml` / `music` / `contact` / `markdown` / `lightapp`，含 `raw_message` 里的同名 CQ 码）——有就不算叫醒；只有 `at` / `face`（小表情）/ 空白 / 标点才算。
 2. `pickQuoteTarget()` 新增 `media` 理由：图片/语音/文件/转发的触发消息照样给引用框，而且引用框落在**它自己**上（走原来第 ③ 步），被刷过去两条以上才退回最新那条。
 
+### 9. 命令 / 状态回执不接话（`lib/quote-at.js` + `lib/engine.js`）
+
+现场（群 666666666，22:57:26 → 22:58:06）：主人发 `#茶茶`，茶茶（另一个机器人）回了一行状态回执「茶茶（987654321） · 在线 · v1.1.7-preview.1 · 已运行 1天22小时」；她先是起了**一轮回复**去接这行回执，那一轮被后面的消息打断、回执进了 carry，下一轮 `anchorId` 就取到了它 → 她回「你被扣盆里，我被扣锅」时，引用框挂在**状态回执**上，看着就是对着系统信息接话。
+
+改法三条：
+
+1. `looksLikeEchoLine(text)`（新导出）：整条就是 `#xxx` / `/xxx` 指令，或者**同时**满足「括号里有 5–12 位 QQ 号 + 在线/离线/已运行/忙碌/离开/免打扰 + `·`/`・`/`|`/`｜` 分隔符」——三个条件都中才算回执（避免把普通人说「我（123456）现在在线呢」误判）。
+2. `scheduleReply()` 里、`shouldRespond()` 之前加闸口：群聊里命中就直接 `return`（trace 记 `skip-echo`），连「要不要接」都不问；私聊不动。
+3. `stashCarry()` 过滤回执：就算前面某种路径把它排进了 carry，也不许它变成下一轮的 `anchorId`。
+
+顺带把「回复流水」落盘（`stats` 新增 `replyStarts` / `replyDelivered` / `replyAborted` / `modelNull` / `skipEcho`，`traceReply()` 额外追加 `<dataDir>/trace/replies-YYYY-MM-DD.jsonl`）——内存环只有 30 条，重启就没了，`model-null` 比例这种问题以前根本没法回答。
+
 ## 四、验证
 
 | 测试 | 结果 |
 | --- | --- |
-| `tools/test-quote-anchor.mjs`（新增，含复刻 18:09 现场与 nudge 排除触发条） | **43 / 43** |
+| `tools/test-quote-anchor.mjs`（新增，含复刻 18:09 现场、nudge 排除触发条、内容段不算叫醒、命令回执识别） | **51 / 51** |
 | `tools/test-carry.mjs`（新增：取出/清空/不同人不合并/超 20 秒不合并/最多 3 条/顺序） | **7 / 7** |
 | `tools/test-this-turn.mjs`（新增：两条时输出该段并编号、单条不输出） | **5 / 5** |
 | `tools/test-lane-dedupe.mjs`（新增：撞车裁决 7 条 + 答过别再答 8 条 + 跨泳道 carry 3 条） | **18 / 18** |
@@ -154,7 +166,9 @@ if (existing?.phase === 'thinking') existing.controller.abort()   // 旧 job 直
 - `/dsh-qq-whale/state` → `stats.carryMerged > 0`（连发时）；
 - `stats.quoteAnchored > 0`，`quoteLast.why` 出现 `anchor`；
 - `replyTrace` 里出现 `carry` 阶段，`aborted(where=generate)` 后面紧跟的 `delivered` 带 `parts ≥ 1` 且不再「只答最后一条」；
-- 同一个人连发（先闲聊再 `@`）时，`replyTrace` 里能看到 `lane-merge` / `lane-yield` / `skip-covered`，群里只有一轮回复。
+- 同一个人连发（先闲聊再 `@`）时，`replyTrace` 里能看到 `lane-merge` / `lane-yield` / `skip-covered`，群里只有一轮回复；
+- 群里有人发 `#xxx` 指令、别的机器人回状态行时，`replyTrace` 里出现 `skip-echo`、`stats.skipEcho` 递增，她不接那行；
+- `stats.replyStarts` / `stats.modelNull` 就是空回复率的分子分母，长期数字看 `<dataDir>/trace/replies-YYYY-MM-DD.jsonl`。
 
 ## 五、已知限制
 
@@ -165,6 +179,7 @@ if (existing?.phase === 'thinking') existing.controller.abort()   // 旧 job 直
 - 「一条一句」之后**条内换行没有了**：模型要用多行排版的内容会变成多条气泡；想调整连发条数改 `maxTextBubblesPerReply`（默认 5），设 1 就退回「一条消息装全部」的旧行为；
 - 去重是有代价的：同一个人在 30 秒内先闲扯、紧接着 `@` 她时，那句闲聊会被并进 `@` 的回答里（不再单独应一句）；想放宽就把 `laneMergeMs` 调小（比如 3000），想关掉就把 `laneMergeMs` 设 0；
 - 只发图/语音/文件时，引用框挂在**那条消息本身**；要是它后面又被刷了两条以上的话，引用会改挂最新那条（她作答时读的是最新历史）；
+- 回执识别是**按文本特征**判的：别人用别的格式刷状态（不带括号 QQ 号或不用分隔符）还是会漏；真漏了就往 `looksLikeEchoLine` 里加一条判据；
 
 ## 六、怎么退回
 
@@ -172,7 +187,8 @@ if (existing?.phase === 'thinking') existing.controller.abort()   // 旧 job 直
 2. 只退「anchor」：`deliver()` 调用里去掉 `anchorId` 参数（`pickQuoteTarget` 的 anchor 分支没有输入就不会命中）；
 3. 只退「双泳道去重」：把 `config.laneMergeMs` 设 0，并在 `scheduleReply()` 里去掉 `alreadyAnswered` / `rememberAnswered` 两处调用；
 4. 只退「图片触发不挂错引用」：把 `quote-at.js` 里 `isPureNudge()` 开头那句 `if (hasContentSegment(segs)) return false` 删掉即可回到旧行为（纯图片重新算作「空叫醒」）；
-5. 全退：用 1.1.8-preview.1 的文件覆盖回去（`lib/engine.js`、`lib/quote-at.js`、`lib/engine-context.js`、`lib/persona.js`、`lib/relations.js`），重启 DSH。
+5. 只退「回执不接话」：删掉 `scheduleReply()` 里那段 `looksLikeEchoLine(norm?.text)` 闸口即可（`stashCarry` 的过滤可以保留，它只是不让回执当锚点）；
+6. 全退：用 1.1.8-preview.1 的文件覆盖回去（`lib/engine.js`、`lib/quote-at.js`、`lib/engine-context.js`、`lib/persona.js`、`lib/relations.js`），重启 DSH。
 
 ## 七、升级方式
 

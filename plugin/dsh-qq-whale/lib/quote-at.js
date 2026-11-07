@@ -75,6 +75,30 @@ function coreLength(text) {
     .length
 }
 
+/*
+ * 「命令 / 系统回执」类消息：不是聊天内容，是给机器看的。
+ *
+ * 2026-11-07 真机事故（主人 m01653）：群里有两个机器人，主人发了 `#茶茶`，
+ * 茶茶回了一条「茶茶（987654321）· 在线 · v1.1.7-preview.1 · 已运行 1天22小时」，
+ * 这条回执被当成普通群消息起了一轮回复；它被下一条打断、进了 carry，
+ * 下一轮就把「这一轮要接的就是它」传下去——引用框最后挂在**这行状态回执**上，
+ * 她回的是「你被扣盆里，我被扣锅」，看着就是对着系统信息接话。
+ *
+ * 所以命令本身（`#` / `/` 开头）和状态回执都不该被当成会话内容引用或锚定。
+ * 判据刻意收窄：必须有括号里的 QQ 号 + 在线/离线/已运行这类状态词 + 分隔符，
+ * 免得把普通人写的「（12345）· 在线」误判（那也得三个条件同时成立）。
+ */
+export function looksLikeEchoLine(text) {
+  const t = String(text || '').trim()
+  if (!t) return false
+  // 命令本身：整条就是一个 #xxx / /xxx 指令
+  if (/^[#/／][\w\u4e00-\u9fa5-]{0,20}\s*$/.test(t)) return true
+  const hasQq = /[（(]\d{5,12}[）)]/.test(t)
+  const hasState = /(在线|离线|已运行|忙碌|离开|免打扰)/.test(t)
+  const hasSep = /[·・|｜]/.test(t)
+  return hasQq && hasState && hasSep
+}
+
 /**
  * 触发消息是不是「纯叫醒」：只有 @（可能带个表情或空白），没有一个字的正文。
  * 这种消息不该被当作「她要回的那个人」——她接的是上下文里的上一条。
@@ -383,6 +407,8 @@ export function voicePartToText(part) {
 export default {
   QUOTE_DEFAULTS,
   isPureNudge,
+  hasContentSegment,
+  looksLikeEchoLine,
   crowdStats,
   recentSpeakers,
   lastOtherMessage,

@@ -102,7 +102,7 @@ const { PokeReactor, isPokeNotice } = await import(sub('./poke.js'))
 const { LotteryBox, LOTTERY_MENU_TIPS, TOY_MENU_TIPS, buildToyMenu, parseLotteryCommand, buildWelcome, parseGroupIncrease } =
   await import(sub('./groupfun.js'))
 // 「@ 谁 / 引用哪条」（2026-10-25，主人 m02736 + m02835）：纯函数模块，单测直接跑。
-const { isPureNudge, resolveExplicitAt, pickQuoteTarget, crowdStats, shouldDemoteVoice, voicePartToText } = await import(sub('./quote-at.js'))
+const { isPureNudge, resolveExplicitAt, pickQuoteTarget, crowdStats, shouldDemoteVoice, voicePartToText, looksLikeEchoLine } = await import(sub('./quote-at.js'))
 // 动图理解（2026-10-26，主人 m04893）：GIF 只解码首帧 → 采样成多帧拼图再给模型。
 // 依赖 python+PIL（lib/gif-frames.js 内联脚本），缺环境时自动回退原图。
 const { gifContactSheet } = await import(sub('./gif-frames.js'))
@@ -227,6 +227,19 @@ export class ChatEngine {
     this.logger = logger
     this.config = config
     this.client = client
+    /*
+     * v0.5（2026-11-06）：记下「她自己说过的话」。
+     *
+     * 官方 714 题里「助手自己说过的话」只有 17/58（29%），是最烂的一格。
+     * 原因很直接：抽取只在**用户发言**时触发，抽取器看到的永远是「他说了什么」，
+     * 她说过的承诺、她自己的设定、她给人起的外号，从来没进过库。
+     *
+     * 做法：包一层发送函数，把她**真正发出去**的文本按会话记进 `_selfSaid`，
+     * 下次抽取时把「他：…」「我：…」一起交给模型，让她自己的话也走同一条闸门
+     * 入库（source='assistant'）。只包 send 方法，不动任何回复逻辑。
+     */
+    this._selfSaid = new Map()
+    this._wrapClientSends()
     this.selfId = String(config.selfId || '')
     this.persona = new PersonaStore({ dir: config.personaDir, logger })
     // maxFileSizeMB 对齐控制台上传契约的 8 MB（构造器默认 5 MB，否则 6 MB 的图
@@ -477,6 +490,16 @@ export class ChatEngine {
       // 被打断后合并进下一轮的消息条数（2026-11-06，主人 m00215）
       carryMerged: 0,
       quoteLast: null,
+      /*
+       * 回复流水计数（2026-11-07，主人 m01639「统计一下 model-null 比例」）。
+       * 内存环只有 30 条、进程一重启证据全没，所以计数 + 落盘 jsonl（见 traceReply）。
+       * modelNull / replyStarts 就是「空回复率」的分子分母。
+       */
+      replyStarts: 0,
+      replyDelivered: 0,
+      replyAborted: 0,
+      modelNull: 0,
+      skipEcho: 0,
       // 引用回复里语音段降级成文字的次数（2026-10-25，主人 m03353）
       voiceDemoted: 0,
       // 入站语音转文字（2026-10-25，主人 m04041）：转写成功几条、失败几条
@@ -1404,13 +1427,44 @@ export class ChatEngine {
   traceReply(convKey, stage, extra = null) {
     try {
       if (!Array.isArray(this.replyTrace)) this.replyTrace = []
-      this.replyTrace.push({
+      const rec = {
         at: new Date(this.now()).toLocaleString('sv-SE', { hour12: false }),
         key: String(convKey || ''),
         stage,
         ...(extra && typeof extra === 'object' ? extra : {}),
-      })
+      }
+      this.replyTrace.push(rec)
       if (this.replyTrace.length > 30) this.replyTrace.splice(0, this.replyTrace.length - 30)
+      // 计数（重启会清零，长期看 jsonl）
+      try {
+        if (this.stats) {
+          if (stage === 'start') this.stats.replyStarts = (this.stats.replyStarts || 0) + 1
+          else if (stage === 'delivered') this.stats.replyDelivered = (this.stats.replyDelivered || 0) + 1
+          else if (stage === 'aborted') this.stats.replyAborted = (this.stats.replyAborted || 0) + 1
+          else if (stage === 'model-null') this.stats.modelNull = (this.stats.modelNull || 0) + 1
+          else if (stage === 'skip-echo') this.stats.skipEcho = (this.stats.skipEcho || 0) + 1
+        }
+      } catch {}
+      this.persistTrace(rec)
+    } catch {}
+  }
+
+  /**
+   * 回复流水落盘（2026-11-07，主人 m01639）。
+   *
+   * 内存环 30 条、进程重启就没了——「20:15 那次到底空了几轮」这种问题根本没法回答。
+   * 这里追加到 `<dataDir>/trace/replies-YYYY-MM-DD.jsonl`，一天一个文件。
+   * 任何失败都吞掉：这是诊断，不能影响回复。
+   */
+  persistTrace(rec) {
+    try {
+      // 数据目录在 config 上（本仓全篇都是 config.dataDir || config.memoryDir，没有实例字段）
+      const root = String(this.config?.dataDir || this.config?.memoryDir || this.dataDir || this.memoryDir || '')
+      if (!root) return
+      const dir = path.join(root, 'trace')
+      fs.mkdirSync(dir, { recursive: true })
+      const day = String(rec?.at || '').slice(0, 10) || new Date().toISOString().slice(0, 10)
+      fs.appendFileSync(path.join(dir, `replies-${day}.jsonl`), `${JSON.stringify(rec)}\n`, 'utf8')
     } catch {}
   }
 
@@ -3005,6 +3059,24 @@ export class ChatEngine {
       }
     }
 
+    /*
+     * 命令 / 系统回执不接话（2026-11-07，主人 m01653）。
+     *
+     * 真机：群里有两个机器人，主人发 `#茶茶`，茶茶回了一条
+     * 「茶茶（987654321）· 在线 · v1.1.7-preview.1 · 已运行 1天22小时」。
+     * 这行回执被当成普通群消息起了一轮回复；被打断后进了 carry，
+     * 下一轮把「这一轮要接的就是它」传下去 → 引用框挂在状态回执上，
+     * 她回的是「你被扣盆里，我被扣锅」，看着就像对着系统信息接话。
+     *
+     * 排在 shouldRespond 之前：这类消息连「要不要接」都不用问，直接不听。
+     * 私聊不动——私聊里对方发什么都只有她一个听众，真发命令也该她自己处理。
+     */
+    if (scene !== SCENE_PRIVATE && looksLikeEchoLine(norm?.text)) {
+      this.traceReply(conv.key, 'skip-echo', { text: String(norm?.text || '').slice(0, 32) })
+      this.logger('debug', `不回：命令回执（${String(norm?.text || '').slice(0, 24)}）`)
+      return
+    }
+
     const verdict = this.shouldRespond({ scene, ev, norm, conv })
     this.logDecision({ ev, norm, scene, verdict })
     /*
@@ -3110,7 +3182,7 @@ export class ChatEngine {
    *
    * @returns {object|null} 入库的 entry；被拦住返回 null
    */
-  remember({ kind = 'fact', who = '', qq = '', text = '', weight = 6 } = {}) {
+  remember({ kind = 'fact', who = '', qq = '', text = '', weight = 6, source = 'user' } = {}) {
     const t = String(text || '').trim()
     if (!t) return null
     const verdict = judge({
@@ -3130,11 +3202,11 @@ export class ChatEngine {
       }
       this.memoryGate.pending += 1
       // PendingStore 自己会做同文本去重（刷新 at，不重复堆），这里不用再判
-      this.memoryPending.add({ kind, who, qq, text: t, weight, reason: verdict.reason })
+      this.memoryPending.add({ kind, who, qq, text: t, weight, source, reason: verdict.reason })
       this.logger('debug', `闸门拦下记忆（${verdict.reason}），进待核实区：${t.slice(0, 40)}`)
       return null
     }
-    const entry = this.memory.add({ kind, who, qq, text: t, weight })
+    const entry = this.memory.add({ kind, who, qq, text: t, weight, source })
     if (entry) this.memoryGate.added += 1
     return entry
   }
@@ -4854,7 +4926,16 @@ export class ChatEngine {
    */
   stashCarry(jobId, trigger) {
     const incoming = Array.isArray(trigger) ? trigger : [trigger]
-    const list0 = incoming.filter((t) => t && t.ev)
+    /*
+     * 命令回执不进 carry（2026-11-07，主人 m01653）：那行「茶茶（…）· 在线 · v1.1.7」
+     * 被攒进来之后，下一轮就成了 anchorId，引用框直接挂到系统回执上。
+     * 它本来也不是聊天内容，丢掉不影响「被打断的那句不能丢」。
+     */
+    const list0 = incoming.filter((t) => {
+      if (!t || !t.ev) return false
+      const raw = String(t.ev.raw_message || t.text || '')
+      return !looksLikeEchoLine(raw)
+    })
     if (!list0.length) return
     if (!this._carry) this._carry = new Map()
     const k = String(jobId)
@@ -8218,6 +8299,98 @@ export class ChatEngine {
    * 实测模型经常直接吐裸行（没有 `- ` 前缀），所以有前缀就剥、没有也认。
    * 只有明显是废话的行（"以下是…"/"注意："）才丢。
    */
+  /**
+   * v1.0：原话兜底（写入覆盖率）。
+   *
+   * 抽取模型只记「以后用得上」的事实，于是「浇水壶放在阳台门旁边」这种
+   * 看似琐碎、但问起来必须答得上来的话就永久消失了（v0.6 实测：库里 0 条）。
+   * 这里对**没有被抽取结果覆盖到**的原话补一条低权重条目，保证「他说过的话
+   * 至少留了痕」，再靠权重和召回预算让它排在正经事实后面。
+   */
+  writeRawFallback(ev, userName, lines, keptTexts) {
+    if (process.env.MOLLY_RAW_FALLBACK === '0') return 0
+    const list = Array.isArray(lines) ? lines : []
+    if (!list.length) return 0
+    let wrote = 0
+    for (const line of list) {
+      if (wrote >= RAW_FALLBACK_MAX) break
+      const raw0 = String(line || '').trim()
+      if (raw0.length < RAW_FALLBACK_MIN_LEN) continue
+      if (/^\[(CQ|图片|表情|语音|视频)/.test(raw0)) continue
+      const s = cleanRawText(raw0)
+      if (s.length < RAW_FALLBACK_MIN_LEN) continue
+      if (hanCount(s) < 6) continue
+      if (looksLikeSystem(s)) continue
+      if (!looksLikeFact(s)) continue
+      if (/^(哈+|嗯+|哦+|啊+|在吗|早|晚安)[。!！?？~～\s]*$/.test(s)) continue
+      if (keptTexts.some((k) => gramOverlap(k, s) >= RAW_FALLBACK_COVER)) continue
+      /* v1.3c：同一个人的旧条目已经说过这句，就别再存一遍 */
+      const mine = (this.memory?.entries || []).filter((e) => String(e.qq || '') === String(ev?.user_id || ''))
+      const tail = mine.slice(-400)
+      if (tail.some((e) => {
+        const t0 = String(e.text || '').replace(/^(他说过|我说过)[:：]/, '')
+        return t0 === s || gramOverlap(t0, s) >= RAW_FALLBACK_COVER + 1
+      })) continue
+      const text = `他说过：${s.slice(0, 160)}`
+      const e = this.remember({
+        kind: 'fact',
+        who: userName,
+        qq: String(ev?.user_id || ''),
+        text,
+        weight: RAW_FALLBACK_WEIGHT,
+        source: 'user',
+      })
+      if (e) wrote += 1
+    }
+    if (wrote) this.logger('debug', `原话兜底写入 ${wrote} 条`)
+    return wrote
+  }
+
+  /** v0.5：把真正发出去的文本记进 `_selfSaid`（按会话聚合，最多 8 句） */
+  noteSelfSaid(key, text) {
+    const t = cleanRawText(String(text || '').replace(/\s+/g, ' '))
+    // 太短的（「嗯」「好」）、表情包描述、系统提示语都不值得记
+    if (t.length < 6 || t.length > 300) return
+    if (hanCount(t) < 3) return
+    if (looksLikeSystem(t)) return
+    if (/^\[(CQ|图片|表情|语音|视频)/.test(t)) return
+    if (!this._selfSaid) this._selfSaid = new Map()
+    const buf = this._selfSaid.get(key) || { lines: [], lastAt: 0 }
+    if (buf.lines[buf.lines.length - 1] === t) return
+    buf.lines.push(t)
+    if (buf.lines.length > 8) buf.lines.shift()
+    buf.lastAt = this.now()
+    this._selfSaid.set(key, buf)
+  }
+
+  /** v0.5：只包发送函数，不碰回复逻辑 */
+  _wrapClientSends() {
+    const c = this.client
+    if (!c || c.__selfSaidWrapped) return
+    c.__selfSaidWrapped = true
+    const extract = (payload) => {
+      const parts = Array.isArray(payload) ? payload : [payload]
+      return parts
+        .map((p) => (typeof p === 'string' ? p : String(p?.data?.text || p?.text || '')))
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .join(' ')
+    }
+    for (const [name, kind] of [['sendGroupMsg', 'group'], ['sendPrivateMsg', 'private']]) {
+      const orig = c[name]
+      if (typeof orig !== 'function') continue
+      c[name] = (id, payload, ...rest) => {
+        try {
+          const text = extract(payload)
+          if (text) this.noteSelfSaid(kind === 'group' ? `group:${id}` : `private:${id}`, text)
+        } catch (err) {
+          this.logger('debug', `记自己说过的话失败：${err?.message || err}`)
+        }
+        return orig.call(c, id, payload, ...rest)
+      }
+    }
+  }
+
   async learnByModel(ev, userName, t) {
     const cfg = this.config
     if (cfg.memoryExtract === false) return
@@ -8247,11 +8420,31 @@ export class ChatEngine {
     // 完全可能又进来新消息 push 进 buf.lines；如果成功后无脑 `buf.lines = []`，
     // 那些「还没被看过」的新句子就被一起抹掉了 —— 实测「我家那只猫」就是这么丢的。
     const consumed = buf.lines.length
-    const said = buf.lines.join('\n')
+    /*
+     * v0.5：把「她自己刚说过的几句」一起送进去。
+     * 只带最近 4 句——她的回话通常更长，带多了会把用户那 4~12 句挤掉，
+     * 而用户信息仍然是优先级最高的。
+     */
+    const selfBuf = this._selfSaid?.get(key)
+    const selfConsumed = selfBuf ? Math.min(selfBuf.lines.length, 4) : 0
+    const selfLines = selfBuf ? selfBuf.lines.slice(-selfConsumed) : []
+    const said = [
+      ...buf.lines.map((l) => `他：${l}`),
+      ...selfLines.map((l) => `我：${l}`),
+    ].join('\n')
 
     const system = [
       '你在帮一只叫 Molly 的鲸鱼娘整理记忆。',
-      '下面是某个人在 QQ 上说过的话。请挑出**以后还用得上**的事实，一行一条。',
+      '下面是他和你说过的话：`他：` 开头是他说的，`我：` 开头是你（Molly）自己说过的。',
+      '请挑出**以后还用得上**的事实，一行一条。',
+      '',
+      '对于你自己说过的话，只记这几种——以后被追问「你上次说过什么」时要答得出来：',
+      '- 你答应过他/约好的事、你说过要做什么',
+      '- 你给他起的称呼、外号，或者他给你起的称呼',
+      '- 你自己的设定与习惯（爱吃什么、怕什么、住在哪、怎么说话）',
+      '- 你给出的结论或判断（「那只猫叫锅底」「这个我查过了」这类）',
+      '这类必须写成「我说过：……」开头，不要写成「他……」。',
+      '不要记：你的寒暄、语气词、表情描述、你自己编出来的细节。',
       '',
       '只记这几类：',
       '- 他的身份/名字/职业/住哪/养什么',
@@ -8321,7 +8514,20 @@ export class ChatEngine {
       this.logger('debug', `模型抽记忆失败：${err?.message || err}`)
       return
     }
-    if (!out || /^无[。.]?$/.test(out)) return
+    /*
+     * v1.0：这次喂给模型的用户原话（兜底要用）。
+     * 原来这里是 `if (!out || /^无[。.]?$/.test(out)) return`——
+     * 模型回「无」时直接返回，**连缓冲区都不消费**，那几句会被后来的新消息
+     * 从队首挤出去（buf.lines 上限 12），等于永久丢弃。
+     */
+    const rawLines = buf.lines.slice(0, consumed)
+    const keptTexts = []
+    if (!out || /^无[。.]?$/.test(out)) {
+      this.writeRawFallback(ev, userName, rawLines, keptTexts)
+      buf.lines = buf.lines.slice(consumed)
+      if (selfBuf && selfConsumed) selfBuf.lines = selfBuf.lines.slice(selfConsumed)
+      return
+    }
 
     // 解析：**不能只认 `- ` 前缀**。
     // 实测模型（deepseek-v4.1-flash）对这类抽取任务经常直接吐裸行：
@@ -8340,6 +8546,18 @@ export class ChatEngine {
        * 2026-10-25（主人第 5 条）：模型常写「梗：xxx」显式分类，标了就按梗入库；
        * 没标但看着像梗的，交给 guessKind 兜底。
        */
+      /*
+       * v0.5：她自己说过的话。
+       * 模型按 prompt 写成「我说过：……」，这里**保留前缀**再入库——
+       * 「我说过」本身就是最好的检索词（问句常是「你上次说过什么」），
+       * 去掉反而召不回来。source 标 assistant，走同一个闸门。
+       */
+      let source = 'user'
+      const mSelf = text.match(/^我(?:说过|讲过)[:：]\s*/)
+      if (mSelf) {
+        source = 'assistant'
+        text = `我说过：${text.slice(mSelf[0].length).trim()}`
+      }
       let kindHint = ''
       const mKind = text.match(/^(梗|热梗|名场面)[:：]\s*/)
       if (mKind) {
@@ -8360,18 +8578,25 @@ export class ChatEngine {
         qq: String(ev?.user_id || ''),
         text,
         weight: 6,
+        source,
       })
       // 被闸门拦下的不计数（它没进库），上限按"真写进去的"算
       if (e) kept++
+      keptTexts.push(text)
       // 2026-10-22：上限 5→8，和 prompt 的「最多 8 条」对齐（原来两侧不一致，
       // 模型认真写 8 条也只会入库 5 条）
       if (kept >= 8) break
     }
-    if (kept > 0) {
-      this.logger('info', `模型抽到 ${kept} 条关于 ${userName} 的记忆`)
-      // 只丢掉这次真正喂给模型的那些句子，抽取期间新进的保留下来
-      buf.lines = buf.lines.slice(consumed)
-    }
+    if (kept > 0) this.logger('info', `模型抽到 ${kept} 条关于 ${userName} 的记忆`)
+    /*
+     * v1.0 原话兜底：抽取模型说「不值得记」的话，这里用低权重留个底。
+     * 只补「抽取结果里没有一条覆盖到」的句子（按二元组重合数判断），
+     * 每次最多补 4 句，权重 4（低于正常 6），不会盖过正经事实。
+     */
+    this.writeRawFallback(ev, userName, rawLines, keptTexts)
+    // 只丢掉这次真正喂给模型的那些句子，抽取期间新进的保留下来
+    buf.lines = buf.lines.slice(consumed)
+    if (selfBuf && selfConsumed) selfBuf.lines = selfBuf.lines.slice(selfConsumed)
   }
 }
 
@@ -8382,9 +8607,64 @@ export class ChatEngine {
  * intentKinds 兜底是靠 kind 过滤的，全都一坨 fact 就分不出偏好和事件。
  * 这里按字面线索粗分，宁可猜错也不全塞一类。
  */
+/* v1.0 原话兜底的参数：权重低于正常事实，条数封顶，覆盖判断用二元组 */
+const RAW_FALLBACK_WEIGHT = 4
+const RAW_FALLBACK_MAX = 3
+const RAW_FALLBACK_MIN_LEN = 8
+const RAW_FALLBACK_COVER = 3
+
+/* v1.3：原话里有三种噪声——引用块、CQ 码、@数字。清掉它们再入库，
+ * 否则「他说过：[引用 @某某：…] 哈哈哈哈」会把别人的话和 QQ 号一起背下来。 */
+function cleanRawText(input) {
+  let t = String(input || '')
+  t = t.replace(/\[引用[^\]]*\]/g, ' ')
+  t = t.replace(/\[CQ:[^\]]*\]/g, ' ')
+  t = t.replace(/@\d{5,}/g, ' ')
+  t = t.replace(/@我/g, ' ')
+  t = t.replace(/^(?:@[^\s，。、,.!?！？]{1,12}[\s，。、]*)+/, ' ')
+  t = t.replace(/\s+/g, ' ').trim()
+  t = t.replace(/^[，。、,.!?！？~～:：;；\]\s]+/, '')
+  t = t.replace(/\[[^\]]*$/, '')
+  return t.trim()
+}
+/* v1.3：系统/插件报错不是他说的话，别往记忆里背 */
+/* v1.3d：群聊里大半是打趣，「锤子砸下来我一点都不带动的」这种存下来没用。
+ * 兜底只收「像事实」的话：带数字/时间/地点/身份/喜好这些线索词的才留。 */
+const RAW_FACT_CUE = new RegExp(
+  '[0-9０-９]|岁|生日|住在|老家|[一二三四五六七八九十两]口人|周[一二三四五六日天]|星期[一二三四五六日天]|昨天|今天|明天|前天|后天|上个月|下个月|上次|下次|放在|搁在|摆在|留在|喜欢|讨厌|不爱|不吃|过敏|不能吃|叫|名字|宠物|猫|狗|上班|工作|公司|学校|班|医院|医生|朋友|同事|同学|老板|客户|妈妈|爸爸|老婆|老公|儿子|女儿|姐|哥|弟|妹|钱|工资|房租|买|换了|改成|约好|答应|别忘|记得',
+)
+function looksLikeFact(s) {
+  return RAW_FACT_CUE.test(String(s || ''))
+}
+function looksLikeSystem(s) {
+  return /在调用插件|处理函数|时出现异常|Aiocqhttp|is not defined|TypeError|ReferenceError|Error:/.test(String(s || ''))
+}
+function hanCount(s) {
+  return (String(s || '').match(/[\u4e00-\u9fa5]/g) || []).length
+}
+
+/** 去掉空白与标点后的二元组集合（中文没有空格，二元组是最省事的近似） */
+function gramSet(text) {
+  const s = String(text || '').replace(/[\s\p{P}\p{S}]/gu, '')
+  const out = new Set()
+  for (let i = 0; i < s.length - 1; i++) out.add(s.slice(i, i + 2))
+  return out
+}
+
+/** 两段文字的二元组重合个数 */
+function gramOverlap(a, b) {
+  const A = gramSet(a)
+  if (!A.size) return 0
+  const B = gramSet(b)
+  let n = 0
+  for (const g of A) if (B.has(g)) n++
+  return n
+}
+
 function guessKind(text) {
   const t = String(text || '')
   // 2026-10-25（主人第 5 条）：梗类线索。宁可粗分，也别把梗全塞 fact——
+
   // 塞 fact 之后「说个梗」这类提问按 kind 过滤就召回不到。
   if (/(梗|名场面|口头禅|绷不住|抽象|乐子|整活|典中典|哈基|牢大|小丑|上大分|遥遥领先)/.test(t)) {
     return 'meme'

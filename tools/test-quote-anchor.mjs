@@ -7,6 +7,8 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   isPureNudge,
+  hasContentSegment,
+  looksLikeEchoLine,
   crowdStats,
   recentSpeakers,
   lastOtherMessage,
@@ -240,6 +242,24 @@ ok('普通句子不算叫醒', !isPureNudge(ev({ segs: [{ type: 'text', data: { 
     nowMs: now,
   })
   ok('图片被刷过去多条 → 引最新那条', lateT && lateT.messageId === '834', JSON.stringify(lateT))
+}
+
+// ── 10. 命令 / 系统回执不算聊天内容（2026-11-07，主人 m01653）──
+{
+  // 现场原文：主人发 `#茶茶`，茶茶回了这行状态回执，Molly 的引用框挂到了它上面
+  ok(
+    '机器人状态回执 → 认成回执',
+    looksLikeEchoLine('茶茶（987654321） · 在线 · v1.1.7-preview.1 · 已运行 1天22小时'),
+  )
+  ok('命令本身 → 认成回执', looksLikeEchoLine('#茶茶'))
+  ok('斜杠命令 → 认成回执', looksLikeEchoLine('/molly'))
+  ok('普通句子 → 不是回执', !looksLikeEchoLine('想听鼓，那就敲锅。'))
+  // 只满足两个条件不算：有括号 QQ + 「在线」但没有分隔符
+  ok('只提「在线」的普通聊天 → 不是回执', !looksLikeEchoLine('我（123456）现在在线呢，来找我玩'))
+  // 有分隔符 + 状态词，但没有括号里的 QQ 号 → 也不是回执
+  ok('带分隔符但没有 QQ 号的句子 → 不是回执', !looksLikeEchoLine('她 · 在线 · 一直'))
+  ok('空文本 → 不是回执', !looksLikeEchoLine(''))
+  ok('带正文的命令不吞（命令后面还接了话）', !looksLikeEchoLine('#茶茶 你怎么看这事'))
 }
 
 console.log(`\n${pass} PASS / ${fail} FAIL`)

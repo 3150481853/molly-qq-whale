@@ -3917,7 +3917,7 @@ export class ChatEngine {
     const t = String(text || '').trim()
     if (!t) return false
     // 静默时段连「回网易云/B站」也不接着唱（2026-10-31 主人要求唱歌同语音时段）
-    if (this.inSingQuietHours()) {
+    if (!(ev && ev.__test) && this.inSingQuietHours()) {
       this.singPending = null
       this.logger('info', '点歌续问命中静音时段，作废')
       await this.sayQuick(ev, scene, '这个点儿不唱歌了，跟语音一样静音（23:50–09:00），白天再点我～')
@@ -3991,7 +3991,7 @@ export class ChatEngine {
     if (!req) return false
     // 2026-10-31 主人：「把 molly 唱歌的限制同语音，十一点五十之后不唱歌，要不然电脑会吵」
     // 静默时段只回一句文字，不渲染、不发语音（渲染也费 GPU，半夜风扇一样吵）。
-    if (this.inSingQuietHours()) {
+    if (!(ev && ev.__test) && this.inSingQuietHours()) {
       this.logger('info', '点歌命中静音时段（同语音时段），不唱')
       await this.sayQuick(ev, scene, '这个点儿不唱歌了，跟语音一样静音（23:50–09:00），白天再点我～')
       return true
@@ -4147,8 +4147,23 @@ export class ChatEngine {
       await this.sayQuick(ev, scene, `没弄成（${String(res?.error || '未知原因').slice(0, 80)}），换一首吧。`)
       return true
     }
-    // 规矩：出处先走一条文字，语音跟在后头
-    if (res.creditLine) await this.sayQuick(ev, scene, res.creditLine)
+    // 主人 2026-11-07：唱歌只发「图卡 + 语音」，不再发那一堆文字（出处记在 result.json 里）
+    const sendTo = (payload) => (ev.message_type === 'group'
+      ? this.client.sendGroupMsg(ev.group_id, payload)
+      : this.client.sendPrivateMsg(ev.user_id, payload))
+    let card = ''
+    try {
+      if (res.card && fs.existsSync(res.card)) card = res.card
+    } catch {
+      card = ''
+    }
+    if (card) {
+      try {
+        await sendTo(buildMessage([{ type: 'image', file: card }]))
+      } catch (e) {
+        this.logger('warn', `图卡发送失败（只发语音）：${e?.message || e}`)
+      }
+    }
     let file = res.file
     try {
       if (res.mix && fs.existsSync(res.mix)) file = res.mix
@@ -4156,8 +4171,7 @@ export class ChatEngine {
       // 混音文件读不到就用纯人声
     }
     const payload = buildMessage([{ type: 'record', file }])
-    if (ev.message_type === 'group') await this.client.sendGroupMsg(ev.group_id, payload)
-    else await this.client.sendPrivateMsg(ev.user_id, payload)
+    await sendTo(payload)
     this.stats.singSent += 1
     this.logger('info', `扒音轨唱歌：${q}${res.bvid ? `（${res.bvid}）` : ''} ${(Number(res.seconds) || 0).toFixed(1)}s 升${res.pitchShift || 0}半音${res.cached ? '，缓存' : ''}`)
     return true
@@ -4831,15 +4845,21 @@ export class ChatEngine {
    * 被新消息顶掉的那一轮，消息不能丢（2026-11-06，主人 m00215「为什么总是回下一条」）。
    *
    * 原来 abort 之后那条消息就彻底没人回答了：她最后回的、引用框挂的永远是后一条，
-   * 主人看到的就是「你总在回我下一句」。这里先把丢掉的那条记在 jobId 上，
-   * 等同一泳道的下一轮开始时（debounce 之后、真去生成之前）取出来一起接。
+   * 主人看到的就是「你总在回我下一句」。这里先把丢掉的那条记下来，
+   * 等同一会话的下一轮开始时（debounce 之后、真去生成之前）取出来一起接。
+   *
+   * 2026-11-07（主人 m01078「还是有问题」）：key 从 jobId 改成**会话 key**。
+   * 双泳道（targeted / ambient）各有各的 jobId，按 jobId 攒的话，闲聊道被 @ 那条
+   * 掐掉的句子永远交不到 @ 那条手上，两条道就各答一遍。
    */
   stashCarry(jobId, trigger) {
-    if (!trigger || !trigger.ev) return
+    const incoming = Array.isArray(trigger) ? trigger : [trigger]
+    const list0 = incoming.filter((t) => t && t.ev)
+    if (!list0.length) return
     if (!this._carry) this._carry = new Map()
     const k = String(jobId)
     const list = this._carry.get(k) || []
-    list.push(trigger)
+    for (const t of list0) list.push(t)
     while (list.length > 3) list.shift()
     this._carry.set(k, list)
   }
@@ -4856,12 +4876,67 @@ export class ChatEngine {
     this._carry.delete(k)
     const now = Date.now()
     const uid = String(ev?.user_id ?? '')
-    return list.filter((t) => {
-      if (!t || !t.ev) return false
-      if (uid && String(t.ev.user_id ?? '') !== uid) return false
-      if (now - Number(t.at || 0) > 20000) return false
-      return true
-    })
+    const seen = new Set()
+    const out = []
+    for (const t of list) {
+      if (!t || !t.ev) continue
+      if (uid && String(t.ev.user_id ?? '') !== uid) continue
+      if (now - Number(t.at || 0) > 20000) continue
+      const mid = String(t.ev.message_id ?? '')
+      if (mid && seen.has(mid)) continue
+      if (mid) seen.add(mid)
+      out.push(t)
+    }
+    return out
+  }
+
+  /**
+   * 记住「这几条消息已经答过了」（2026-11-07，主人 m01078「还是有问题」）。
+   *
+   * 真机现场：同一个人在几秒内先闲扯一句、再 @ 她一句，两条泳道各生成各发，
+   * 群里就成了「同一件事回两次，引用框各挂一条」。只靠 carry 挡不住——
+   * 两条道都没被 abort，谁也不知道对方已经答过。所以答完就地记一笔，
+   * 后面哪条道要开口前先查一次：这几条是不是已经答过？答过就闭嘴。
+   */
+  rememberAnswered(key, ids) {
+    if (!this._answered) this._answered = new Map()
+    const list = (Array.isArray(ids) ? ids : [ids]).map((x) => String(x ?? '')).filter(Boolean)
+    if (!list.length) return
+    const k = String(key)
+    const prev = this._answered.get(k)
+    const set = new Set(prev?.ids ? Array.from(prev.ids) : [])
+    for (const id of list) set.add(id)
+    this._answered.set(k, { at: Date.now(), ids: set })
+  }
+
+  /**
+   * 这几条是不是都已经答过了？全都答过 → 返回命中的 id 串（用来打 trace）；
+   * 只要有一条没答过就得开口，返回空串。
+   */
+  alreadyAnswered(key, ids, windowMs = 45000) {
+    if (!this._answered) return ''
+    const rec = this._answered.get(String(key))
+    if (!rec || !rec.ids) return ''
+    if (Date.now() - Number(rec.at || 0) > windowMs) return ''
+    const list = (Array.isArray(ids) ? ids : [ids]).map((x) => String(x ?? '')).filter(Boolean)
+    if (!list.length) return ''
+    const all = list.every((id) => rec.ids.has(id))
+    return all ? list.join(',') : ''
+  }
+
+  /**
+   * 两条泳道撞上同一个人时的裁决（2026-11-07，主人 m01078）。
+   *
+   * 同一个人半分钟内又发了一条，而另一条泳道还在想（还没说出口）：
+   *   · 新来的是 @我（targeted）→ 'merge'：把闲聊那条掐掉，两条一起接（答一次就够）；
+   *   · 新来的是闲聊（ambient）→ 'yield'：让位，紧跟着的那句 @我 会连它一起答。
+   * 不同人、隔得太久、对方已经不在想 → ''（各答各的）。
+   */
+  laneMergeDecision({ lane, otherJob, ev, nowMs, windowMs = 30000 }) {
+    if (!otherJob || otherJob.phase !== 'thinking' || !otherJob.trigger?.ev) return ''
+    if (String(otherJob.trigger.ev.user_id ?? '') !== String(ev?.user_id ?? '')) return ''
+    if (Number(nowMs || 0) - Number(otherJob.trigger.at || 0) > windowMs) return ''
+    return lane === 'targeted' ? 'merge' : 'yield'
   }
 
   async scheduleReply({ ev, norm, scene, conv, userName, groupName, mood }) {
@@ -4885,8 +4960,9 @@ export class ChatEngine {
        * 2026-11-06（主人 m00215「为什么总是回下一条」）：
        * 原来这里 abort 完就当那条消息没存在过——被顶掉的那条永远没人回答，
        * 她最后回的、引用框挂的永远是后一条。现在把它记下来交给下一轮一起接。
+       * 2026-11-07：连它自己上一轮已经揽下的 carry 一起交回去，别在半路丢掉。
        */
-      this.stashCarry(jobId, existing.trigger)
+      this.stashCarry(key, [existing.trigger, ...(existing.carried || [])])
       this.logger('debug', `打断未发出的回复（${key}）`)
     } else if (existing?.phase === 'sending') {
       // 正在发：让新消息等这一轮结束（由 pending 队列驱动）
@@ -4901,6 +4977,38 @@ export class ChatEngine {
        * 「她正在发上一条时我 @ 了她，她永远不回」（10:30:24 那条）。
        */
       existing.pending.push({ ev, norm, scene, conv, userName, groupName, mood })
+      return
+    }
+
+    /*
+     * 2026-11-07（主人 m01078「还是有问题」）：两条泳道撞上同一个人。
+     *
+     * 真机现场（群 666666666，12:44）：鲸喜先闲扯一句、两秒后又 @ 她一句，
+     * 两条泳道各生成各发 —— 群里连出两颗气泡，同一件事说两遍，引用各挂一条。
+     * 裁决见 laneMergeDecision()：@我 那条赢，把闲聊那条掐掉并带着它的触发消息
+     * 一起答；反过来闲聊这条就让位，免得两条道同时开口。
+     */
+    const otherJob = this.jobs.get(`${key}\u0000${lane === 'targeted' ? 'ambient' : 'targeted'}`)
+    const laneVerdict = this.laneMergeDecision({
+      lane,
+      otherJob,
+      ev,
+      nowMs: Date.now(),
+      windowMs: Number(this.config.laneMergeMs ?? 30000),
+    })
+    if (laneVerdict === 'merge') {
+      otherJob.controller.abort()
+      this.stashCarry(key, [otherJob.trigger, ...(otherJob.carried || [])])
+      this.traceReply(key, 'lane-merge', { from: 'ambient' })
+      this.logger('debug', `同一个人紧跟着 @ 她，把闲聊那道并进来（${key}）`)
+    } else if (laneVerdict === 'yield') {
+      /*
+       * 让位：紧跟着的那句 @我 会连这条一起答（它此刻还在想，这条已经在它的历史里）。
+       * 这里就地记成「已答」，免得这条留在 carry 里过几秒又被捞出来答一遍。
+       */
+      this.rememberAnswered(key, [ev?.message_id])
+      this.traceReply(key, 'lane-yield', { to: 'targeted' })
+      this.logger('debug', `同一个人紧跟着 @ 她，闲聊这道让位（${key}）`)
       return
     }
 
@@ -4959,11 +5067,47 @@ export class ChatEngine {
       }
 
       // 被打断过的前几条（同一路人连着发的），这一轮要一起接
-      const carry = this.takeCarry(jobId, ev)
+      const carry = this.takeCarry(key, ev)
+      job.carried = carry
       if (carry.length) {
         this.stats.carryMerged = (this.stats.carryMerged || 0) + carry.length
         this.traceReply(key, 'carry', { n: carry.length, anchor: carry[0]?.ev?.message_id })
       }
+      /*
+       * 2026-11-07（主人 m01078「还是有问题」）：这一串是不是刚被另一条道答过了？
+       * 两条泳道会同时想同一个人的两句话，谁都不算「被打断」，carry 挡不住，
+       * 结果就是同一件事在群里回两遍。答过就闭嘴，别再补一颗气泡。
+       */
+      const covered = this.alreadyAnswered(key, [
+        ev?.message_id,
+        ...carry.map((t) => t?.ev?.message_id),
+      ])
+      if (covered) {
+        this.traceReply(key, 'skip-covered', { ids: covered })
+        this.logger('debug', `这几条刚答过，这次不再开口（${key} ${covered}）`)
+        if (isGroup) this.restoreGroupCard(ev.group_id).catch(() => {})
+        return
+      }
+      /*
+       * 下笔之前先把历史里已有的那几条记下来（2026-11-07，主人 m01078）：
+       * 这一轮的回答本来就是接着它们说的，等这条发出去以后它们就算「答过了」。
+       * 不然「她正在发的时候又飘进来一句」那条会排到发送结束再答一遍——
+       * 群里看到的就是同一件事被回了两次。
+       * 只记**同一个人**说过的：别人的 @ 不能被顺手记成「答过了」，否则就真漏回了。
+       */
+      const speakerUid = String(ev?.user_id ?? '')
+      const promptIds = (conv?.history || [])
+        .filter(
+          (h) =>
+            h &&
+            h.role === 'user' &&
+            h.messageId &&
+            speakerUid &&
+            String(h.userId ?? '') === speakerUid,
+        )
+        .slice(-8)
+        .map((h) => h.messageId)
+      job.promptIds = promptIds
       const reply = await this.generate({
         ev,
         norm,
@@ -5057,6 +5201,16 @@ export class ChatEngine {
       }))
       if (!controller.signal.aborted) {
         this.stats.replies++
+        /*
+         * 记一笔「这一轮答了哪几条」：另一条泳道（或排队的下一条）要开口前会先查，
+         * 答过的就不再答第二遍（2026-11-07，主人 m01078「还是有问题」）。
+         * 除了这一轮的触发消息与合并进来的那几条，下笔时历史里已有的也算。
+         */
+        this.rememberAnswered(key, [
+          job.triggerMid,
+          ...carry.map((t) => t?.ev?.message_id),
+          ...(job.promptIds || []),
+        ])
         /*
          * 最近一轮的耗时与降级情况（/state.lastReplyDiag）。
          * 2026-10-21 真机：用户 20:15:54 @ 她，20:16:49 才回 —— 55 秒。

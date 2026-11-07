@@ -3604,5 +3604,195 @@ html[data-shell="desktop"][data-glass="true"] .on-kpi {
 .on-tabs[hidden],
 .on-range[hidden] { display: none; }
 
+/* ---------- 42. 问题反馈页（2026-11-06，主人 m08871） ----------
+   两列：左边填表（主），右边本机存档（辅）。提交结果原地展开在表单下方，
+   不弹层 —— 提交完要能一边看状态一边把 Markdown 复制走。 */
+.fb-grid{ display:grid; grid-template-columns:minmax(0,1.55fr) minmax(0,1fr); gap:var(--s-5); align-items:start; }
+@media (max-width:1180px){ .fb-grid{ grid-template-columns:minmax(0,1fr); } }
+
+.fb-card{ padding:var(--s-5); display:flex; flex-direction:column; gap:var(--s-4); }
+.fb-field{ display:flex; flex-direction:column; gap:var(--s-2); }
+.fb-label{ font-size:12px; font-weight:600; color:var(--slate); }
+.fb-label em{ font-style:normal; font-size:11px; font-weight:500; color:var(--error); margin-left:2px; }
+.fb-hint{ font-size:11px; line-height:1.55; color:var(--stone); }
+.fb-duo{ display:grid; grid-template-columns:1fr 1fr; gap:var(--s-3); }
+.fb-area{ min-height:88px; resize:vertical; line-height:1.6; font-family:var(--font); }
+.fb-checks{ display:flex; flex-wrap:wrap; gap:var(--s-2) var(--s-5); }
+.fb-check{ display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--charcoal); cursor:pointer; }
+.fb-check input{ margin:0; }
+
+.fb-actions{ display:flex; align-items:center; gap:var(--s-3); }
+.fb-status{ font-size:12px; line-height:1.5; color:var(--steel); }
+.fb-status.is-ok{ color:var(--success); }
+.fb-status.is-warn{ color:var(--warning); }
+.fb-status.is-bad{ color:var(--error); }
+.fb-status.is-busy{ color:var(--steel); }
+
+.fb-result{ border:1px solid var(--hairline); border-radius:var(--r-lg); background:var(--surface-soft); padding:var(--s-3) var(--s-4); display:flex; flex-direction:column; gap:var(--s-2); }
+.fb-result[hidden]{ display:none; }
+.fb-result-head{ display:flex; align-items:center; justify-content:space-between; gap:var(--s-3); font-size:12px; font-weight:600; color:var(--charcoal); }
+.fb-result-acts{ display:inline-flex; gap:var(--s-2); }
+.fb-md{ width:100%; font-family:var(--font-mono); font-size:11.5px; line-height:1.6; min-height:180px; resize:vertical; background:var(--canvas); }
+
+.fb-history-head{ display:flex; align-items:center; justify-content:space-between; gap:var(--s-3); }
+.fb-history-head .card-title{ margin:0; }
+.fb-history #fbDir{ margin:0; word-break:break-all; }
+.fb-list{ display:flex; flex-direction:column; gap:2px; max-height:460px; overflow:auto; }
+.fb-row{ display:flex; align-items:center; justify-content:space-between; gap:var(--s-3); width:100%;
+  text-align:left; padding:8px 10px; border:1px solid transparent; border-radius:var(--r-md);
+  background:transparent; cursor:pointer; font-family:inherit; transition:background .12s ease,border-color .12s ease; }
+.fb-row:hover{ background:var(--surface); border-color:var(--hairline); }
+.fb-row-main{ display:flex; flex-direction:column; gap:2px; min-width:0; }
+.fb-row-title{ font-size:12.5px; color:var(--charcoal); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.fb-row-sub{ font-size:11px; color:var(--stone); }
+.fb-row-go{ font-size:11px; color:var(--stone); opacity:0; white-space:nowrap; transition:opacity .12s ease; }
+.fb-row:hover .fb-row-go{ opacity:1; }
+.fb-empty{ padding:var(--s-6) 0; text-align:center; font-size:12px; color:var(--stone); }
+
+/* ===== 43 · 问题反馈页补充（提交说明卡） ===== */
+.fb-side { grid-column: 2; grid-row: 1; display: flex; flex-direction: column; gap: var(--s-5); min-width: 0; }
+.fb-help { align-self: stretch; display: grid; gap: 2px; }
+@media (max-width:1180px){ .fb-side { grid-column: 1; grid-row: auto; } }
+.fb-steps { margin: 14px 0 10px; padding-left: 18px; display: grid; gap: 12px; }
+.fb-steps li { font-size: var(--fs-sub); line-height: 1.75; color: var(--muted); }
+.fb-steps li b { color: var(--ink); font-weight: 600; }
+.fb-steps code {
+  font-family: var(--font-mono);
+  font-size: 12px; padding: 1px 6px; border-radius: var(--r-sm);
+  background: var(--surface-soft); color: var(--ink);
+  word-break: break-all;
+}
+
+/* ===== 44 · 信息架构第一期：总览「一键体检」卡 + 设置页「高级」入口 ===== */
+.ov-health { margin: 0 0 20px; }
+.hc-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s-3); }
+.hc-head .card-title { margin: 0; }
+.hc-list { margin-top: 4px; }
+.hc-row { display: grid; grid-template-columns: 96px 88px minmax(0, 1fr); align-items: center; gap: 12px;
+  padding: 9px 0; border-top: 1px solid var(--hairline-soft); font-size: var(--fs-sub); color: var(--steel); }
+.hc-row:first-child { border-top: 0; }
+.hc-name { color: var(--ink); white-space: nowrap; }
+.hc-pill { display: flex; }
+.hc-note { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#advancedCard .row-actions { margin-top: 4px; }
+.btn.is-disabled, .btn[aria-disabled='true'] { opacity: .6; cursor: default; pointer-events: none; }
+@media (max-width: 640px) {
+  .hc-row { grid-template-columns: 84px 78px minmax(0, 1fr); gap: 8px; }
+  .hc-note { white-space: normal; }
+}
 
 
+/* ===== 45 · 信息架构第二期：页内归属提示 + 体检「待命」态 + 侧栏跳转项 ===== */
+/* 执行块 / QQ 连接 / 任务与研究 / 模型与服务 不在一级导航里了，但页面都还在。
+   页头留一行归属提示（能点回「设置」），侧栏高亮由 console.js 的 NAV_OWNER 归到「设置」。 */
+.page-crumb{
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  margin-bottom: var(--s-2);
+  font-size: var(--fs-micro);
+  color: var(--steel);
+}
+.page-crumb a{
+  color: var(--slate);
+  text-decoration: none;
+  padding-bottom: 1px;
+  border-bottom: 1px solid var(--hairline-strong);
+}
+.page-crumb a:hover{ color: var(--ink); border-bottom-color: var(--ink); }
+.page-crumb-back{ font-weight: 600; }
+.page-crumb-sep{ color: var(--muted); }
+
+/* 「待命」第三态：本来就不常驻、按需才起的东西（数据服务侧车、没启用的计划任务）。
+   用中性描边而不是红/黄填充 —— 它不是故障，不该抢注意力。
+   描边用 inset 阴影画，不占布局，胶囊高度跟 .pill-ok 一致。 */
+.pill-muted{
+  background: transparent;
+  color: var(--steel);
+  box-shadow: inset 0 0 0 1px var(--hairline-strong);
+  padding: 4px 8px;
+}
+.pill-muted .dot{ opacity: .55; }
+
+/* 侧栏「一键体检」是跳转项、不是页面：不参与高亮，图标略收一点 */
+.nav-item-jump .nav-icon{ opacity: .82; }
+
+/* 跳过去闪一下体检卡，跟命令面板跳转的 is-flash 是同一套观感 */
+.ov-health.is-flash{
+  box-shadow: 0 0 0 2px rgba(41,79,62,.42), 0 18px 36px -26px rgba(30,45,35,.28);
+  transition: box-shadow .25s ease;
+}
+@media (prefers-reduced-motion: reduce){
+  .ov-health.is-flash{ transition: none; }
+}
+/* ===== 45b · 问题反馈对上论坛免登录接口（2026-11-07） =====
+   §45 已被「信息架构第二期」占用，这里接着 45 编子号，避免动到既有编号。
+   1) .fb-hp 蜜罐：必须肉眼不可见，但要以普通 input 的身份留在 DOM 里骗自动填充；
+      用绝对定址挪出视口而不是 display:none —— 有些自动填充器会跳过隐藏字段。
+   2) .fb-recent* 右栏「论坛上最近的反馈」：行式列表，细分割线，hover 才变浅底。 */
+.fb-hp{
+  position: absolute;
+  left: -9999px;
+  top: auto;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.fb-recent-card .card-title{ margin: 0; }
+.fb-recent{
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-height: 320px;
+  overflow: auto;
+}
+.fb-recent-row{
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--s-3);
+  width: 100%;
+  padding: 9px 8px;
+  border: 0;
+  border-top: 1px solid var(--hairline-soft);
+  border-radius: var(--r-sm);
+  background: transparent;
+  text-align: left;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background .12s ease;
+}
+.fb-recent-row:first-child{ border-top: 0; }
+.fb-recent-row:hover{ background: var(--surface-soft); }
+.fb-recent-title{
+  min-width: 0;
+  font-size: var(--fs-sub);
+  color: var(--slate);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fb-recent-title b{ font-weight: 600; color: var(--ink); }
+.fb-recent-meta{
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--fs-micro);
+  color: var(--stone);
+  white-space: nowrap;
+}
+.fb-recent-kind{
+  padding: 1px 6px;
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--steel);
+}
+.fb-recent-empty{
+  padding: var(--s-4) 0;
+  text-align: center;
+  font-size: var(--fs-sub);
+  color: var(--stone);
+}

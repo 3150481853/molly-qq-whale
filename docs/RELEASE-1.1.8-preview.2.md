@@ -114,6 +114,16 @@ if (existing?.phase === 'thinking') existing.controller.abort()   // 旧 job 直
 
 现在 `contextFor()` 接收 `ownerQq`：印象文本里提到「主人」时，只有说话人 QQ 等于 `ownerUin` 才喂进提示词，其余一律过滤。
 
+### 7. 同一个人连发，只答一次（双泳道去重，`lib/engine.js`）
+
+现场（群 666666666，12:44）：鲸喜先闲扯一句「虾子是我亲戚，烫了当然不行」，两秒后又 `@Molly` 一句「所以吹凉的活儿我包了」——**targeted / ambient 两条泳道各生成各发**，群里连出两颗气泡，同一件事说两遍，引用框各挂一条。
+
+根因是双泳道只管「并发」不管「撞车」：两条道谁都没被 abort，谁也不知道对方已经答过。三层拦：
+
+1. **撞车裁决 `laneMergeDecision()`**：同一个人半分钟内又发一条、另一条道还在想——新来的是 `@我` 就把闲聊那条掐掉，连同它的触发消息一起接（trace `lane-merge`）；新来的是闲聊就让位（trace `lane-yield`），不另开一颗气泡。
+2. **答过就别答 `rememberAnswered()` / `alreadyAnswered()`**：每次发送成功后记下这一轮答了哪几条（触发消息 + 合并进来的 + 下笔时历史里**同一个人**已说过的那几条），另一条道开口前先查一次，全都答过就 trace `skip-covered` 闭嘴。只认同一个人——别人的 `@` 不能被顺手记成「答过了」，否则就真漏回了。
+3. **carry 改成按会话攒**：原来按 `jobId`（会话+泳道）攒，闲聊道被掐掉的句子永远交不到 `@` 那条手上，两条道就各答一遍。现在 key 换成会话，跨泳道能接上，同一条重复塞入也会去重。
+
 ## 四、验证
 
 | 测试 | 结果 |
@@ -121,6 +131,7 @@ if (existing?.phase === 'thinking') existing.controller.abort()   // 旧 job 直
 | `tools/test-quote-anchor.mjs`（新增，含复刻 18:09 现场与 nudge 排除触发条） | **33 / 33** |
 | `tools/test-carry.mjs`（新增：取出/清空/不同人不合并/超 20 秒不合并/最多 3 条/顺序） | **7 / 7** |
 | `tools/test-this-turn.mjs`（新增：两条时输出该段并编号、单条不输出） | **5 / 5** |
+| `tools/test-lane-dedupe.mjs`（新增：撞车裁决 7 条 + 答过别再答 8 条 + 跨泳道 carry 3 条） | **18 / 18** |
 | `tools/test-split-reply.mjs`（新增：换行分条、`<sep/>` 混用、空行、`<br>`、上限 5、上限可调、`@` 仍挂第一条） | **8 / 8** |
 | `tools/test-relations-owner.mjs`（新增：非主人不渲染「主人」、主人保留、无关印象照常、不传 ownerQq 保守过滤） | **4 / 4** |
 | `tools/test-engine-text.mjs` | **7 / 7** |
@@ -131,7 +142,8 @@ if (existing?.phase === 'thinking') existing.controller.abort()   // 旧 job 直
 
 - `/dsh-qq-whale/state` → `stats.carryMerged > 0`（连发时）；
 - `stats.quoteAnchored > 0`，`quoteLast.why` 出现 `anchor`；
-- `replyTrace` 里出现 `carry` 阶段，`aborted(where=generate)` 后面紧跟的 `delivered` 带 `parts ≥ 1` 且不再「只答最后一条」。
+- `replyTrace` 里出现 `carry` 阶段，`aborted(where=generate)` 后面紧跟的 `delivered` 带 `parts ≥ 1` 且不再「只答最后一条」；
+- 同一个人连发（先闲聊再 `@`）时，`replyTrace` 里能看到 `lane-merge` / `lane-yield` / `skip-covered`，群里只有一轮回复。
 
 ## 五、已知限制
 
@@ -139,16 +151,18 @@ if (existing?.phase === 'thinking') existing.controller.abort()   // 旧 job 直
 - 若一轮在 debounce 阶段被打断（`aborted(where=debounce)`），carry 依然成立（takeCarry 在 debounce 之后取）；
 - 模型仍然可能无视提示词去答最后一条——这是概率问题，不是必定；`quoteAnchored` 与 `carryMerged` 就是用来量化它到底听不听的；
 - 引用框只会挂在**第一颗气泡**上（一轮回复拆成多颗时，后面几颗本来就没有引用框，属于既有行为）；
-- 「一条一句」之后**条内换行没有了**：模型要用多行排版的内容会变成多条气泡；想调整连发条数改 `maxTextBubblesPerReply`（默认 5），设 1 就退回「一条消息装全部」的旧行为。
+- 「一条一句」之后**条内换行没有了**：模型要用多行排版的内容会变成多条气泡；想调整连发条数改 `maxTextBubblesPerReply`（默认 5），设 1 就退回「一条消息装全部」的旧行为；
+- 去重是有代价的：同一个人在 30 秒内先闲扯、紧接着 `@` 她时，那句闲聊会被并进 `@` 的回答里（不再单独应一句）；想放宽就把 `laneMergeMs` 调小（比如 3000），想关掉就把 `laneMergeMs` 设 0。
 
 ## 六、怎么退回
 
-1. 只退「合并」：把 `scheduleReply()` 里 `this.takeCarry(jobId, ev)` 改成 `[]`，其余不变；
+1. 只退「合并」：把 `scheduleReply()` 里的 `takeCarry` 返回值改成 `[]`，其余不变；
 2. 只退「anchor」：`deliver()` 调用里去掉 `anchorId` 参数（`pickQuoteTarget` 的 anchor 分支没有输入就不会命中）；
-3. 全退：用 1.1.8-preview.1 的三个文件覆盖回去（`lib/engine.js`、`lib/quote-at.js`、`lib/engine-context.js`），重启 DSH。
+3. 只退「双泳道去重」：把 `config.laneMergeMs` 设 0，并在 `scheduleReply()` 里去掉 `alreadyAnswered` / `rememberAnswered` 两处调用；
+4. 全退：用 1.1.8-preview.1 的文件覆盖回去（`lib/engine.js`、`lib/quote-at.js`、`lib/engine-context.js`、`lib/persona.js`、`lib/relations.js`），重启 DSH。
 
 ## 七、升级方式
 
-- 源码部署：覆盖 `plugin/dsh-qq-whale/lib/` 三个文件 → **重启 DSH**（插件模块在宿主内，不会热更）；
+- 源码部署：覆盖 `plugin/dsh-qq-whale/lib/` 里改动的文件 → **重启 DSH**（插件模块在宿主内，不会热更）；
 - 用 zip：解压覆盖同名目录，同样重启；
 - 与 1.1.8-preview.1 相比，控制台 / 桌面外壳 / 记忆内核无差异（版本号除外）。

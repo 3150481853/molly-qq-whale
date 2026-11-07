@@ -76,6 +76,9 @@ const FILES = [
   ['docs/RELEASE-1.1.7.md', 'docs/RELEASE-1.1.7.md'],
   ['docs/RELEASE-1.1.8-preview.1.md', 'docs/RELEASE-1.1.8-preview.1.md'],
   ['docs/RELEASE-1.1.8-preview.2.md', 'docs/RELEASE-1.1.8-preview.2.md'],
+  /* 2026-11-07 问题反馈页：页面说明 + 给论坛站长的匿名提交接口申请 */
+  ['docs/console-feedback-page.md', 'docs/console-feedback-page.md'],
+  ['docs/forum-anonymous-bug-api-request.md', 'docs/forum-anonymous-bug-api-request.md'],
   ['docs/quote-anchor-carry-2026-11-06.md', 'docs/quote-anchor-carry-2026-11-06.md'],
   ['docs/quote-target-and-owner-naming-2026-11-05.md', 'docs/quote-target-and-owner-naming-2026-11-05.md'],
   ['docs/desktop-app.md', 'docs/desktop-app.md'],

@@ -1014,6 +1014,7 @@ async function buildWatchdog() {
 // 计划任务是否启用（查询失败返回 null，不要假装有值）
 // 用 Get-ScheduledTask 而不是 schtasks：后者在中文系统输出 GBK，Node 读出来是乱码。
 // 结果缓存 30 秒——4 秒轮询不该每次都 spawn 一个 PowerShell。
+// （probeTaskEnabled 里面还有一层 60 秒缓存，两层叠加后真实 spawn 频率是每分钟一次。）
 const TASK_CACHE_TTL = 30_000;
 let taskCache = { value: null, at: 0 };
 let taskProbing = null;
@@ -1030,7 +1031,7 @@ async function queryTaskEnabled(name) {
   return taskProbing;
 }
 
-function probeTaskEnabled(name) {
+function probeTaskEnabledRaw(name) {
   return new Promise((resolve) => {
     let out = '';
     let done = false;
@@ -1061,6 +1062,25 @@ function probeTaskEnabled(name) {
       if (v === 'ready' || v === 'running' || v === 'queued') return finish(true);
       return finish(null);
     });
+  });
+}
+
+/*
+ * 计划任务状态也要 spawn powershell.exe（Get-ScheduledTask）。同样是 GUI 父进程 +
+ * 没有 CREATE_NO_WINDOW，在 Windows Terminal 默认终端的机器上会闪黑框（m10803）。
+ * 状态本来就不会秒级变化，60 秒缓存足够；探不到（null）的缓存 15 秒，好让它恢复后尽快看见。
+ */
+const TASK_PROBE_TTL = 60_000;
+const TASK_PROBE_TTL_MISS = 15_000;
+const taskProbeCache = new Map();
+function probeTaskEnabled(name, force) {
+  const hit = taskProbeCache.get(name);
+  if (!force && hit && Date.now() - hit.at < (hit.v === null ? TASK_PROBE_TTL_MISS : TASK_PROBE_TTL)) {
+    return Promise.resolve(hit.v);
+  }
+  return probeTaskEnabledRaw(name).then((v) => {
+    taskProbeCache.set(name, { at: Date.now(), v });
+    return v;
   });
 }
 
@@ -2192,7 +2212,7 @@ function writeMemConfig(patch) {
 // 按名字相加会把别的软件的 WebView2、别的 Python 也算进 Molly —— 数字就不诚实了。
 // 这里按进程树归属：Molly.exe 的整棵子树算外壳（扣除后端子进程），
 // molly-console.exe 的子树算后端，pythonw + embed-server 算侧车，GPT-SoVITS 算语音。
-function sampleMemory() {
+function sampleMemoryRaw() {
   const empty = {
     at: Date.now(),
     groups: MEM_WATCH.map((g) => ({ key: g.key, label: g.label, count: 0, mb: 0 })),
@@ -2287,6 +2307,26 @@ function sampleMemory() {
   return { at: Date.now(), groups, totalMb, others, othersMb, grandTotalMb: totalMb + othersMb };
 }
 
+/*
+ * 采样缓存（2026-11-06，主人 m10803「又闪」）：
+ * 每采一次要 spawn 一个 powershell.exe 跑 Get-CimInstance Win32_Process。父进程是
+ * molly-console.exe（GUI 子系统），spawn 时没带 CREATE_NO_WINDOW，于是 conhost 会先
+ * 建一个真控制台窗再隐藏 —— 在默认终端是 Windows Terminal 的机器上这就闪一帧黑框。
+ * 设置页每 4 秒重绘一次会顺手调 mem/status，把 spawn 频率放大到每 4 秒一次，必须收敛：
+ * 20 秒内的重复请求直接吃缓存；trim / gamemode 这类「动作前后要对比」的调用传 force 绕过。
+ */
+const MEM_SAMPLE_TTL = 20_000;
+let memSampleCache = { at: 0, data: null };
+function sampleMemory(force) {
+  const now = Date.now();
+  if (!force && memSampleCache.data && now - memSampleCache.at < MEM_SAMPLE_TTL) {
+    return { ...memSampleCache.data, cached: true, ageMs: now - memSampleCache.at };
+  }
+  const fresh = sampleMemoryRaw();
+  if (fresh && Array.isArray(fresh.groups)) memSampleCache = { at: now, data: fresh };
+  return fresh;
+}
+
 // 侧车（8791）的调用口：连不上不算错，只回报 reached:false —— 控制台不能因为侧车没起就打不开
 async function embedCall(endpoint, body, ms = 20_000) {
   try {
@@ -2299,6 +2339,201 @@ async function embedCall(endpoint, body, ms = 20_000) {
   } catch (err) {
     return { reached: false, error: errText(err) };
   }
+}
+
+// ── 问题反馈（2026-11-06；2026-11-07 改接论坛免登录接口）─────────────────────
+// 一个反馈包 = 表单 + 环境信息 + 勾选的日志尾巴。先落盘一份存档，再 POST 到论坛。
+// 论坛从 2026-11-07 起开了免登录反馈口子（POST /api/dsh-feedback），不再需要
+// 登录态、也不再需要 x-bug-key；「落盘 + 给一段 Markdown 让用户手贴」的降级
+// 路径只在论坛连不上 / 限流 / 待审时出现。
+const FEEDBACK_DIR = path.join(OUT, 'feedback');
+const FEEDBACK_CONFIG = path.join(OUT, 'feedback-config.json');
+const FEEDBACK_DEFAULTS = Object.freeze({
+  apiBase: 'https://example.asia',
+  feedbackPath: '/api/dsh-feedback',
+  pageUrl: 'https://example.asia/dsh/feedback',
+  /* 旧键：论坛换成免登录接口后不再发送，保留只为兼容老配置文件不报错 */
+  bugKey: '',
+  mineBot: '',
+});
+/* 反机器人：elapsedMs 小于 3000 会被论坛直接判机器人，后端兜一个下限 */
+const FEEDBACK_MIN_ELAPSED = 3000;
+/* 论坛 logs 字段上限 64KB（服务端也会截，这里先截省流量） */
+const FEEDBACK_LOGS_MAX = 64 * 1024;
+const FEEDBACK_LOGS = ['console', 'watchdog', 'plugin'];
+const FEEDBACK_KINDS = {
+  bug: '功能坏了',
+  ui: '界面 / 显示问题',
+  perf: '卡顿 / 占用高',
+  docs: '文档看不懂',
+  feature: '想要的新功能',
+  other: '其它',
+};
+
+/* 反馈包文件名用的时间戳：本地时区，YYYYMMDDHHmmss */
+function feedbackStamp(d = new Date()) {
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+function readFeedbackConfig() {
+  let raw = null;
+  try {
+    raw = JSON.parse(fs.readFileSync(FEEDBACK_CONFIG, 'utf8'));
+  } catch {
+    raw = null;
+  }
+  const out = { ...FEEDBACK_DEFAULTS };
+  if (raw && typeof raw === 'object') {
+    /* 新键 apiBase / feedbackPath / pageUrl 优先 */
+    if (typeof raw.apiBase === 'string' && /^https?:\/\//i.test(raw.apiBase)) {
+      out.apiBase = raw.apiBase.trim().replace(/\/+$/, '');
+    } else if (typeof raw.forumBase === 'string' && /^https?:\/\//i.test(raw.forumBase)) {
+      /* 老配置文件只有 forumBase：当 apiBase 用，人看的页面地址顺手补上 */
+      out.apiBase = raw.forumBase.trim().replace(/\/+$/, '');
+      out.pageUrl = out.apiBase + '/dsh/feedback';
+    }
+    if (typeof raw.feedbackPath === 'string' && raw.feedbackPath.trim()) {
+      out.feedbackPath = '/' + raw.feedbackPath.trim().replace(/^\/+/, '');
+    }
+    if (typeof raw.pageUrl === 'string' && /^https?:\/\//i.test(raw.pageUrl)) {
+      out.pageUrl = raw.pageUrl.trim();
+    }
+    if (typeof raw.bugKey === 'string') out.bugKey = raw.bugKey.trim();
+    if (typeof raw.mineBot === 'string') out.mineBot = raw.mineBot.trim().slice(0, 60);
+    /* 旧键 postId（按帖子评论提交的年代）已废：读到也认，只是不再使用 */
+    const pid = Number(raw.postId);
+    if (Number.isFinite(pid) && pid > 0) out.postId = Math.round(pid);
+  }
+  return out;
+}
+
+function writeFeedbackConfig(patch) {
+  const next = { ...readFeedbackConfig() };
+  if (patch && typeof patch === 'object') {
+    if (typeof patch.apiBase === 'string' && /^https?:\/\//i.test(patch.apiBase)) {
+      next.apiBase = patch.apiBase.trim().replace(/\/+$/, '');
+    }
+    if (typeof patch.feedbackPath === 'string' && patch.feedbackPath.trim()) {
+      next.feedbackPath = '/' + patch.feedbackPath.trim().replace(/^\/+/, '');
+    }
+    if (typeof patch.pageUrl === 'string' && /^https?:\/\//i.test(patch.pageUrl)) {
+      next.pageUrl = patch.pageUrl.trim();
+    }
+    if (typeof patch.bugKey === 'string') next.bugKey = patch.bugKey.trim();
+    if (typeof patch.mineBot === 'string') next.mineBot = patch.mineBot.trim().slice(0, 60);
+  }
+  try {
+    fs.mkdirSync(path.dirname(FEEDBACK_CONFIG), { recursive: true });
+    fs.writeFileSync(FEEDBACK_CONFIG, JSON.stringify(next, null, 2) + '\n', 'utf8');
+  } catch {
+    /* 写不进去就只在本次响应里生效，下次读退回默认 */
+  }
+  return next;
+}
+
+// 脱敏：反馈会贴给站长看，不该顺带把 QQ 号、本机路径、token 一起送出去。
+// 保守替换 —— 宁可留一点噪音，也不能把定位问题需要的信息洗掉。
+function maskFeedbackText(text) {
+  let s = String(text ?? '');
+  s = s.replace(/(?<!\d)(\d{5})\d{2,6}(\d{2})(?!\d)/g, '$1****$2');
+  s = s.replace(/[A-Za-z]:\\[^\s"'<>|，。；：）】\]]+/g, (m) => {
+    const tail = m.split('\\').filter(Boolean).pop() || m;
+    return '<本机>\\' + tail;
+  });
+  s = s.replace(/\b(token|secret|password|authorization)(\s*[:=]\s*)(\S+)/gi, '$1$2<已隐去>');
+  return s;
+}
+
+function feedbackLogTail(sources, perLines = 120, perChars = 5000) {
+  const out = [];
+  for (const src of sources) {
+    const file = path.join(OUT, `${src}.log`);
+    const txt = readTextSafe(file, 4 * 1024 * 1024);
+    if (txt === null) {
+      out.push({ source: src, exists: false, lines: 0, text: '' });
+      continue;
+    }
+    const lines = txt.split(/\r?\n/).filter((l) => l !== '');
+    const tail = lines.slice(-perLines).join('\n');
+    out.push({
+      source: src,
+      exists: true,
+      lines: lines.length,
+      text: maskFeedbackText(tail).slice(-perChars),
+    });
+  }
+  return out;
+}
+
+function feedbackEnvBlock() {
+  let mem = null;
+  try {
+    mem = sampleMemory();
+  } catch {
+    mem = null;
+  }
+  return {
+    version: VERSION,
+    build: consoleBuild(),
+    platform: `${process.platform} ${process.arch}`,
+    node: process.version,
+    port: PORT,
+    pid: process.pid,
+    uptimeMin: Math.round(process.uptime() / 60),
+    totalMb: mem ? mem.totalMb : null,
+    grandTotalMb: mem ? mem.grandTotalMb : null,
+    at: new Date().toISOString(),
+    /* 报告是给人看的，UTC 的 toISOString 会让人对不上「几点出的问题」；另给一份本地时间 */
+    atLocal: new Date().toLocaleString('zh-CN', { hour12: false }),
+  };
+}
+
+function feedbackMarkdown(pack) {
+  const env = pack.env;
+  const kindLabel = FEEDBACK_KINDS[pack.kind] || pack.kind;
+  const lines = [];
+  lines.push(`### [${pack.bot}] ${pack.title}`);
+  lines.push('');
+  lines.push(`- **bot 名称**：${pack.bot}`);
+  /* QQ 只放进存档给人看，一律打码：这段 Markdown 是要贴到公开页面的 */
+  if (pack.qq) lines.push(`- **联系方式（QQ）**：${maskFeedbackText(pack.qq)}`);
+  lines.push(`- **类型**：${kindLabel}`);
+  lines.push(`- **发生时间**：${pack.when || '未填'}`);
+  lines.push(`- **版本 / 构建**：${env.version} / ${env.build}`);
+  lines.push(`- **环境**：${env.platform} · Node ${env.node} · 端口 ${env.port}`);
+  lines.push(
+    `- **Molly 占用**：${env.totalMb == null ? '未知' : env.totalMb + ' MB'}（含同机参考共 ${
+      env.grandTotalMb == null ? '未知' : env.grandTotalMb + ' MB'
+    }）`,
+  );
+  lines.push('');
+  lines.push('#### 发生了什么');
+  lines.push(pack.desc || '（未填）');
+  if (pack.steps) {
+    lines.push('');
+    lines.push('#### 怎么复现');
+    lines.push(pack.steps);
+  }
+  for (const lg of pack.logs) {
+    const kept = lg.text ? lg.text.split('\n').length : 0;
+    lines.push('');
+    lines.push(
+      `#### 日志 · ${lg.source}${
+        lg.exists ? `（共 ${lg.lines} 行，贴最后 ${kept} 行，已脱敏）` : '（这个日志还没生成）'
+      }`,
+    );
+    lines.push('<details><summary>展开</summary>');
+    lines.push('');
+    lines.push('```text');
+    lines.push(lg.text || '(空)');
+    lines.push('```');
+    lines.push('');
+    lines.push('</details>');
+  }
+  lines.push('');
+  lines.push(`<!-- molly-feedback bot=${pack.bot} build=${env.build} at=${env.at} -->`);
+  return lines.join('\n');
 }
 
 // ── 动作表 ──────────────────────────────────────────────────────────────────
@@ -2565,7 +2800,9 @@ const ACTIONS = {
       child.on('exit', (code) => done({ ok: code === 0, code, stdout: out, stderr: errOut }));
     });
     // 中文 Windows 上 schtasks 输出是 GBK，stdout 可能乱码；用 exit code 判定，回查一次真实状态
-    const after = await probeTaskEnabled(TASK_NAME);
+    // 这里是「刚改完」，必须绕开缓存（force），并把外面那层 queryTaskEnabled 的结果一并刷新
+    const after = await probeTaskEnabled(TASK_NAME, true);
+    taskCache = { value: after, at: Date.now() };
     return {
       ok: r.ok,
       stdout: r.stdout,
@@ -2645,11 +2882,11 @@ const ACTIONS = {
   },
 
   'mem/trim': async () => {
-    const before = sampleMemory();
+    const before = sampleMemory(true);
     // 重排和嵌入都能按需重新加载（/embed、/rerank 进来时自己 load），所以一口气全卸
     const r = await embedCall('/unload', { rerank: true, embed: true }, 60_000);
     await new Promise((resolve) => setTimeout(resolve, 800));
-    const after = sampleMemory();
+    const after = sampleMemory(true);
     return {
       ok: true,
       data: {
@@ -2687,10 +2924,10 @@ const ACTIONS = {
     const config = writeMemConfig({ gameMode: on });
     let freedMb = 0;
     if (on && body?.unload !== false) {
-      const before = sampleMemory();
+      const before = sampleMemory(true);
       await embedCall('/unload', { rerank: true, embed: false }, 20_000);
       await new Promise((resolve) => setTimeout(resolve, 600));
-      freedMb = Math.max(0, before.totalMb - sampleMemory().totalMb);
+      freedMb = Math.max(0, before.totalMb - sampleMemory(true).totalMb);
     }
     return {
       ok: true,
@@ -2716,6 +2953,294 @@ const ACTIONS = {
     onlineStatsCache.set(key, { at: Date.now(), data: r.data });
     if (onlineStatsCache.size > 8) for (const old of onlineStatsCache.keys()) { if (old !== key) { onlineStatsCache.delete(old); break; } }
     return { ok: true, data: r.data };
+  },
+
+  /* 问题反馈（2026-11-06；2026-11-07 接论坛免登录接口 /api/dsh-feedback）：
+     meta = 探活 + 论坛最近发布的 10 条；submit = 本地存档 → POST 论坛 → PushPlus 提醒。
+     论坛连不上 / 限流 / 命中关键词进待审都不假装成功：返回 posted:false 或 status:pending，
+     并把现成的 Markdown 交回去，界面上留「复制」和「打开论坛」两个动作。 */
+  'feedback/meta': async () => {
+    const cfg = readFeedbackConfig();
+    /* 公开列表接口本身就是探活：200 说明论坛活着，还顺带拿到最近发布的那几条。
+       它只返回 published（命中关键词的待审条目不会出现），qq 已打码、logs 为 null。 */
+    const probe = await fetchJson(
+      `${cfg.apiBase}${cfg.feedbackPath}?limit=50`,
+      { method: 'GET', headers: { 'user-agent': `molly-console/${VERSION}` } },
+      8000,
+    );
+    const list = Array.isArray(probe.data)
+      ? probe.data
+      : Array.isArray(probe.data?.items)
+        ? probe.data.items
+        : [];
+    const forum = {
+      reachable: probe.ok,
+      error: probe.ok ? null : probe.error || `HTTP ${probe.status}`,
+      /* 503 是站长主动关区，跟「网络不通」不是一回事，界面上文案也不同 */
+      open: probe.ok ? true : probe.status !== 503,
+      count: list.length,
+    };
+    /* 页面上只摆前 10 条：再多就成了另一个论坛客户端，没人看 */
+    const recent = list.slice(0, 10).map((it) => {
+      const id = it && it.id != null ? it.id : null;
+      return {
+        id,
+        bot: String((it && it.bot) || '').slice(0, 40),
+        title: String((it && it.title) || '').slice(0, 120),
+        kind: String((it && it.kind) || ''),
+        /* 论坛用 created_at（snake_case），本地/旧字段也认一下 */
+        when: (it && (it.when || it.createdAt || it.created_at || it.at)) || null,
+        /* 论坛已经把 qq 打码后才公开，这里原样转给前端 */
+        qq: String((it && it.qq) || ''),
+        url: (it && typeof it.url === 'string' && /^https?:\/\//i.test(it.url))
+          ? it.url
+          : `${cfg.pageUrl}#${id == null ? '' : id}`,
+      };
+    });
+    return {
+      ok: true,
+      data: {
+        config: {
+          apiBase: cfg.apiBase,
+          feedbackPath: cfg.feedbackPath,
+          pageUrl: cfg.pageUrl,
+          /* 旧键只回显打码值：确认老配置读进来了没，但不再参与提交 */
+          bugKey: cfg.bugKey ? cfg.bugKey.slice(0, 3) + '***' : '',
+          hasBugKey: Boolean(cfg.bugKey),
+        },
+        forum,
+        pageUrl: cfg.pageUrl,
+        /* 老前端读的就是 forumUrl，这里跟着给一份，省得两处都改 */
+        forumUrl: cfg.pageUrl,
+        kinds: Object.entries(FEEDBACK_KINDS).map(([value, label]) => ({ value, label })),
+        logs: FEEDBACK_LOGS,
+        recent,
+      },
+    };
+  },
+
+  'feedback/submit': async (body) => {
+    /* ── 校验：字段约束跟论坛接口一一对应，先在本机挡住，别让用户白等一次往返 ── */
+    const bot = String(body?.bot ?? '').trim();
+    if (!bot) return { ok: false, status: 400, error: 'bot 名称必填：站长要靠它区分是哪一套部署' };
+    if (bot.length > 40) return { ok: false, status: 400, error: 'bot 名称最多 40 个字' };
+    const qq = String(body?.qq ?? '').trim();
+    if (!/^\d{5,15}$/.test(qq)) {
+      return { ok: false, status: 400, error: '联系方式 QQ 必填，且必须是 5-15 位纯数字' };
+    }
+    const title = String(body?.title ?? '').trim();
+    if (!title) return { ok: false, status: 400, error: '请写一句话标题' };
+    if (title.length > 120) return { ok: false, status: 400, error: '标题最多 120 个字，细节写到「发生了什么」里' };
+    const descRaw = String(body?.desc ?? '').trim();
+    if (!descRaw) return { ok: false, status: 400, error: '请写清楚发生了什么' };
+    if (descRaw.length > 4000) {
+      return { ok: false, status: 400, error: `「发生了什么」最多 4000 个字（现在 ${descRaw.length} 个）` };
+    }
+    const stepsRaw = String(body?.steps ?? '').trim();
+    if (stepsRaw.length > 2000) {
+      return { ok: false, status: 400, error: `复现步骤最多 2000 个字（现在 ${stepsRaw.length} 个）` };
+    }
+    const kind = Object.prototype.hasOwnProperty.call(FEEDBACK_KINDS, String(body?.kind)) ? String(body.kind) : 'bug';
+    const whenRaw = String(body?.at ?? '').trim().slice(0, 40);
+    /* datetime-local 给的是 2026-11-07T11:54（本地时间），论坛要 ISO；解析不了就当没填 */
+    let whenIso = '';
+    if (whenRaw) {
+      const d = new Date(whenRaw);
+      if (!Number.isNaN(d.getTime())) whenIso = d.toISOString();
+    }
+    const logsWanted = Array.isArray(body?.logs)
+      ? body.logs.filter((x) => FEEDBACK_LOGS.includes(x)).slice(0, 3)
+      : ['console'];
+    const pack = {
+      bot,
+      qq,
+      title,
+      kind,
+      when: whenRaw,
+      desc: maskFeedbackText(descRaw),
+      steps: maskFeedbackText(stepsRaw),
+      logs: feedbackLogTail(logsWanted),
+      env: feedbackEnvBlock(),
+    };
+    const md = feedbackMarkdown(pack);
+
+    // 先在本地存一份：网络再怎么不通，反馈也不能丢
+    // 文件名用本地时间（2026-11-06 主人会按「几点出的问题」找文件，UTC 会差 8 小时）
+    const stamp = feedbackStamp();
+    const slug = title.replace(/[^\p{L}\p{N}]+/gu, '-').slice(0, 40).replace(/^-+|-+$/g, '') || 'report';
+    let savedPath = null;
+    try {
+      fs.mkdirSync(FEEDBACK_DIR, { recursive: true });
+      savedPath = path.join(FEEDBACK_DIR, `${stamp}-${slug}.md`);
+      fs.writeFileSync(savedPath, md + '\n', 'utf8');
+      fs.writeFileSync(
+        savedPath.replace(/\.md$/, '.json'),
+        JSON.stringify({ ...pack, markdown: md }, null, 2) + '\n',
+        'utf8',
+      );
+    } catch {
+      /* 落盘失败也要继续试论坛：反过来论坛失败也要保住落盘，两件事互不牵连 */
+      savedPath = null;
+    }
+
+    const cfg = readFeedbackConfig();
+    /* 日志给论坛的是一段文本（论坛按 ≤64KB 截断）；来源仍限定白名单三种 */
+    const logsText = pack.logs
+      .filter((lg) => lg.exists && lg.text)
+      .map((lg) => `### ${lg.source}（共 ${lg.lines} 行，贴最后 ${lg.text.split('\n').length} 行，已脱敏）\n${lg.text}`)
+      .join('\n\n')
+      .slice(0, FEEDBACK_LOGS_MAX);
+    /* 反机器人：elapsedMs 太小会被判机器人，前端算错也不能让它必然失败 */
+    const elapsedMs = Math.max(FEEDBACK_MIN_ELAPSED, Number(body?.elapsedMs) || 3500);
+    const payload = {
+      bot,
+      qq,
+      title,
+      kind,
+      desc: pack.desc,
+      source: 'molly-console',
+      contact_public: body?.contact_public === true,
+      /* 蜜罐必须空；前端已经拦过一次，这里再兜一次底，绝不把脏值转给论坛 */
+      website: '',
+      elapsedMs,
+      env: pack.env,
+    };
+    if (whenIso) payload.when = whenIso;
+    if (pack.steps) payload.steps = pack.steps;
+    if (logsText) payload.logs = logsText;
+
+    let posted = false;
+    let forumStatus = null;
+    let forumId = null;
+    let forumUrl = cfg.pageUrl;
+    let forumError = null;
+    /* x-bug-key 已由论坛免登录接口取代，不再发送（配置里的字段保留只为兼容老文件） */
+    const r = await fetchJson(
+      `${cfg.apiBase}${cfg.feedbackPath}`,
+      {
+        method: 'POST',
+        headers: { 'user-agent': `molly-console/${VERSION}` },
+        body: JSON.stringify(payload),
+      },
+      12_000,
+    );
+    if (r.ok && (r.data == null || r.data.ok !== false)) {
+      posted = true;
+      forumStatus = String((r.data && r.data.status) || 'published');
+      forumId = r.data && r.data.id != null ? r.data.id : null;
+      const u = r.data && r.data.url;
+      if (typeof u === 'string' && /^https?:\/\//i.test(u)) forumUrl = u;
+      else if (forumId != null) forumUrl = `${cfg.pageUrl}#${forumId}`;
+    } else if (r.status === 429) {
+      /* 限流按小时计，retryAfter 是秒；换算成分钟才像人话 */
+      const retryAfter = Number(r.data && r.data.retryAfter);
+      const mins = Math.ceil((Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 3600) / 60);
+      forumError = `提交太频繁了，${mins} 分钟后再试`;
+    } else if (r.status === 503) {
+      forumError = '论坛反馈区暂时关闭了，内容已存本机，可复制后手动贴';
+    } else if (r.status === 400) {
+      const fieldMap = {
+        bot: 'bot 名称', qq: '联系方式 QQ', title: '标题', desc: '「发生了什么」',
+        kind: '类型', steps: '复现步骤', logs: '日志', env: '环境信息', when: '发生时间',
+        website: '反机器人校验', elapsedMs: '反机器人校验', contact_public: 'QQ 公开选项',
+        source: '来源标记',
+      };
+      const field = String((r.data && r.data.field) || '');
+      const label = fieldMap[field] || field || '提交内容';
+      const why = String((r.data && r.data.error) || '').trim();
+      forumError = `论坛没接受「${label}」这一项${why ? '：' + why : ''}，内容已存本机，可复制后手动贴`;
+    } else if (r.status === 0) {
+      forumError = '连不上论坛，内容已存本机';
+    } else {
+      const why = String((r.data && r.data.error) || '').trim();
+      forumError = `论坛返回 HTTP ${r.status}${why ? '：' + why : ''}，内容已存本机`;
+    }
+
+    let pushed = false;
+    let pushError = null;
+    const wd = readJson(WD_CONFIG, null);
+    const notify = wd && wd.notify ? wd.notify : {};
+    const tk = String(notify.token || '').trim();
+    if (notify.enabled === true && notify.type === 'pushplus' && tk) {
+      const pr = await fetchJson(
+        'https://www.pushplus.plus/send',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            token: tk,
+            title: `[Molly 反馈] ${bot} · ${title}`,
+            content: [
+              `<b>${bot}</b> · ${FEEDBACK_KINDS[kind]}`,
+              '',
+              md.split('\n').slice(0, 30).join('<br>'),
+              '',
+              posted
+                ? `已发到论坛反馈区：${forumUrl}`
+                : `还没进论坛（${forumError || '未知原因'}），请手贴：${cfg.pageUrl}`,
+            ].join('<br>'),
+            template: 'html',
+          }),
+        },
+        15_000,
+      );
+      const code = pr.data && Number(pr.data.code);
+      pushed = pr.ok && (!Number.isFinite(code) || code === 200);
+      if (!pushed) pushError = (pr.data && pr.data.msg) || pr.error || `HTTP ${pr.status}`;
+    } else {
+      pushError = 'PushPlus 没开或没配 token';
+    }
+
+    appendConsoleLog(
+      `[feedback] ${bot} · ${title} → ${posted ? '论坛已提交' : '本地存档'}${
+        savedPath ? '（' + path.basename(savedPath) + '）' : ''
+      }`,
+    );
+
+    return {
+      ok: true,
+      data: {
+        saved: Boolean(savedPath),
+        savedPath,
+        posted,
+        status: forumStatus,
+        id: forumId,
+        url: forumUrl,
+        pageUrl: cfg.pageUrl,
+        forumError,
+        markdown: md,
+        pushed,
+        pushError,
+      },
+    };
+  },
+  'feedback/list': async () => {
+    let names = [];
+    try {
+      names = fs.readdirSync(FEEDBACK_DIR).filter((n) => n.endsWith('.md'));
+    } catch {
+      names = [];
+    }
+    names.sort().reverse();
+    const items = names.slice(0, 12).map((name) => {
+      const full = path.join(FEEDBACK_DIR, name);
+      let size = 0;
+      let at = null;
+      try {
+        const st = fs.statSync(full);
+        size = st.size;
+        at = st.mtimeMs;
+      } catch {
+        /* 文件刚被删就跳过时间 */
+      }
+      let head = '';
+      try {
+        head = String(fs.readFileSync(full, 'utf8')).split('\n')[0].replace(/^###\s*/, '');
+      } catch {
+        head = name;
+      }
+      return { name, path: full, size, at, title: head };
+    });
+    return { ok: true, data: { dir: FEEDBACK_DIR, items } };
   },
 
   // ── CRUD 8 条（契约 §3）：全部透传插件，代理层只做本地参数校验 ──────────────

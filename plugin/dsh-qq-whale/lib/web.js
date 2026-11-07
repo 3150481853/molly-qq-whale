@@ -2266,6 +2266,7 @@ export class WebWidget {
           raw_message: text,
           message: text,
           message_id: 'sing-test-' + Date.now(),
+          __test: true, // 测试请求不受唱歌静音时段限制（engine.js inSingQuietHours 前面有 __test 放行）
         }
         if (groupId) ev.group_id = groupId
         const started = Date.now()

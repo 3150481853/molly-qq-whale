@@ -186,6 +186,7 @@ export class BiliSinger {
             title: parsed.title || '',
             author: parsed.author || '',
             pitchShift: Number(parsed.pitch_shift) || 0,
+            card: parsed.card || '',
           })
           return
         }

@@ -17,7 +17,7 @@
   var QR_TTL_MS = (typeof window !== 'undefined' && typeof window.__QR_TTL_MS__ === 'number' && window.__QR_TTL_MS__ > 0)
     ? window.__QR_TTL_MS__
     : 120000;
-  var PAGES = ['overview', 'chats', 'online', 'memory', 'pending', 'stickers', 'switches', 'budget', 'work', 'watchdog', 'ops', 'external', 'qq', 'exec', 'settings', 'about'];
+  var PAGES = ['overview', 'chats', 'online', 'memory', 'pending', 'stickers', 'switches', 'budget', 'work', 'watchdog', 'ops', 'external', 'qq', 'exec', 'settings', 'about', 'feedback'];
 
   /* 关于页「检查更新」的基准（2026-11-04）：页面这一份前端文件加载时，服务端在
      index.html 里注入了 window.__MOLLY_BUILD__（tools/console-server.mjs 静态页改写）。
@@ -75,6 +75,7 @@
     lastError: null,
     page: 'overview',
     health: null,
+    hc: null,             /* 一键体检结果：{startedAt, at, rows[]}；只在按钮点击/首次进页时更新，不进 4 秒轮询 */
     memory: null,         /* 只读兜底视图：/api/memory 的 groups */
     memoryError: null,
     memEntries: null,     /* 可写视图：/api/action/memory/list 的 entries（带 id） */
@@ -733,7 +734,7 @@
           '<div class="stat-value">' + num(budget.used, 2) + '<span class="stat-unit">/ ' + num(budget.dailyCap, 0) + '</span></div>' +
           progressHtml(pct) +
           '<div class="stat-note">' + (budget.enabled ? '积分限制已开启' : '积分限制已关闭') + ' · 日切 ' + val(budget.day) + '</div></div>',
-        '<div class="stat tint-lavender"><div class="stat-label">Jasmine 记忆</div>' +
+        '<div class="stat tint-lavender"><div class="stat-label">茉莉花记忆</div>' +
           '<div class="stat-value">' + num(mem.count, 0) + '<span class="stat-unit">条</span></div>' +
           '<div class="stat-note">' + (side.reachable ? '数据服务已连接' : '数据服务不可达') + '</div></div>',
         '<div class="stat tint-mint"><div class="stat-label">表情</div>' +
@@ -828,6 +829,160 @@
       showErrorBar('renderOverview/卡片区', err);
       setHtml(cards, overviewErrorCard(err && err.message ? err.message : String(err)));
     }
+  }
+
+  /* ---------------- 一键体检（总览页，IA 第一期） ----------------
+     把原先散在 5 个页面的只读检查串成一张卡：QQ 在线 / 控制台后端 / 插件与宿主 /
+     计划任务 / 数据服务 / 内存占用。全部复用既有接口与既有动作，不新增后端动作。
+     只在「体检一次」或第一次进总览页时跑：mem/status 每次要 spawn 采样、后端另加
+     20 秒缓存，塞进 4 秒轮询会把机器拖慢，所以结果缓存在 state.hc 里。 */
+
+  var HC_MIN_GAP = 20000;   /* 连点保护：20 秒内不重复打后端 */
+  /* muted = 「待命」：本来就不常驻、按需才起的东西（数据服务侧车、停用的计划任务）。
+     它不是异常，所以不用红/黄，避免跟真故障混在一起。 */
+  var HC_LABEL = { ok: '正常', warn: '需要注意', bad: '异常', muted: '待命', idle: '未检查' };
+  var hcBusy = false;
+
+  function hcRow(name, kind, note) {
+    var k = HC_LABEL[kind] ? kind : 'idle';
+    return '<div class="hc-row">'
+      + '<span class="hc-name">' + esc(name) + '</span>'
+      + '<span class="hc-pill">' + pill(k, HC_LABEL[k]) + '</span>'
+      + '<span class="hc-note">' + note + '</span>'
+      + '</div>';
+  }
+
+  function renderHealthCheck() {
+    var box = $('#ovHealth');
+    if (!box) return;
+    var hc = state.hc;
+    var head = '<div class="hc-head"><h2 class="card-title">一键体检</h2>'
+      + '<button class="btn btn-ghost btn-sm" id="hcRun" type="button">体检一次</button></div>';
+    if (!hc) {
+      setHtml(box, head + '<p class="card-sub">六项只读检查：QQ 在线、控制台后端、插件与宿主、计划任务、数据服务、内存占用。点「体检一次」跑一轮，只看不改。</p>');
+      return;
+    }
+    setHtml(box, head
+      + '<p class="card-sub">' + hc.rows.length + ' 项检查 · ' + agoText(hc.at) + '跑的。不会自动刷新，免得反复打后端。</p>'
+      + '<div class="hc-list">' + hc.rows.join('') + '</div>');
+  }
+
+  function bindHealthCheck() {
+    var box = $('#ovHealth');
+    if (!box || box.dataset.hcBound === '1') return;
+    box.dataset.hcBound = '1';
+    box.addEventListener('click', function (e) {
+      var t2 = e.target;
+      while (t2 && t2 !== box) {
+        if (t2.id === 'hcRun') { runHealthCheck(t2); return; }
+        t2 = t2.parentNode;
+      }
+    });
+  }
+
+  function runHealthCheck() {
+    var box = $('#ovHealth');
+    if (!box || hcBusy) return;
+    var startedAt = Date.now();
+    if (state.hc && startedAt - state.hc.startedAt < HC_MIN_GAP) { renderHealthCheck(); return; }
+    hcBusy = true;
+    renderHealthCheck();
+    var liveBtn = $('#hcRun');
+    if (liveBtn) { liveBtn.disabled = true; liveBtn.textContent = '体检中…'; }
+    var healthP = fetch('/api/health', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (j) { return { ok: true, data: j || {} }; })
+      .catch(function (e) { return { ok: false, error: (e && e.message) || String(e) }; });
+    var memP = apiPost('mem/status', {}).then(function (j) { return j || {}; });
+
+    Promise.all([healthP, memP]).then(function (res) {
+      var health = res[0] || {};
+      var mem = res[1] || {};
+      var ov = state.overview || {};
+      var p = ov.plugin || {};
+      var wd = ov.watchdog || {};
+      var side = ov.sidecar || {};
+      var q = qqStatus(ov);
+      var groups = Number((p.bot && p.bot.groupCount) || 0);
+      var rows = [];
+
+      /* 1 · QQ 是否在线：口径跟顶部状态条一致，都用 qqStatus */
+      var qKind = QQ_LEVEL_KIND[q.level] || 'idle';
+      var qNote;
+      if (qKind === 'ok') qNote = esc(q.text) + (groups ? ' · ' + num(groups) + ' 个群在聊' : '');
+      else if (qKind === 'warn') qNote = esc(q.text) + ' · 等她扫码或客户端就绪';
+      else qNote = '去「QQ 连接」页看怎么重新登录';
+      rows.push(hcRow('QQ 在线', qKind, qNote));
+
+      /* 2 · 控制台后端：GET /api/health */
+      rows.push(health.ok
+        ? hcRow('控制台后端', 'ok', '版本 ' + esc((health.data && health.data.version) || '—') + ' · 构建 ' + esc((health.data && health.data.build) || '—'))
+        : hcRow('控制台后端', 'bad', '连不上控制台服务：' + esc(health.error || '没有响应')));
+
+      /* 3 · 插件是否加载：/api/overview 的 plugin 字段 */
+      if (p.reachable) {
+        var botName = (p.bot && p.bot.nickname) || q.nickname || '';
+        rows.push(hcRow('插件与宿主',
+          p.enabled === false ? 'warn' : 'ok',
+          p.enabled === false
+            ? '已加载但被停用，去「设置」重新打开'
+            : '已加载' + (botName ? ' · 机器人 ' + esc(botName) : '') + (groups ? ' · ' + num(groups) + ' 个群' : '')));
+      } else {
+        rows.push(hcRow('插件与宿主', 'bad', '没连上宿主：' + esc(p.error || '端口未探到')));
+      }
+
+      /* 4 · 计划任务是否在跑：/api/overview 的 watchdog（taskEnabled + 心跳） */
+      var task = wd.taskEnabled ? String(wd.taskEnabled).toLowerCase() : '';
+      var beat = (wd.state && wd.state.lastCheckAt) || 0;
+      var wdKind = 'ok';
+      var wdNote;
+      if (wd.taskEnabled === false || task === 'disabled') { wdKind = 'muted'; wdNote = '已停用 · 计划任务没启用（不算异常），要自动巡检去「自动守护」打开'; }
+      else if (!wd.reachable) { wdKind = 'warn'; wdNote = '读不到守护状态，去「自动守护」点一次「读取状态」'; }
+      else if (wd.state && wd.state.lastState === 'offline') { wdKind = 'bad'; wdNote = '巡检发现 QQ 掉线，去「自动守护」看结论'; }
+      else if (!beat) { wdKind = 'warn'; wdNote = '还没有守护心跳记录'; }
+      else { wdNote = '计划任务在跑（守护 ' + agoText(beat) + '心跳）'; }
+      rows.push(hcRow('计划任务', wdKind, wdNote));
+
+      /* 5 · 嵌入 / 侧车服务（127.0.0.1:19391）：/api/overview 的 sidecar。
+         这一项是「按需拉起」的：它平时不常驻，第一次记忆检索时才会自动启动。
+         所以「连不上」不等于坏了 —— 端口没人听时后端 jget 回报的是 fetch failed，
+         那只是它还没被拉起 = 待命；只有端口在听却取不到数（后端回报 HTTP xxx / 超时 xxxms /
+         回了段解析不了的东西）才算真的异常。 */
+      if (side.reachable) {
+        rows.push(hcRow('数据服务', 'ok', '已连接 · 127.0.0.1:19391 · '
+          + num((side.memory && side.memory.count) || (p.memory && p.memory.count) || 0) + ' 条记忆 · '
+          + num((side.stickers && side.stickers.count) || 0) + ' 张表情'));
+      } else {
+        var sideErr = String(side.error || '').trim();
+        var sideListening = /HTTP\s+\d|超时|JSON|parse|socket|reset|EPIPE|hang up/i.test(sideErr);
+        rows.push(sideListening
+          ? hcRow('数据服务', 'bad', '端口 19391 在监听但取数失败：' + esc(sideErr) + ' · 去「进程与日志」看它是不是卡住了')
+          : hcRow('数据服务', 'muted', '待命 · 按需拉起：第一次记忆检索时会自动启动，平时不常驻'));
+      }
+
+      /* 6 · 内存占用：mem/status（后端 20 秒缓存 + 这里 20 秒连点保护） */
+      var mm = (mem.data && mem.data.mem) || {};
+      var totalMb = Number(mm.totalMb);
+      if (mem.ok && isFinite(totalMb)) {
+        var bigGroup = (mm.groups && mm.groups.length) ? mm.groups[0] : null;
+        rows.push(hcRow('内存占用', 'ok',
+          '约 ' + num(totalMb) + ' MB' + (bigGroup ? ' · 最大一块 ' + esc(bigGroup.label || '') + ' ' + num(bigGroup.mb) + ' MB' : '')));
+      } else {
+        rows.push(hcRow('内存占用', 'warn', '这轮没取到占用：' + esc((mem && mem.error) || '采样失败')));
+      }
+
+      state.hc = { startedAt: startedAt, at: Date.now(), rows: rows };
+      hcBusy = false;
+      renderHealthCheck();
+    }).catch(function (err) {
+      hcBusy = false;
+      state.hc = {
+        startedAt: startedAt,
+        at: Date.now(),
+        rows: [hcRow('体检', 'bad', '这轮体检没跑完：' + esc((err && err.message) || String(err)))]
+      };
+      renderHealthCheck();
+    });
   }
 
   /* ---------------- 会话与消息 ---------------- */
@@ -2788,17 +2943,19 @@
     var hint = $('#dshWorkspaceHint');
     var ov = state.overview;
     var base = ov?.plugin?.reachable ? ov.plugin.base : '';
+    var dshHref = '';   /* 真实地址只从后端探测结果来：DSH 每次重启端口都变，绝不写死 */
     /* 桌面窗口里的页面带宿主桥（window.chrome.webview）。DSH 的网页版只认它自己
        打印出来的授权地址，光有 origin 一定停在 "dsh web authentication required"，
        所以桌面模式下不再往浏览器甩链接，改成请宿主把正在用的 DSH 窗口提到最前。 */
     var bridge = !!(window.chrome && window.chrome.webview && typeof window.chrome.webview.postMessage === 'function');
-    if (workspace && base) {
+    if (base) {
       try {
         var url = new URL(base);
-        if (url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) workspace.href = url.origin;
-      } catch (_) { /* 不采信非法上游地址，保留最后的已知入口。 */ }
+        if (url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) dshHref = url.origin;
+      } catch (_) { /* 不采信非法上游地址：宁可说「请在桌面版里点」，也不猜端口。 */ }
     }
     if (workspace) {
+      if (dshHref) workspace.href = dshHref;
       if (bridge) {
         workspace.textContent = '切到 DSH 工作台';
         workspace.removeAttribute('target');
@@ -2811,19 +2968,32 @@
             try {
               window.chrome.webview.postMessage('molly:open-dsh');
               toast('已把 DSH 窗口提到最前');
-            } catch (_) { location.href = workspace.href; }
+            } catch (_) { if (dshHref) location.href = dshHref; else toast('请在 Molly 桌面版里点这个按钮'); }
           });
         }
-      } else {
+      } else if (dshHref) {
         workspace.textContent = '打开 DSH 工作台 ↗';
         workspace.setAttribute('target', '_blank');
         workspace.setAttribute('rel', 'noopener');
+        workspace.classList.remove('is-disabled');
+        workspace.removeAttribute('aria-disabled');
+      } else {
+        /* 浏览器里拿不到真实地址：后端没探到宿主端口时不做任何猜测，
+           明确告诉主人去桌面版点。以前这里会留下写死的旧端口死链。 */
+        workspace.textContent = '请在桌面版里点这个按钮';
+        workspace.removeAttribute('href');
+        workspace.removeAttribute('target');
+        workspace.removeAttribute('rel');
+        workspace.setAttribute('aria-disabled', 'true');
+        workspace.classList.add('is-disabled');
       }
     }
     if (hint) {
       setHtml(hint, bridge
-        ? '点上面的按钮会把已经打开的 <b>DeepSeek Harness</b> 窗口提到最前。DSH 的网页版只认它自己打印的授权地址，所以这里不再往浏览器转发链接。'
-        : 'DSH 的网页版只认它自己打印的授权地址，直接用浏览器打开这个端口会停在授权提示上。请在 <b>Molly 桌面应用</b>里点上面的按钮，或从开始菜单启动 <b>DeepSeek Harness</b>。');
+        ? '点上面的按钮会把已经打开的 <b>DeepSeek Harness</b> 窗口提到最前。它的网页版只认自己打印的授权地址，所以这里不往浏览器转发链接。'
+        : (dshHref
+          ? '地址来自控制台后端探测到的宿主端口；直接用浏览器打开仍可能停在授权提示上，进不去就回 <b>Molly 桌面应用</b>点这个按钮。'
+          : '这个页面在浏览器里拿不到工作台的真实地址（宿主端口每次启动都变，控制台不再写死）。<b>请在桌面版里点这个按钮</b>，或从开始菜单启动 <b>DeepSeek Harness</b>。'));
     }
     setHtml(box, '<p class="card-sub">执行、研究、插件开发与运行记录请前往 DSH 工作台。控制台不再创建第二套任务执行器。</p>');
   }
@@ -3157,11 +3327,11 @@
       /* QQ 明明在跑、也登录了，但插件没连上 OneBot：别再说「QQ 未登录」 */
       kind = 'warn';
       head = 'QQ 在运行，Molly 还没连上';
-      note = 'QQ 客户端已登录，但插件没连上 OneBot。去「守护」或「执行块」看插件连接状态；也可以点下面的「重新登录 QQ（扫码）」重拉一次。';
+      note = 'QQ 客户端已登录，但插件没连上 OneBot。去「自动守护」或「执行块」看插件连接状态；也可以点下面的「重新登录 QQ（扫码）」重拉一次。';
     } else if (lg.triggered) {
       kind = 'warn';
       head = '已触发重启，等待登录';
-      note = '计划任务已下发：约 10~25 秒后 QQ 窗口弹出，用手机扫码即可。30 秒没反应看「运维」页的 SnowLuma 启动/运行日志。';
+      note = '计划任务已下发：约 10~25 秒后 QQ 窗口弹出，用手机扫码即可。30 秒没反应看「进程与日志」页的 SnowLuma 启动/运行日志。';
     } else {
       kind = 'warn';
       head = q.clientReachable ? '等待扫码' : 'QQ 未连接';
@@ -3285,7 +3455,7 @@
         }
         if (idleHint) {
           idleHint.textContent = lg.triggered
-            ? '不会重启 Molly 插件、网关和控制台。30 秒还没反应：看「运维」页的 SnowLuma 启动/运行日志，或去「守护」检查插件连接。'
+            ? '不会重启 Molly 插件、网关和控制台。30 秒还没反应：看「进程与日志」页的 SnowLuma 启动/运行日志，或去「自动守护」检查插件连接。'
             : '不会重启 Molly 插件、网关和控制台。回滚后端下二维码约 2 分钟过期，过期后最多自动换 3 张。';
         }
       }
@@ -3362,7 +3532,7 @@
         /* 触发重启后最多等 60 秒：别让「等待中」无限转下去 */
         if (lg.triggered && lg.triggeredAt && Date.now() - lg.triggeredAt > 60_000) {
           lg.triggered = false;
-          lg.hint = '还没等到 QQ 登录。看「运维」页的 SnowLuma 启动/运行日志（G:\\Molly\\qq-whale\\out\\snowluma-boot.log、snowluma-runtime.out.log），也可以去「守护」检查插件连接。';
+          lg.hint = '还没等到 QQ 登录。看「进程与日志」页的 SnowLuma 启动/运行日志（qq-whale\\out\\snowluma-boot.log、snowluma-runtime.out.log），也可以去「守护」检查插件连接。';
           stopLoginPoll();
         }
         safe(renderLogin);
@@ -4039,7 +4209,7 @@
     var base = p.base ? String(p.base) : '';
 
     setHtml($('#aboutFacts'), [
-      kv('Jasmine 记忆', memCount),
+      kv('茉莉花记忆', memCount),
       kv('表情', stkCount),
       kv('已聊', talked),
       kv('积分', budget),
@@ -4539,6 +4709,9 @@
         state.overview = j;
         state.lastOkAt = Date.now();
         state.lastError = null;
+        /* 体检卡只在第一次拿到总览数据后补跑一次：以前进页立刻跑，overview 还是空的，
+           会渲染出满屏「异常」。跑过就有 state.hc，不会再触发，也不跟 4 秒轮询走。 */
+        if (state.page === 'overview' && !state.hc && !hcBusy) safe(function () { runHealthCheck(); });
         maybeReloadForNewBuild(j);
         safe(renderTop);
         safe(renderPageNow);
@@ -4566,6 +4739,7 @@
     else if (p === 'qq') enterLoginPage();
     else if (p === 'settings') refreshSleep();
     else if (p === 'about') loadHealth();
+    else if (p === 'feedback') loadFeedback(true);
     if (notify) toast('已刷新当前页');
   }
 
@@ -5304,19 +5478,19 @@
   var FEATURE_LINKS = [
     { page: 'overview', icon: '⌂', name: '总览', desc: 'Molly、QQ、守护和数据状态', keys: '首页 状态 在线 健康' },
     { page: 'chats', icon: '◌', name: '会话与消息', desc: '消息量、响应与学习器记录', keys: '聊天 回复 历史' },
-    { page: 'memory', icon: '❀', name: 'Jasmine 记忆', desc: '搜索、新增、编辑和删除记忆', keys: '记住 事实 偏好 人物' },
+    { page: 'memory', icon: '❀', name: '茉莉花记忆', desc: '搜索、新增、编辑和删除记忆', keys: '记住 事实 偏好 人物 jasmine 记忆' },
     { page: 'pending', icon: '✓', name: '待核实', desc: '通过或丢弃待确认的记忆', keys: '审批 审核' },
     { page: 'stickers', icon: '☺', name: '表情包', desc: '上传、改关键词和整理表情', keys: '图片 gif 学习' },
-    { page: 'switches', icon: '◫', name: '发言与互动', desc: '回话、轻回应、点赞、主动搭话和静音', keys: '开关 群聊 私聊 闭嘴' },
+    { page: 'switches', icon: '◫', name: '发言开关', desc: '回话、轻回应、点赞、主动搭话和静音', keys: '开关 群聊 私聊 闭嘴 发言 互动' },
     { page: 'budget', icon: '◒', name: '积分与预算', desc: '每日额度、消耗与限制', keys: '费用 上限 用量' },
-    { page: 'work', icon: '↗', name: '让她干活', desc: '指令、工作总线和研究测试', keys: '任务 执行 研究' },
-    { page: 'qq', icon: '⌁', name: 'QQ 连接', desc: '连接诊断、重新登录与扫码', keys: '掉线 登录 二维码' },
+    { page: 'work', icon: '↗', name: '任务与研究', desc: '任务、研究、插件工坊与运行记录（入口在「设置 › 更多」）', keys: '任务 执行 研究 让她干活 干活' },
+    { page: 'qq', icon: '⌁', name: 'QQ 连接', desc: '连接诊断、重新登录与扫码（入口在「设置 › 更多」）', keys: '掉线 登录 二维码' },
     { page: 'watchdog', icon: '◎', name: '自动守护', desc: '巡检、通知与计划任务', keys: '监控 修复 免打扰' },
     { page: 'ops', icon: '↻', name: '进程与日志', desc: '启动、停止、重启和最近日志', keys: '运维 重启 关闭 排障' },
-    { page: 'external', icon: '⊙', name: '模型与服务', desc: '模型选择、网关与外部用量', keys: '切换 deepseek 计费' },
-    { page: 'settings', icon: '⚙', name: '偏好设置', desc: '作息时间与诊断信息', keys: '睡觉 起床 复制' },
+    { page: 'external', icon: '⊙', name: '模型与服务', desc: '模型选择、网关与外部用量（入口在「设置 › 更多」）', keys: '切换 deepseek 计费' },
+    { page: 'settings', icon: '⚙', name: '设置', desc: '外观、作息、占用、诊断与高级入口', keys: '偏好 睡觉 起床 复制 高级 主题' },
     { page: 'about', icon: 'ⓘ', name: '关于', desc: '版本、构建、本机数据与联系方式', keys: '版本 更新 构建 联系 目录 许可' },
-    { page: 'exec', icon: '⋯', name: '高级操作', desc: '全部底层执行块（仅供排障）', keys: '高级 action 配置' }
+    { page: 'exec', icon: '⋯', name: '执行块', desc: '全部底层动作（仅供排障；入口在「设置 › 更多」）', keys: '高级 action 配置 执行块 排障 对话块' }
   ];
   function openCommand() {
     var mask = $('#commandModal');
@@ -5329,7 +5503,7 @@
   function closeCommand() { var mask = $('#commandModal'); if (mask) mask.hidden = true; }
 
   /* 搜索 = 页面导航 + 一句话执行（2026-11-05 主人：功能太多、找起来不友好）。
-     动作不复制第二套写入通路：挑中动作就跳到「高级操作」里那张卡并按卡片自己的
+     动作不复制第二套写入通路：挑中动作就跳到「执行块」里那张卡并按卡片自己的
      规则跑（字段校验、危险动作的系统确认、结果区都还是同一份代码）。 */
   var commandMatches = [];
   var commandActive = 0;
@@ -5434,7 +5608,7 @@
     if (location.hash.indexOf('#/exec') !== 0) location.hash = '#/exec';
     setTimeout(function () {
       var card = document.querySelector('.action-card[data-action="' + actionId + '"]');
-      if (!card) { toast('没找到这个动作，去「高级操作」里看看'); return; }
+      if (!card) { toast('没找到这个动作，去「执行块」里看看'); return; }
       card.classList.add('is-flash');
       setTimeout(function () { card.classList.remove('is-flash'); }, 1800);
       try { card.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (err) {}
@@ -5468,6 +5642,368 @@
     });
   }
 
+  /* ---------------- 问题反馈（2026-11-06，2026-11-07 接论坛免登录接口） ----------------
+     一页做完三件事：填表 → 本机落盘 → POST 到论坛反馈区。
+     论坛有免登录接口之后（2026-11-07），提交基本当场发布；命中关键词会进待审。
+     真发不出去（限流 / 关区 / 断网）时后端把原因翻成人话，这里保留 Markdown + 复制按钮。
+     动作：feedback/meta（探活 + 最近列表）、feedback/submit（落盘 + 提交 + 推送）、
+           feedback/list（本机存档）。 */
+
+  /* openedAt：第一次进这个页面时记的时间，用来算反机器人的 elapsedMs。
+     切走再回来不重置 —— 重置就永远凑不满 3 秒，次次被判机器人。
+     recent：论坛公开列表里最近的 10 条（也来自 feedback/meta）。 */
+  var fbState = {
+    meta: null, list: [], dir: '', error: '', loading: false, busy: false, at: 0,
+    openedAt: 0, elapsedMs: 0, recent: []
+  };
+
+  function fbPad2(n) { return (n < 10 ? '0' : '') + n; }
+
+  /* datetime-local 要的是 2026-11-06T23:05，不是 ISO 的带 Z 那种 */
+  function fbNowLocal() {
+    var d = new Date();
+    return d.getFullYear() + '-' + fbPad2(d.getMonth() + 1) + '-' + fbPad2(d.getDate()) +
+      'T' + fbPad2(d.getHours()) + ':' + fbPad2(d.getMinutes());
+  }
+
+  function fbFmtAt(v) {
+    if (!v) return '—';
+    var d = asDate(v);
+    if (!d) return String(v).slice(0, 16);
+    return (d.getMonth() + 1) + '-' + fbPad2(d.getDate()) + ' ' + fbPad2(d.getHours()) + ':' + fbPad2(d.getMinutes());
+  }
+
+  /* bot 名称只存在本机：同一台机器反复提反馈不用每次重打 */
+  function fbSavedBot() {
+    try { return localStorage.getItem('molly-fb-bot') || ''; } catch (e) { return ''; }
+  }
+
+  function fbRememberBot(name) {
+    try { if (name) localStorage.setItem('molly-fb-bot', name); } catch (e) { /* 隐私模式下写不进去，无所谓 */ }
+  }
+
+  function fbSetStatus(text, kind) {
+    var el = $('#fbStatus');
+    if (!el) return;
+    el.textContent = text || '';
+    el.className = 'fb-status' + (kind ? ' is-' + kind : '');
+  }
+
+  function fbCheckedLogs() {
+    var out = [];
+    $$('#fbLogs input[type="checkbox"]').forEach(function (c) { if (c.checked) out.push(c.value); });
+    return out;
+  }
+
+  function fbSizeText(n) {
+    var b = Number(n) || 0;
+    if (b < 1024) return b + ' B';
+    if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+    return (b / 1048576).toFixed(1) + ' MB';
+  }
+
+  /* 论坛人看的列表页：提交成功后「打开论坛反馈区」就落在这儿 */
+  function fbForumPageUrl() {
+    var m = fbState.meta || {};
+    return m.pageUrl || m.forumUrl || (m.config && m.config.pageUrl) || 'https://example.asia/dsh/feedback';
+  }
+
+  /* 类型徽章：跟后端 FEEDBACK_KINDS 的键对齐，短一点好塞进一行 */
+  var FB_KIND_LABEL = { bug: '功能坏了', ui: '界面', perf: '卡顿', docs: '文档', feature: '新功能', other: '其它' };
+
+  function fbKindLabel(kind) {
+    var k = String(kind || '');
+    return FB_KIND_LABEL[k] || (k || '其它');
+  }
+
+  /* 右栏「论坛上最近的反馈」：前 10 条，行式；点一行打开论坛列表页。
+     单条没有稳定地址（帖子详情可能还没生成），统一跳列表页，免得点出 404。 */
+  function fbRenderRecent() {
+    var box = $('#fbRecent');
+    if (!box) return;
+    var rows = fbState.recent || [];
+    if (!rows.length) {
+      box.innerHTML = '<div class="fb-recent-empty">' +
+        (fbState.loading ? '读取中…' : (fbState.meta ? '论坛上还没有公开的反馈。' : '读不到论坛列表。')) +
+        '</div>';
+      return;
+    }
+    box.innerHTML = rows.map(function (it) {
+      return '<button class="fb-recent-row" type="button" data-url="' + esc(it.url || '') + '">' +
+        '<span class="fb-recent-title"><b>[' + esc(it.bot || '未知') + ']</b> ' + esc(it.title || '未命名') + '</span>' +
+        '<span class="fb-recent-meta">' + esc(fbFmtAt(it.when)) +
+        '<span class="fb-recent-kind">' + esc(fbKindLabel(it.kind)) + '</span></span>' +
+        '</button>';
+    }).join('');
+  }
+
+  function fbRenderList() {
+    var box = $('#fbList');
+    if (!box) return;
+    var dir = $('#fbDir');
+    if (dir) {
+      if (fbState.dir) dir.textContent = '存档目录：' + fbState.dir;
+      else if (fbState.error) dir.textContent = '读不到后端：' + fbState.error;
+      else dir.textContent = fbState.loading ? '读取中…' : '—';
+    }
+    if (!fbState.list.length) {
+      box.innerHTML = '<div class="fb-empty">' + (fbState.loading ? '读取中…' : '还没有提交过的反馈。') + '</div>';
+      return;
+    }
+    box.innerHTML = fbState.list.map(function (it) {
+      return '<button class="fb-row" type="button" data-path="' + esc(it.path || '') + '">' +
+        '<span class="fb-row-main">' +
+        '<span class="fb-row-title">' + esc(it.title || it.name || '未命名') + '</span>' +
+        '<span class="fb-row-sub">' + esc(fbFmtAt(it.at)) + ' · ' + esc(fbSizeText(it.size)) + '</span>' +
+        '</span><span class="fb-row-go">复制路径</span></button>';
+    }).join('');
+  }
+
+  function renderFeedback() {
+    var at = $('#fbAt');
+    if (at && !at.value) at.value = fbNowLocal();
+    var bot = $('#fbBot');
+    if (bot && !bot.value) bot.value = fbSavedBot();
+    /* 反机器人要的「页面打开到提交多久」：只在这里记第一次，切走再回来不重置 */
+    if (!fbState.openedAt) fbState.openedAt = Date.now();
+    fbState.elapsedMs = Date.now() - fbState.openedAt;
+    /* 进页自己没有数据源：meta 为空或过期就自己去拉一次（meta + 本机存档列表 + 论坛最近 10 条） */
+    if (!fbState.loading && (!fbState.meta || Date.now() - fbState.at > 60000)) loadFeedback(false);
+    /* 论坛那条只做提示，不拦着提交：发不出去也能存本机 */
+    var forumState = '';
+    var forumKind = '';
+    if (fbState.meta && fbState.meta.forum) {
+      var f = fbState.meta.forum;
+      if (f.reachable === false) {
+        forumState = f.open === false
+          ? '论坛反馈区暂时关闭了，提交会先存本机，可复制后手动贴'
+          : '论坛现在连不上（' + (f.error || '网络不通') + '），提交会先存本机，可复制后手动贴';
+        forumKind = 'warn';
+      } else {
+        forumState = '论坛反馈区可以访问，提交会直接发布；命中关键词会转人工审核';
+      }
+    }
+    /* 「打开论坛反馈区」按钮的默认落点：还没提交过也能点 */
+    var openBtn = $('#fbOpen');
+    if (openBtn && !openBtn.getAttribute('data-url')) openBtn.setAttribute('data-url', fbForumPageUrl());
+    /* 已经出过提交结果的，别用论坛提示把结果行盖掉 */
+    var resBox = document.getElementById('fbResult');
+    var resultShown = !!(resBox && !resBox.hidden);
+    if (forumState && !fbState.busy && !resultShown) fbSetStatus(forumState, forumKind);
+    fbRenderRecent();
+    fbRenderList();
+  }
+
+  function loadFeedback(force) {
+    if (fbState.loading) return;
+    if (!force && fbState.meta && Date.now() - fbState.at < 60000) { renderFeedback(); return; }
+    fbState.loading = true;
+    safe(fbRenderList);
+    Promise.all([apiPost('feedback/meta', {}), apiPost('feedback/list', {})]).then(function (r) {
+      fbState.loading = false;
+      fbState.at = Date.now();
+      var m = r[0];
+      var l = r[1];
+      if (m && m.ok) {
+        fbState.meta = m.data || null;
+        fbState.recent = (m.data && m.data.recent) || [];
+        fbState.error = '';
+      } else {
+        fbState.meta = null;
+        fbState.recent = [];
+        fbState.error = (m && m.error) || '接口没响应';
+      }
+      if (l && l.ok) {
+        fbState.list = (l.data && l.data.items) || [];
+        fbState.dir = (l.data && l.data.dir) || '';
+      } else {
+        fbState.list = [];
+        fbState.dir = '';
+      }
+      safe(renderFeedback);
+      if (force) toast('反馈页已刷新');
+    });
+  }
+
+  function submitFeedback() {
+    if (fbState.busy) return;
+    var botEl = $('#fbBot');
+    var qqEl = $('#fbQQ');
+    var titleEl = $('#fbTitle');
+    var descEl = $('#fbDesc');
+    var bot = ((botEl && botEl.value) || '').trim();
+    var qq = ((qqEl && qqEl.value) || '').trim();
+    var title = ((titleEl && titleEl.value) || '').trim();
+    var desc = ((descEl && descEl.value) || '').trim();
+    /* 蜜罐有值 = 自动填充或脚本干的：就地拦下，一个字节都不发给服务器 */
+    var hp = $('#fbSite');
+    if (hp && hp.value) {
+      fbSetStatus('表单被自动填充过（反机器人校验没通过），刷新页面再提交一次', 'bad');
+      return;
+    }
+    if (!bot) { fbSetStatus('先写 bot 名称 —— 站长靠它认出是哪一台部署', 'bad'); if (botEl) botEl.focus(); return; }
+    if (!/^\d{5,15}$/.test(qq)) { fbSetStatus('QQ 号看起来不对：填 5-15 位纯数字，站长要靠它联系你', 'bad'); if (qqEl) qqEl.focus(); return; }
+    if (!title) { fbSetStatus('还差一句话标题', 'bad'); if (titleEl) titleEl.focus(); return; }
+    if (!desc) { fbSetStatus('「发生了什么」不能空着', 'bad'); if (descEl) descEl.focus(); return; }
+
+    /* 反机器人：页面打开到提交的毫秒数（后端还有 3000ms 下限兜着） */
+    if (!fbState.openedAt) fbState.openedAt = Date.now();
+    var elapsedMs = Date.now() - fbState.openedAt;
+    fbState.elapsedMs = elapsedMs;
+
+    fbState.busy = true;
+    var btn = $('#fbSubmit');
+    if (btn) { btn.disabled = true; btn.textContent = '提交中…'; }
+    fbSetStatus('正在提交…', 'busy');
+
+    apiPost('feedback/submit', {
+      bot: bot,
+      qq: qq,
+      contact_public: !!($('#fbContactPublic') && $('#fbContactPublic').checked),
+      /* 必须是空串：有值上面已经拦了，这里仍然如实带上，交给后端再兜一次底 */
+      website: (($('#fbSite') && $('#fbSite').value) || ''),
+      elapsedMs: elapsedMs,
+      title: title,
+      kind: ($('#fbKind') && $('#fbKind').value) || 'bug',
+      when: ($('#fbAt') && $('#fbAt').value) || '',
+      desc: desc,
+      steps: ($('#fbSteps') && $('#fbSteps').value) || '',
+      logs: fbCheckedLogs()
+    }).then(function (res) {
+      fbState.busy = false;
+      if (btn) { btn.disabled = false; btn.textContent = '提交反馈'; }
+      if (!res || !res.ok) {
+        fbSetStatus('提交失败：' + ((res && res.error) || '接口没响应'), 'bad');
+        return;
+      }
+      var d = res.data || {};
+      fbRememberBot(bot);
+      var url = d.url || fbForumPageUrl();
+
+      if (d.posted) {
+        /* 201 有两种：published 直接公开，pending 命中关键词在等人工审核 */
+        var pending = String(d.status || '') === 'pending';
+        var say = pending
+          ? '已提交，命中关键词在等人工审核' + (d.id !== null && d.id !== undefined ? '（#' + d.id + '）' : '')
+          : '已发布到论坛反馈区' + (d.id !== null && d.id !== undefined ? '（#' + d.id + '）' : '');
+        say += d.saved ? '，本机也留了存档' : '（存档文件没写成，检查 out 目录权限）';
+        fbSetStatus(say, pending ? 'warn' : 'ok');
+
+        var box = $('#fbResult');
+        if (box) {
+          box.hidden = false;
+          var t = $('#fbResultTitle');
+          if (t) t.textContent = pending ? '已提交 · 等待人工审核' : '已发布到论坛反馈区';
+          var md = $('#fbMarkdown');
+          if (md) md.value = d.markdown || '';
+          var open = $('#fbOpen');
+          if (open) open.setAttribute('data-url', url);
+          /* 发成功了就不用第二条手动通道 */
+          var iss = $('#fbIssue');
+          if (iss) iss.hidden = true;
+        }
+        /* 计时清零：下一次提交重新算（后端 3000ms 下限保证不会因此被拒） */
+        fbState.openedAt = 0;
+        fbState.elapsedMs = 0;
+        loadFeedback(true);
+        return;
+      }
+
+      /* 没发出去：后端已经把原因翻成人话，Markdown 和复制按钮都留着 */
+      var why = d.forumError || '论坛没接受这次提交';
+      fbSetStatus('没发到论坛：' + why, 'bad');
+      var box2 = $('#fbResult');
+      if (box2) {
+        box2.hidden = false;
+        var t2 = $('#fbResultTitle');
+        if (t2) t2.textContent = '已存到本机（可复制后手动贴）';
+        var md2 = $('#fbMarkdown');
+        if (md2) md2.value = d.markdown || '';
+        var open2 = $('#fbOpen');
+        if (open2) open2.setAttribute('data-url', url);
+        var iss2 = $('#fbIssue');
+        if (iss2) iss2.hidden = false;
+      }
+      loadFeedback(true);
+    });
+  }
+  function fbCopyMarkdown() {
+    var md = $('#fbMarkdown');
+    if (!md || !md.value) { toast('还没有可复制的内容'); return; }
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(md.value).then(function () { toast('已复制，去论坛贴一下'); },
+          function () { try { md.select(); } catch (e) { } toast('已选中，按 Ctrl+C'); });
+        return;
+      }
+    } catch (e) { /* 老 WebView 没有 clipboard API，走下面的兜底 */ }
+    try { md.select(); document.execCommand('copy'); toast('已复制'); } catch (e2) { toast('复制失败，手动选一下'); }
+  }
+
+  /* 桌面壳里 window.open 会被 OnNewWindowRequested 接到系统浏览器，浏览器里就是新标签页 */
+  function fbOpenForum() {
+    var open = $('#fbOpen');
+    var url = (open && open.getAttribute('data-url')) || (fbState.meta && fbState.meta.forumUrl) || '';
+    if (!url) { toast('还没有论坛地址'); return; }
+    window.open(url, '_blank');
+  }
+
+  /* 第二通道：仓库 issues 页面预填标题和正文，不需要任何后端权限 */
+  var FB_ISSUE_BASE = 'https://github.com/3150481853/molly-qq-whale/issues/new';
+  function fbOpenIssue() {
+    var md = $('#fbMarkdown');
+    var body = ((md && md.value) || '').trim();
+    if (!body) { toast('先提交一次，这里就有现成的内容了'); return; }
+    var bot = (($('#fbBot') && $('#fbBot').value) || 'Molly').trim();
+    var title = (($('#fbTitle') && $('#fbTitle').value) || '问题反馈').trim();
+    if (body.length > 6000) body = body.slice(0, 6000) + '\n\n…（已截断，完整版在控制台「问题反馈」页的本机存档里）';
+    var url = FB_ISSUE_BASE + '?title=' + encodeURIComponent('[' + bot + '] ' + title) + '&body=' + encodeURIComponent(body);
+    window.open(url, '_blank');
+  }
+
+  function bindFeedback() {
+    var submit = $('#fbSubmit');
+    if (submit) submit.addEventListener('click', function () { safe(submitFeedback); });
+    var reload = $('#fbReload');
+    if (reload) reload.addEventListener('click', function () { loadFeedback(true); });
+    /* QQ 只留数字：粘贴一串带空格的号码也不用用户自己删 */
+    var qqInput = $('#fbQQ');
+    if (qqInput) qqInput.addEventListener('input', function () {
+      var clean = String(qqInput.value || '').replace(/\D+/g, '').slice(0, 15);
+      if (clean !== qqInput.value) qqInput.value = clean;
+    });
+    /* 右栏「论坛上最近的反馈」：整块和单行都跳论坛列表页 */
+    var recentOpen = $('#fbRecentOpen');
+    if (recentOpen) recentOpen.addEventListener('click', function () { window.open(fbForumPageUrl(), '_blank'); });
+    var recentBox = $('#fbRecent');
+    if (recentBox) recentBox.addEventListener('click', function (ev) {
+      var row = ev.target && ev.target.closest ? ev.target.closest('.fb-recent-row') : null;
+      if (!row) return;
+      /* 单条反馈没有稳定地址（可能还没生成详情页），统一打开列表页，免得点出 404 */
+      window.open(fbForumPageUrl(), '_blank');
+    });
+    var copy = $('#fbCopy');
+    if (copy) copy.addEventListener('click', fbCopyMarkdown);
+    var open = $('#fbOpen');
+    if (open) open.addEventListener('click', fbOpenForum);
+    var issue = $('#fbIssue');
+    if (issue) issue.addEventListener('click', fbOpenIssue);
+    var list = $('#fbList');
+    if (list) list.addEventListener('click', function (ev) {
+      var row = ev.target && ev.target.closest ? ev.target.closest('.fb-row') : null;
+      if (!row) return;
+      var p = row.getAttribute('data-path') || '';
+      if (!p) return;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(p).then(function () { toast('已复制路径'); }, function () { toast(p); });
+          return;
+        }
+      } catch (e) { /* 兜底就是把它读出来 */ }
+      toast(p);
+    });
+  }
+
   function renderPageNow() {
     switch (state.page) {
       case 'overview': renderOverview(); break;
@@ -5482,6 +6018,7 @@
       case 'qq': renderQq(); renderLogin(); break;
       case 'settings': renderSettings(); break;
       case 'about': renderAbout(); break;
+      case 'feedback': renderFeedback(); break;
       case 'switches': if (!swInputFocused()) renderSwitches(); break;
       default: break;
     }
@@ -5547,11 +6084,17 @@
     }, PAGE_LEAVE_MS);
   }
 
+  /* 信息架构二期：以下页面已经不占一级导航，但路由和页面都还在。
+     高亮交给它们现在实际归属的那个导航项（都归「设置与高级」），
+     否则冷启动一个 #/exec、#/qq 会「页面有内容 + 侧栏一个高亮都没有」。 */
+  var NAV_OWNER = { exec: 'settings', qq: 'settings', work: 'settings', external: 'settings' };
+
   function setPage(name) {
     if (PAGES.indexOf(name) < 0) name = 'overview';
     state.page = name;
+    var navName = NAV_OWNER[name] || name;
     $$('.nav-item').forEach(function (a) {
-      a.classList.toggle('is-active', a.getAttribute('data-page') === name);
+      a.classList.toggle('is-active', a.getAttribute('data-page') === navName);
     });
     switchPageTo(name);
     safe(renderPageNow);
@@ -5574,9 +6117,47 @@
     if (name === 'settings') refreshSleep();
     /* 关于页：进页拉一次 /api/health，别拿几十分钟前的 build 说「已是最新」 */
     if (name === 'about') loadHealth();
+    /* 总览：体检卡第一次进页自动跑一轮；有 20 秒连点保护，且不挂进 4 秒轮询 */
+    if (name === 'overview') {
+      bindHealthCheck();
+      if (state.hc) renderHealthCheck();
+      else if (state.overview) runHealthCheck();   /* 已经有总览数据才跑，否则等第一次轮询回来补跑 */
+      else renderHealthCheck();
+    }
     /* 扫码轮询只挂在「QQ 连接」页：离开就停，别在后台空转 */
     if (name === 'qq') enterLoginPage();
     else stopLoginPoll();
+  }
+
+  /* ---------------- 侧栏「一键体检」（IA 二期） ----------------
+     它不是独立页面，也没有 data-page：点了就跳到总览页，滚到体检卡上闪一下。
+     复用命令面板跳转的 is-flash 手法，只是样式挂在 .ov-health 上。 */
+
+  function jumpToHealthCard() {
+    var card = $('#ovHealth');
+    if (!card) return;
+    try { card.scrollIntoView({ block: 'center', behavior: prefReduceMotion() ? 'auto' : 'smooth' }); }
+    catch (e) { card.scrollIntoView(); }
+    card.classList.remove('is-flash');
+    void card.offsetWidth;   /* 强制重排，连点两次也能重新闪 */
+    card.classList.add('is-flash');
+    setTimeout(function () { card.classList.remove('is-flash'); }, 1800);
+  }
+
+  function bindNavHealth() {
+    var btn = $('#navHealth');
+    if (!btn || btn.dataset.jumpBound === '1') return;
+    btn.dataset.jumpBound = '1';
+    btn.addEventListener('click', function (e) {
+      e.preventDefault();
+      if (state.page !== 'overview') {
+        location.hash = '#/overview';
+        /* 换页动画 160ms + 入场 190ms，等它落地再滚，不然滚到的是旧页的高度 */
+        setTimeout(jumpToHealthCard, prefReduceMotion() ? 40 : PAGE_LEAVE_MS + 240);
+        return;
+      }
+      jumpToHealthCard();
+    });
   }
 
   /* ---------------- 在线时间页（2026-11-06） ----------------
@@ -6411,7 +6992,11 @@
      策略落在服务端 out\mem-config.json —— 桌面壳和 Python 侧车读同一份，避免三套口径。
      这里只做「读状态 / 写配置 / 触发回收」，真正把模型卸出内存的是侧车的 /unload。 */
 
-  var memState = { config: null, mem: null, embed: null, game: null, busy: false };
+  var memState = { config: null, mem: null, embed: null, game: null, busy: false, at: 0 };
+  /* 设置页每 4 秒重绘一次，会顺手调 renderMem。mem/status 每次都要 spawn 一个
+     powershell.exe 采进程树（父进程是 GUI，conhost 会先建窗再隐藏 → 默认终端是
+     Windows Terminal 的机器上会闪黑框）。所以 20 秒内不重复拉，动作类调用传 force。 */
+  var MEM_VIEW_TTL = 20000;
 
   function memMb(n) {
     var v = Number(n);
@@ -6482,9 +7067,11 @@
 
   function renderMem(force) {
     if (memState.busy && !force) return;
+    if (!force && memState.at && (Date.now() - memState.at) < MEM_VIEW_TTL) return;
     memPost('mem/status').then(function (j) {
       if (!j || !j.ok) throw new Error((j && j.error) || '状态读取失败');
       var d = j.data || {};
+      memState.at = Date.now();
       memState.config = d.config || null;
       memState.mem = d.mem || null;
       memState.embed = d.embed || null;
@@ -6591,6 +7178,8 @@
       bindOnline();
       bindChangelog();
       bindCommandPalette();
+      bindNavHealth();
+      bindFeedback();
       setPage(currentPage());
       loadHealth();
       poll();

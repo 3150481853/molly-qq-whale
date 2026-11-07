@@ -20,35 +20,36 @@
 
     <button class="nav-search" id="navSearch" type="button" aria-label="搜索控制台功能" title="搜索功能（Ctrl K）"><span aria-hidden="true">⌕</span><span>查找功能</span><kbd>Ctrl K</kbd></button>
     <nav class="nav" id="nav" aria-label="主导航">
-      <a class="nav-item" href="#/overview" data-page="overview"><span class="nav-icon" aria-hidden="true">⌂</span><span>总览</span></a>
+      <!-- 信息架构二期：按「她本身 → 她怎么说话 → 怎么连上 → 出问题怎么办」重排。
+           QQ 连接 / 任务与研究 / 模型与服务 退出了一级导航，入口在「设置 › 更多」，
+           路由（#/qq、#/work、#/external）和页面都还在。
+           侧栏高亮由 console.js 的 NAV_OWNER 把这些页面归到「设置」上。 -->
       <div class="nav-group">
-        <div class="nav-group-title">Molly 的日常</div>
+        <div class="nav-group-title">她的日常</div>
+        <a class="nav-item" href="#/overview" data-page="overview"><span class="nav-icon" aria-hidden="true">⌂</span><span>总览</span></a>
         <a class="nav-item" href="#/chats" data-page="chats"><span class="nav-icon" aria-hidden="true">◌</span><span>会话与消息</span></a>
-        <a class="nav-item" href="#/online" data-page="online"><span class="nav-icon" aria-hidden="true">◷</span><span>在线时间</span></a>
-        <a class="nav-item" href="#/memory" data-page="memory"><span class="nav-icon" aria-hidden="true">❀</span><span>Jasmine 记忆</span></a>
+        <a class="nav-item" href="#/memory" data-page="memory"><span class="nav-icon" aria-hidden="true">❀</span><span>茉莉花记忆</span></a>
         <a class="nav-item" href="#/pending" data-page="pending"><span class="nav-icon" aria-hidden="true">✓</span><span>待核实</span><span class="nav-badge" id="pendBadge" hidden>0</span></a>
         <a class="nav-item" href="#/stickers" data-page="stickers"><span class="nav-icon" aria-hidden="true">☺</span><span>表情包</span></a>
       </div>
       <div class="nav-group">
-        <div class="nav-group-title">她怎么回应</div>
-        <a class="nav-item" href="#/switches" data-page="switches"><span class="nav-icon" aria-hidden="true">◫</span><span>发言与互动</span></a>
+        <div class="nav-group-title">她的回应</div>
+        <a class="nav-item" href="#/switches" data-page="switches"><span class="nav-icon" aria-hidden="true">◫</span><span>发言开关</span></a>
         <a class="nav-item" href="#/budget" data-page="budget"><span class="nav-icon" aria-hidden="true">◒</span><span>积分与预算</span></a>
-        <a class="nav-item" href="#/work" data-page="work"><span class="nav-icon" aria-hidden="true">↗</span><span>任务与研究 · DSH</span></a>
+        <a class="nav-item" href="#/online" data-page="online"><span class="nav-icon" aria-hidden="true">◷</span><span>在线时间</span></a>
       </div>
       <div class="nav-group">
-        <div class="nav-group-title">连接与运行</div>
-        <a class="nav-item" href="#/qq" data-page="qq"><span class="nav-icon" aria-hidden="true">⌁</span><span>QQ 连接</span><span class="nav-badge is-warn nav-dot" id="loginBadge" hidden aria-hidden="true"></span></a>
-        <a class="nav-item" href="#/watchdog" data-page="watchdog"><span class="nav-icon" aria-hidden="true">◎</span><span>自动守护</span></a>
+        <div class="nav-group-title">出问题时</div>
+        <!-- 一键体检不是独立页面：点了滚到总览页的体检卡。没有 data-page，所以不会被高亮逻辑命中。 -->
+        <a class="nav-item nav-item-jump" href="#/overview" id="navHealth" data-jump="health"><span class="nav-icon" aria-hidden="true">⊕</span><span>一键体检</span></a>
         <a class="nav-item" href="#/ops" data-page="ops"><span class="nav-icon" aria-hidden="true">↻</span><span>进程与日志</span></a>
-        <a class="nav-item" href="#/external" data-page="external"><span class="nav-icon" aria-hidden="true">⊙</span><span>模型与服务</span></a>
+        <a class="nav-item" href="#/watchdog" data-page="watchdog"><span class="nav-icon" aria-hidden="true">◎</span><span>自动守护</span></a>
+        <a class="nav-item" href="#/feedback" data-page="feedback"><span class="nav-icon" aria-hidden="true">⚑</span><span>问题反馈</span></a>
       </div>
       <div class="nav-group">
-        <div class="nav-group-title">偏好与高级</div>
-        <a class="nav-item" href="#/settings" data-page="settings"><span class="nav-icon" aria-hidden="true">⚙</span><span>偏好设置</span></a>
+        <div class="nav-group-title">设置与高级</div>
+        <a class="nav-item" href="#/settings" data-page="settings"><span class="nav-icon" aria-hidden="true">⚙</span><span>设置</span></a>
         <a class="nav-item" href="#/about" data-page="about"><span class="nav-icon" aria-hidden="true">ⓘ</span><span>关于</span></a>
-        <details class="advanced-nav"><summary>高级操作</summary>
-          <a class="nav-item nav-sub" href="#/exec" data-page="exec"><span>所有执行块</span></a>
-        </details>
       </div>
     </nav>
 
@@ -92,6 +93,7 @@
           <div><strong>接下来想做什么？</strong><span>常用操作已放在这里，不必翻找设置。</span></div>
           <div class="quick-actions"><a class="btn btn-primary" href="#/memory">记一件事</a><a class="btn btn-ghost" href="#/stickers">整理表情包</a><a class="btn btn-ghost" href="#/qq">检查 QQ 连接</a></div>
         </div>
+        <div class="card ov-health" id="ovHealth"></div>
         <div class="stat-grid" id="ovStats"></div>
         <div class="card-grid" id="ovCards"></div>
       </section>
@@ -155,7 +157,7 @@
                   <circle cx="12" cy="12" r="1.3"/>
                 </g>
               </svg>
-              <span>茉莉花记忆系统</span>
+              <span>茉莉花记忆</span>
             </h1>
             <p class="page-sub" id="memSub">Jasmine · 正在读取…</p>
           </div>
@@ -234,7 +236,7 @@
       <!-- 预算 -->
       <section class="page" data-page="budget" hidden>
         <div class="page-head">
-          <h1>预算</h1>
+          <h1>积分与预算</h1>
           <p class="page-sub">每日积分上限与实际用量。可在下方直接调整，修改后立即生效。</p>
         </div>
         <div class="card-grid" id="budgetCards"></div>
@@ -243,13 +245,17 @@
 
       <!-- DSH 专属工作流：控制台不复制任务执行器 -->
       <section class="page" data-page="work" hidden>
-        <div class="page-head"><h1>任务与研究</h1><p class="page-sub">任务、研究、插件开发与运行记录统一在 DSH 中管理。这里不再提供第二套执行器。</p></div>
+        <div class="page-head">
+          <p class="page-crumb"><a href="#/settings">设置与高级</a><span class="page-crumb-sep">/</span><span>任务与研究</span></p>
+          <h1>任务与研究</h1>
+          <p class="page-sub">任务、研究、插件开发与运行记录统一在 DSH 中管理。这里不再提供第二套执行器。</p>
+        </div>
         <div class="card-grid" id="workCards"></div>
         <div class="card card-block dsh-handoff">
           <span class="eyebrow">DEEPSEEK HARNESS</span>
           <h2>把复杂工作交给工作台</h2>
           <p>在 DSH 中可以分步骤执行、跟踪进度、恢复会话；插件工坊则负责草稿、隔离测试与打包。测试和打包不等于安装或启用插件。</p>
-          <div class="row-actions"><a class="btn btn-primary" id="dshWorkspaceLink" href="http://127.0.0.1:8816" target="_blank" rel="noopener">打开 DSH 工作台 ↗</a><a class="btn btn-ghost" href="#/overview">返回 Molly 总览</a></div>
+          <div class="row-actions"><a class="btn btn-primary" id="dshWorkspaceLink">打开 DSH 工作台</a><a class="btn btn-ghost" href="#/overview">返回 Molly 总览</a></div>
           <p class="muted" id="dshWorkspaceHint">DSH 的网页版只认它自己打印的授权地址；在 Molly 桌面应用里点上面的按钮会把已经打开的 DSH 窗口提到最前。</p>
           <p class="muted">Molly 的 QQ 回复、记忆和表情仍在这里管理；DSH 离线不会影响本地控制台。</p>
         </div>
@@ -258,8 +264,8 @@
       <!-- 守护 -->
       <section class="page" data-page="watchdog" hidden>
         <div class="page-head">
-          <h1>守护</h1>
-          <p class="page-sub">watchdog 的巡检状态、配置与计划任务。</p>
+          <h1>自动守护</h1>
+          <p class="page-sub">自动巡检的状态、通知与计划任务。</p>
         </div>
         <!-- 骂人模式开关：独立容器。守护不可达时它也要照常显示与可点。 -->
         <div class="card-grid" id="pestCards"></div>
@@ -279,7 +285,7 @@
       <!-- 运维：进程启停、心跳中继、推送、日志。停/重启只做页内确认弹层，不要求手打 RESTART -->
       <section class="page" data-page="ops" hidden>
         <div class="page-head">
-          <h1>运维</h1>
+          <h1>进程与日志</h1>
           <p class="page-sub">Molly 进程、心跳中继、PushPlus 推送与日志。日志只在页面里看和复制，不提供下载。</p>
         </div>
         <div class="card-grid" id="opsCards"></div>
@@ -315,7 +321,8 @@
       <section class="page" data-page="external" hidden>
         <div class="page-head page-head-row">
           <div>
-            <h1>外部服务</h1>
+            <p class="page-crumb"><a href="#/settings">设置与高级</a><span class="page-crumb-sep">/</span><span>模型与服务</span></p>
+            <h1>模型与服务</h1>
             <p class="page-sub">网关计费与模型清单、服务器中继心跳。读不到时只标红，不拖垮整页。</p>
           </div>
           <button class="btn btn-ghost btn-sm" id="extReload" type="button">刷新</button>
@@ -349,6 +356,7 @@
       <!-- QQ 连接（原 NapCat 页改名；内部路由/字段仍叫 napcat 以兼容老配置和收藏） -->
       <section class="page" data-page="qq" hidden>
         <div class="page-head">
+          <p class="page-crumb"><a href="#/settings">设置与高级</a><span class="page-crumb-sep">/</span><span>QQ 连接</span></p>
           <h1>QQ 连接</h1>
           <p class="page-sub">Molly 与 QQ 的链路状态、客户端信息与扫码入口。这里判的是「Molly 连没连上 QQ」，不是「QQ 进程开没开」。</p>
         </div>
@@ -360,8 +368,8 @@
             <li><b>SnowLuma 后端</b>：触发计划任务 <span class="mono">SnowLuma-Relogin</span>，约 10~25 秒后 QQ 窗口弹出，用手机扫码即可（SnowLuma 进程不动，设备指纹不变）。</li>
             <li><b>回滚后端</b>：现场生成一张登录二维码（约 2–6 秒），用手机 QQ 扫码，扫完即失效。</li>
             <li>扫码后 QQ 窗口会自动关闭；看到「Molly 已连接 QQ」就成功了，不用再刷新。</li>
-            <li>30 秒还不见窗口：先看 <span class="mono">${MOLLY_ROOT}\qq-whale\out\snowluma-runtime.out.log</span> 和 <span class="mono">${MOLLY_ROOT}\qq-whale\out\snowluma-boot.log</span>；也可以在「运维」页的日志里选「SnowLuma 运行 / 启动」看最近 200 行。</li>
-            <li>还不行就去「守护」看 watchdog 结论，或到「执行块」重新检查连接。</li>
+            <li>30 秒还不见窗口：先看 <span class="mono">${MOLLY_ROOT}\qq-whale\out\snowluma-runtime.out.log</span> 和 <span class="mono">${MOLLY_ROOT}\qq-whale\out\snowluma-boot.log</span>；也可以在「进程与日志」页的日志里选「SnowLuma 运行 / 启动」看最近 200 行。</li>
+            <li>还不行就去「自动守护」看巡检结论，或到「设置 › 高级」里重新检查连接。</li>
           </ul>
           <div class="login-status" id="loginStatus"></div>
           <div class="login-success" id="loginSuccess" hidden></div>
@@ -391,6 +399,7 @@
       <!-- 执行块 -->
       <section class="page" data-page="exec" hidden>
         <div class="page-head">
+          <p class="page-crumb"><a class="page-crumb-back" href="#/settings">← 返回设置</a><span class="page-crumb-path">设置 · 高级 / 执行块</span></p>
           <h1>执行块</h1>
           <p class="page-sub">QQ、守护与插件的 11 个高级动作。任务和研究请到 DSH；危险动作仍需确认。</p>
         </div>
@@ -481,6 +490,17 @@
             <button class="btn btn-ghost" id="setOpenLogs" type="button">打开日志抽屉</button>
           </div>
         </div>
+        <!-- 更多：退出了一级导航的四个页面都从这里进。地址栏里 #/qq、#/work、#/external、#/exec 仍然直接可用。 -->
+        <div class="card card-block" id="advancedCard">
+          <h2 class="card-title">更多</h2>
+          <p class="card-sub">这几页不再占左侧导航，入口收在这里。日常使用不需要打开它们。</p>
+          <div class="row-actions more-links">
+            <a class="btn btn-ghost" href="#/qq">QQ 连接<span class="nav-badge is-warn nav-dot" id="loginBadge" hidden aria-hidden="true"></span></a>
+            <a class="btn btn-ghost" href="#/work">任务与研究</a>
+            <a class="btn btn-ghost" href="#/external">模型与服务</a>
+            <a class="btn btn-ghost" href="#/exec">执行块（底层动作）</a>
+          </div>
+        </div>
       </section>
 
       <!-- 关于 -->
@@ -522,7 +542,7 @@
             <article class="card">
               <h2 class="card-title">数据与连接</h2>
               <div id="aboutFacts">
-                <div class="kv"><span class="kv-k">Jasmine 记忆</span><span class="kv-v">—</span></div>
+                <div class="kv"><span class="kv-k">茉莉花记忆</span><span class="kv-v">—</span></div>
               </div>
             </article>
           </div>
@@ -572,6 +592,115 @@
                 <div class="kv"><span class="kv-k">许可</span><span class="kv-v">私有自用</span></div>
               </div>
             </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- 问题反馈（2026-11-06）：bot 名称必填，日志可选，提交后本地也留一份 -->
+      <section class="page fb-page" data-page="feedback" id="fbPage" hidden>
+        <div class="page-head">
+          <h1>问题反馈</h1>
+          <p class="page-sub">写清「看到什么、期望什么」，勾上日志；提交会直接发到论坛反馈区（免登录），本机同时留一份存档。论坛连不上或被关键词拦下等人工审核时，会把写好的 Markdown 摆出来供复制粘贴。</p>
+        </div>
+        <div class="fb-grid">
+          <article class="card fb-card">
+            <!-- 蜜罐（2026-11-07）：论坛接口要 website 必须为空。这里肉眼不可见，
+                 真人不会填；自动填充或脚本填了就当机器人处理，不发给服务器。 -->
+            <input id="fbSite" name="website" class="fb-hp" tabindex="-1" autocomplete="off" aria-hidden="true">
+            <div class="fb-field">
+              <label class="fb-label" for="fbBot">bot 名称 <em>必填</em></label>
+              <input class="input" id="fbBot" maxlength="60" required aria-required="true" placeholder="比如 Molly / 茉莉花">
+              <span class="fb-hint">同一套插件很多人部署，站长要靠它认出是哪一台。</span>
+            </div>
+            <div class="fb-field">
+              <label class="fb-label" for="fbQQ">联系方式（QQ） <em>必填</em></label>
+              <input class="input" id="fbQQ" maxlength="15" inputmode="numeric" required aria-required="true" placeholder="例如 123456789">
+              <span class="fb-hint">必填。公开列表里会打码成 123****89，完整号只有站长能看到。</span>
+            </div>
+            <div class="fb-field">
+              <label class="fb-label" for="fbTitle">一句话标题 <em>必填</em></label>
+              <input class="input" id="fbTitle" maxlength="120" placeholder="比如 在线时间页在 90 天视图下柱状图挤成一条">
+            </div>
+            <div class="fb-duo">
+              <div class="fb-field">
+                <label class="fb-label" for="fbKind">类型</label>
+                <select class="input" id="fbKind">
+                  <option value="bug">功能坏了</option>
+                  <option value="ui">界面 / 显示问题</option>
+                  <option value="perf">卡顿 / 占用高</option>
+                  <option value="docs">文档看不懂</option>
+                  <option value="feature">想要的新功能</option>
+                  <option value="other">其它</option>
+                </select>
+              </div>
+              <div class="fb-field">
+                <label class="fb-label" for="fbAt">发生时间</label>
+                <input class="input" id="fbAt" type="datetime-local">
+              </div>
+            </div>
+            <div class="fb-field">
+              <label class="fb-label" for="fbDesc">发生了什么 <em>必填</em></label>
+              <textarea class="input fb-area" id="fbDesc" rows="5" placeholder="看到的（现象）、期望的（应该怎样）、实际区别"></textarea>
+            </div>
+            <div class="fb-field">
+              <label class="fb-label" for="fbSteps">怎么复现（可选）</label>
+              <textarea class="input fb-area" id="fbSteps" rows="3" placeholder="点了哪、发了什么、第几步开始不对"></textarea>
+            </div>
+            <div class="fb-field">
+              <span class="fb-label">附带日志（会脱敏：QQ 号打码、路径换成 &lt;本机&gt;、token 隐去）</span>
+              <div class="fb-checks" id="fbLogs">
+                <label class="fb-check"><input type="checkbox" value="console" checked> 控制台</label>
+                <label class="fb-check"><input type="checkbox" value="watchdog" checked> 守护</label>
+                <label class="fb-check"><input type="checkbox" value="plugin"> 插件</label>
+              </div>
+            </div>
+            <div class="fb-field">
+              <label class="fb-check"><input type="checkbox" id="fbContactPublic"> 允许在公开列表里完整显示我的 QQ</label>
+              <span class="fb-hint">默认不勾。不勾时论坛列表里显示成 123****89，完整号码只有站长能看到。</span>
+            </div>
+            <div class="fb-actions">
+              <button class="btn btn-primary" id="fbSubmit" type="button">提交反馈</button>
+              <span class="fb-status" id="fbStatus">还没提交过</span>
+            </div>
+            <div class="fb-result" id="fbResult" hidden>
+              <div class="fb-result-head">
+                <span id="fbResultTitle">提交结果</span>
+                <span class="fb-result-acts">
+                  <button class="btn btn-ghost btn-sm" id="fbCopy" type="button">复制内容</button>
+                  <button class="btn btn-ghost btn-sm" id="fbOpen" type="button">打开论坛反馈区</button>
+                  <button class="btn btn-ghost btn-sm" id="fbIssue" type="button" hidden>去 GitHub 提 issue</button>
+                </span>
+              </div>
+              <textarea class="input fb-md" id="fbMarkdown" rows="10" readonly></textarea>
+            </div>
+          </article>
+          <div class="fb-side">
+          <article class="card fb-card fb-recent-card">
+            <div class="fb-history-head">
+              <h2 class="card-title">论坛上最近的反馈</h2>
+              <button class="btn btn-ghost btn-sm" id="fbRecentOpen" type="button">打开论坛反馈区</button>
+            </div>
+            <div class="fb-recent" id="fbRecent"></div>
+          </article>
+<article class="card fb-card fb-history">
+            <div class="fb-history-head">
+              <h2 class="card-title">本机存档</h2>
+              <button class="btn btn-ghost btn-sm" id="fbReload" type="button">重新读取</button>
+            </div>
+            <p class="fb-hint" id="fbDir">—</p>
+            <div class="fb-list" id="fbList"></div>
+          </article>
+          <article class="card fb-card fb-help">
+            <h2 class="card-title">提交之后会怎样</h2>
+            <ol class="fb-steps">
+              <li><b>本机先留一份</b>存档在 <code>&lt;Molly&gt;\qq-whale\out\feedback</code>，断网、论坛挂了都不会丢。</li>
+              <li><b>直接发论坛</b>：填完点提交就走论坛的免登录接口，一般当场发布；命中关键词会进待审队列，等站长过一眼。</li>
+              <li><b>发布不了时</b>：论坛连不上、限流或待审时，结果里会摆出写好的 Markdown，一键复制就能手贴。</li>
+              <li><b>提醒站长</b>：提交成功会同时给站长推一条消息（配置了推送通道才发）。</li>
+              <li><b>从 GitHub 部署的</b>：帖子发不出去时，结果里会多一个「去 GitHub 提 issue」，标题和正文都替你填好。</li>
+            </ol>
+            <p class="fb-hint">日志会自动脱敏：QQ 号打码、本机路径换成 &lt;本机&gt;、token 一类字段直接隐去。</p>
+          </article>
           </div>
         </div>
       </section>

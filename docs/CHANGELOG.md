@@ -18,6 +18,9 @@
 - **悬空引用豁免（`lib/engine.js`）**：`quoteStale = gap >= 4` 的丢弃规则对 `anchored` 命中豁免，否则刚接回来的正题又会因 gap 大而不挂引用。
 - **提示词（`lib/engine-context.js`）**：新增「# 这一轮你要接的是这几条」段（`thisTurn ≥ 2` 时编号列出，要求**先回答第 1 条**、别只接最后一条）；群体噪声段从「只接最近的那一条」改成「只接一个人、接他那句正事」。
 - **可观测**：`stats.carryMerged` / `stats.quoteAnchored` 两个计数器，`replyTrace` 新增 `carry` 阶段。
+- **双泳道去重（`lib/engine.js`，2026-11-07 追加）**：同一个人半分钟内先闲扯再 `@` 她时，两条泳道会各答一遍（群里同一件事回两次、引用各挂一条）。新增 `laneMergeDecision()` 裁决（`@我` 赢、闲聊让位）、`rememberAnswered()` / `alreadyAnswered()` 记「这几条答过了」、`carry` 的 key 从 `jobId` 改成会话 key（跨泳道能接上）。trace 新增 `lane-merge` / `lane-yield` / `skip-covered`。
+- **一条一句（`lib/persona.js` + `lib/engine.js`）**：`splitReply()` 换行也分条（原来只认 `<sep/>`，两句话会挤在一个气泡里），新增 `maxTextBubblesPerReply`（默认 5）兜住刷屏。
+- **印象里的「主人」（`lib/relations.js` + `lib/engine-context.js`）**：`contextFor()` 接收 `ownerQq`，非主人说话时过滤掉含「主人」的印象——`relations.json` 里「他是你的主人」这类脏印象不再盖掉认人护栏。
 
 **为什么**
 

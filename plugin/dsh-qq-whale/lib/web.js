@@ -26,6 +26,9 @@ import path from 'node:path'
 
 import { addLearnedHash, removeLearnedHash } from './sticker-learn.js'
 import { clockText, parseHHMM } from './clock.js'
+// 分时规则（2026-11-08 主人 m06924/m06974）：校验 + 求值都在 time-rules.js 里，
+// 引擎与这两个 HTTP 路由共用同一套语义，避免两边各写一份正则跑偏。
+import * as TR from './time-rules.js'
 // qq 是记忆的唯一身份（2026-10-19）：校验规则只写在 memory.js 一处，
 // 免得控制台和引擎两边各写一套正则、慢慢就跑偏了。
 import {
@@ -1060,6 +1063,150 @@ export class WebWidget {
         } catch (err) {
           sendJson(res, 500, { ok: false, error: '写作息失败：' + ((err && err.message) || err) })
         }
+      }),
+    })
+
+    /*
+     * 分时规则（2026-11-08 主人 m06924 / m06974）：「干脆唱歌允许时间也放到设置里面能调整吧」
+     * 睡觉 / 语音 / 唱歌 三件事统一存 <dataDir>/time-rules.json，控制台「设置 → 时间规则」读写它。
+     *   GET  → { rules, active, now, file, exists }
+     *   POST → body { rules: [...] } 全量替换（任何一条不合法就整批拒绝，不写半份）
+     * 语义：规则文件存在即权威（某 scope 没有规则 = 不限制）；不存在才回退旧字段。
+     */
+    add({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/time/rules`,
+      ...wrap(async (req, res) => {
+        const e = this.engineRef?.()
+        if (!e || typeof e.timeRulesPath !== 'function') {
+          sendJson(res, 503, { ok: false, error: '引擎还没就绪，稍后再试' })
+          return
+        }
+        const file = e.timeRulesPath()
+        const state = () => {
+          const doc = e.timeRulesDoc()
+          const now = e.clockNowParts()
+          return {
+            ok: true,
+            file,
+            exists: Boolean(doc.exists),
+            rules: doc.rules || [],
+            active: TR.evalAll(doc, now),
+            now,
+            timezone: '北京时间',
+            scopes: TR.SCOPE_LABELS,
+          }
+        }
+        if (req.method === 'GET') {
+          sendJson(res, 200, state())
+          return
+        }
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          return
+        }
+        const raw = await readBody(req)
+        let body
+        try {
+          body = JSON.parse(raw || '{}')
+        } catch {
+          sendJson(res, 400, { ok: false, error: '请求体不是合法 JSON' })
+          return
+        }
+        const norm = TR.normalizeDoc(body)
+        if (!norm.ok) {
+          sendJson(res, 400, { ok: false, error: norm.error })
+          return
+        }
+        try {
+          fs.mkdirSync(path.dirname(file), { recursive: true })
+          if (fs.existsSync(file)) {
+            try {
+              fs.copyFileSync(file, file + '.bak')
+            } catch {}
+          }
+          const payload = { ...norm.doc, updatedAt: new Date().toISOString(), by: 'console' }
+          const tmp = file + '.tmp'
+          fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8')
+          fs.renameSync(tmp, file)
+          // 让引擎的 mtime 缓存立刻失效（不等下一轮）
+          try {
+            e._timeRulesCache = null
+          } catch {}
+          try {
+            const names = norm.doc.rules.map((r) => TR.describeRule(r)).join('；') || '（空）'
+            this.logger?.('info', '控制台改分时规则：' + names)
+          } catch {}
+          sendJson(res, 200, state())
+        } catch (err) {
+          sendJson(res, 500, { ok: false, error: '写分时规则失败：' + ((err && err.message) || err) })
+        }
+      }),
+    })
+
+    /*
+     * 分时规则「某个时刻会怎样」——控制台加规则时先看一眼，跨午夜/星期边界最容易搞错。
+     *   POST → body { at?: "2026-11-08 01:00" | ISO | 毫秒 }，缺省用现在
+     * 返回每个 scope 命中的规则 + 每条规则是否命中。
+     */
+    add({
+      kind: 'exact',
+      path: `${ROUTE_PREFIX}/time/preview`,
+      ...wrap(async (req, res) => {
+        const e = this.engineRef?.()
+        if (!e || typeof e.clockNowParts !== 'function') {
+          sendJson(res, 503, { ok: false, error: '引擎还没就绪，稍后再试' })
+          return
+        }
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          return
+        }
+        const raw = await readBody(req)
+        let body = {}
+        try {
+          body = JSON.parse(raw || '{}')
+        } catch {
+          sendJson(res, 400, { ok: false, error: '请求体不是合法 JSON' })
+          return
+        }
+        let atMs = Date.now()
+        const at = body?.at
+        if (at !== undefined && at !== null && at !== '') {
+          if (typeof at === 'number' && Number.isFinite(at)) {
+            atMs = at > 1e12 ? at : at * 1000
+          } else {
+            let s = String(at).trim().replace(' ', 'T')
+            if (!/[zZ]|[+-]\d{2}:?\d{2}$/.test(s)) s += '+08:00'
+            const ms = Date.parse(s)
+            if (!Number.isFinite(ms)) {
+              sendJson(res, 400, { ok: false, error: 'at 看不懂，给 "2026-11-08 01:00" 或 ISO 或毫秒' })
+              return
+            }
+            atMs = ms
+          }
+        }
+        const doc = e.timeRulesDoc()
+        const parts = e.clockNowParts(atMs)
+        const rows = (doc.rules || []).map((r) => ({
+          id: r.id,
+          name: r.name,
+          scopes: r.scopes,
+          start: r.start,
+          end: r.end,
+          days: r.days,
+          enabled: r.enabled,
+          hit: TR.ruleHit(r, parts),
+        }))
+        sendJson(res, 200, {
+          ok: true,
+          at: atMs,
+          now: parts,
+          timezone: '北京时间',
+          exists: Boolean(doc.exists),
+          active: TR.evalAll(doc, parts),
+          rules: rows,
+        })
       }),
     })
 

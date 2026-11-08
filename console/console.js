@@ -3838,6 +3838,163 @@
       .then(function () { if (btn) btn.disabled = false; });
   };
 
+  /* ---------------- 分时规则（2026-11-08 主人 m06924 / m06974） ----------------
+     需求原话：「干脆唱歌允许时间也放到设置里面能调整吧…我们目前只有睡觉时间吧」。
+     · 一条规则可以同时管几件事（睡觉 / 语音 / 唱歌），按星期生效；
+     · 结束早于开始 = 跨午夜（23:50–09:00），开始 = 结束 = 整天；
+     · 规则文件的校验与求值都在宿主的 lib/time-rules.js 里，前端只编辑 + 透传，
+       免得两边各写一套语义慢慢跑偏。改完立即生效，不用重启。 */
+  var TR_SCOPES = [['sleep', '睡觉'], ['voice', '语音'], ['sing', '唱歌']];
+  var TR_DAYS = [['1', '一'], ['2', '二'], ['3', '三'], ['4', '四'], ['5', '五'], ['6', '六'], ['7', '日']];
+  var trState = { rules: [], exists: false, active: null, loaded: false };
+
+  function trEsc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c];
+    });
+  }
+
+  function trRowHtml(r, i) {
+    var scopes = (r.scopes || []).map(function (s) { return s; });
+    var days = (r.days || []).map(function (d) { return String(d); });
+    var scopeHtml = TR_SCOPES.map(function (s) {
+      return '<label class="card-sub" style="margin:0;white-space:nowrap">' +
+        '<input type="checkbox" class="tr-scope" value="' + s[0] + '"' + (scopes.indexOf(s[0]) >= 0 ? ' checked' : '') + '> ' + s[1] +
+        '</label>';
+    }).join('');
+    var dayHtml = TR_DAYS.map(function (d) {
+      return '<label class="card-sub" style="margin:0;white-space:nowrap">' +
+        '<input type="checkbox" class="tr-day" value="' + d[0] + '"' + (days.indexOf(d[0]) >= 0 ? ' checked' : '') + '> ' + d[1] +
+        '</label>';
+    }).join('');
+    return '<div class="tr-row" data-i="' + i + '" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:10px 0;border-bottom:1px solid rgba(128,128,128,.18)">' +
+      '<input class="input tr-name" type="text" maxlength="24" placeholder="规则名称" value="' + trEsc(r.name || '') + '" style="width:132px">' +
+      '<span style="display:flex;gap:8px;flex-wrap:wrap">' + scopeHtml + '</span>' +
+      '<input class="input tr-start" type="time" value="' + trEsc(r.start || '23:50') + '" style="width:112px">' +
+      '<span class="card-sub" style="margin:0">–</span>' +
+      '<input class="input tr-end" type="time" value="' + trEsc(r.end || '09:00') + '" style="width:112px">' +
+      '<span style="display:flex;gap:6px;flex-wrap:wrap">' + dayHtml + '</span>' +
+      '<label class="card-sub" style="margin:0;white-space:nowrap"><input type="checkbox" class="tr-enabled"' + (r.enabled === false ? '' : ' checked') + '> 启用</label>' +
+      '<button class="btn btn-ghost" type="button" onclick="window.__mollyDelTimeRule(' + i + ')">删除</button>' +
+      '</div>';
+  }
+
+  function trStatusText() {
+    if (!trState.loaded) return '正在读取规则…';
+    if (!trState.exists) {
+      return '还没规则文件：现在用的是旧配置（睡觉 / 语音 23:50–09:00，唱歌跟随语音）。保存一次规则后就由规则接管。';
+    }
+    var a = trState.active || {};
+    var parts = [];
+    if ((a.sleep || []).length) parts.push('睡觉中：' + a.sleep.map(function (r) { return r.name; }).join('、'));
+    if ((a.voice || []).length) parts.push('语音静默：' + a.voice.map(function (r) { return r.name; }).join('、'));
+    if ((a.sing || []).length) parts.push('唱歌静默：' + a.sing.map(function (r) { return r.name; }).join('、'));
+    return parts.length ? ('现在命中 → ' + parts.join('；')) : '现在没有规则命中（都可以）。';
+  }
+
+  function trRender() {
+    var box = $('#timeRulesBox');
+    var status = $('#timeRulesStatus');
+    if (status) status.textContent = trStatusText();
+    if (!box) return;
+    if (!trState.rules.length) {
+      setHtml(box, '<div class="card-sub" style="margin:0">还没有规则。点「+ 新增规则」加一条，比如 23:50–09:00 管睡觉+语音+唱歌。</div>');
+      return;
+    }
+    setHtml(box, trState.rules.map(trRowHtml).join(''));
+  }
+
+  function trCollect() {
+    var rows = document.querySelectorAll('#timeRulesBox .tr-row');
+    var out = [];
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      var q = function (sel) { return row.querySelector(sel); };
+      var scopes = [];
+      var sc = row.querySelectorAll('.tr-scope');
+      for (var k = 0; k < sc.length; k++) if (sc[k].checked) scopes.push(sc[k].value);
+      var days = [];
+      var dc = row.querySelectorAll('.tr-day');
+      for (var m = 0; m < dc.length; m++) if (dc[m].checked) days.push(Number(dc[m].value));
+      out.push({
+        id: (trState.rules[i] && trState.rules[i].id) || '',
+        name: (q('.tr-name') || {}).value || '',
+        scopes: scopes,
+        start: (q('.tr-start') || {}).value || '',
+        end: (q('.tr-end') || {}).value || '',
+        days: days,
+        enabled: !!(q('.tr-enabled') || {}).checked
+      });
+    }
+    return { rules: out };
+  }
+
+  function refreshTimeRules() {
+    if (!$('#timeRulesBox')) return;
+    fetch('/api/time-rules', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j || !j.ok) throw new Error((j && j.error) || '读取失败');
+        trState.rules = j.rules || [];
+        trState.exists = !!j.exists;
+        trState.active = j.active || null;
+        trState.loaded = true;
+        trRender();
+        var hint = $('#timeRulesHint');
+        if (hint) hint.textContent = '';
+      })
+      .catch(function (e) {
+        trState.loaded = true;
+        var hint = $('#timeRulesHint');
+        if (hint) hint.textContent = '读取失败：' + ((e && e.message) || e) + '（刷新页面再试）';
+      });
+  }
+
+  window.__mollyAddTimeRule = function () {
+    if (!trState.loaded) { toast('还没读到规则，先刷新页面再改'); return; }
+    // 先把正在编辑的内容收下来，别让新行把已改的东西冲掉
+    if (trState.rules.length) trState.rules = trCollect().rules;
+    trState.rules.push({
+      id: '', name: '新规则', scopes: ['sing'], start: '23:50', end: '09:00',
+      days: [1, 2, 3, 4, 5, 6, 7], enabled: true
+    });
+    trRender();
+  };
+
+  window.__mollyDelTimeRule = function (i) {
+    if (trState.rules.length) trState.rules = trCollect().rules;
+    trState.rules.splice(Number(i), 1);
+    trRender();
+  };
+
+  window.__mollySaveTimeRules = function () {
+    if (!trState.loaded) { toast('还没读到规则，先刷新页面再改'); return; }
+    var payload = trCollect();
+    var bad = payload.rules.filter(function (r) { return !r.scopes.length || !r.days.length || !r.start || !r.end; });
+    if (bad.length) { toast('有规则没选全（管哪几件事 / 星期 / 时间）'); return; }
+    var btn = $('#timeRulesSave');
+    if (btn) btn.disabled = true;
+    fetch('/api/time-rules', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (j && j.ok) {
+          trState.rules = j.rules || [];
+          trState.exists = !!j.exists;
+          trState.active = j.active || null;
+          trRender();
+          toast('分时规则已保存，立即生效');
+        } else {
+          toast('保存失败：' + ((j && j.error) || '未知错误'));
+        }
+      })
+      .catch(function (e) { toast('保存失败：' + (e && e.message ? e.message : e)); })
+      .then(function () { if (btn) btn.disabled = false; });
+  };
+
   function renderSettings() {
     var box = $('#setCards');
     if (!box) return;
@@ -3878,7 +4035,7 @@
         state.health = j || {};
         var fv = $('#footVersion');
         if (fv && state.health.version) fv.textContent = 'v' + state.health.version;
-        if (state.page === 'settings') { safe(renderSettings); safe(refreshSleep); }
+        if (state.page === 'settings') { safe(renderSettings); safe(refreshSleep); safe(refreshTimeRules); }
         /* 关于页的版本/构建也吃 health：进页时那一次拉完要把卡片重绘一遍 */
         if (state.page === 'about') safe(renderAbout);
       })
@@ -4737,7 +4894,7 @@
     else if (p === 'ops') { loadOpsHeartbeat(); if ($('#opsLogBody')) loadOpsLogs(); }
     else if (p === 'external') loadExternal();
     else if (p === 'qq') enterLoginPage();
-    else if (p === 'settings') refreshSleep();
+    else if (p === 'settings') { refreshSleep(); refreshTimeRules(); }
     else if (p === 'about') loadHealth();
     else if (p === 'feedback') loadFeedback(true);
     if (notify) toast('已刷新当前页');
@@ -6118,7 +6275,7 @@
     /* 作息：进「设置」页必须现拉一次。以前只靠 loadHealth 的 then 里顺手刷，
        启动时若 state.page 还没变成 settings 就永远不刷，表单一直是 HTML 里的
        默认 23:50/09:00——主人一保存就把真实作息覆盖成默认值。 */
-    if (name === 'settings') refreshSleep();
+    if (name === 'settings') { refreshSleep(); refreshTimeRules(); }
     /* 关于页：进页拉一次 /api/health，别拿几十分钟前的 build 说「已是最新」 */
     if (name === 'about') loadHealth();
     /* 总览：体检卡第一次进页自动跑一轮；有 20 秒连点保护，且不挂进 4 秒轮询 */

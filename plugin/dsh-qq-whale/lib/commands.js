@@ -1575,6 +1575,28 @@ export class CommandExecutor {
             if (text) return text
           }
           // 找到了自己那条 followup，但这一轮还没产出 —— 交给调用方继续等
+          /*
+           * 2026-11-08 主人 m06800：真机上「命令 唱歌 期待夏天」的干活会话
+           * **确实答了**（「我这会儿发不了语音，嗓子用不上…」），QQ 却收到
+           * 「执行失败：会话没有产出任何内容」——说明这条轮次区间里抽空了
+           * （压缩/插入其它 user 消息把边界挤歪）。这里补一道兜底：区间内找不到，
+           * 就在「自己那条 followup 之后」的全量里找最后一条 assistant 文本；
+           * 宁可晚一点，也不能把已经答了的话当成失败吞掉。
+           */
+          for (let i = msgs.length - 1; i > mine; i--) {
+            const m = msgs[i]
+            if (m?.role !== 'assistant') continue
+            const blocks = Array.isArray(m.content) ? m.content : []
+            const text = blocks
+              .filter((b) => b?.type === 'text' && typeof b.text === 'string')
+              .map((b) => b.text)
+              .join('\n')
+              .trim()
+            if (text) {
+              this.logger('warn', `轮次区间里没找到回复，退回本会话最后一条 assistant（i=${i}）：${String(task || '').slice(0, 30)}`)
+              return text
+            }
+          }
           return ''
         }
       }

@@ -59,6 +59,30 @@ export function legacyStringToSegments(s) {
 }
 
 /**
+ * 剥掉宿主/其他 agent 塞进消息正文里的「内部事件引用」。
+ *
+ * 症状（2026-11-07 线上，群 666666666）：对方那边有 agent 账号在群里说话，
+ * 消息正文里带着 `<acp tokens="13" type="text" time="2026-11-07 23:01:41">m00012</acp>`。
+ * Molly 把它当正文念了出来，质检直接判 `source_missing`「引用了未召回的编号：m00012」，
+ * 近三小时 89 条回复里 15 条（17%）栽在这上面；而且这东西还会被写进记忆。
+ *
+ * 出站侧（persona-sanitize / persona）本来就有同样的剥离，问题是入站没洗：
+ * 模型看到了，就学着说。所以这里在归一化这一道统一洗掉，提示词/记忆/回复三处一次干净。
+ */
+export function stripHostRefs(input) {
+  let t = String(input ?? '')
+  if (!t) return ''
+  // ① 成对的整块删（连同里面的 m00012）
+  t = t.replace(/<acp\b[^>]*>[\s\S]*?<\/acp>/gi, ' ')
+  // ② 落单的标签单独删
+  t = t.replace(/<\/?acp\b[^>]*>/gi, ' ')
+  // ③ 剩下的裸编号（`m00012` 这种五位数事件引用）
+  t = t.replace(/\bm\d{5}\b/gi, ' ')
+  t = t.replace(/[ \t]{2,}/g, ' ')
+  return t.replace(/\s+([，。、,.!?！？）)])/g, '$1').trim()
+}
+
+/**
  * 把 OneBot 的 message（array 或 string）归一成纯文本 + 分段元信息。
  *
  * 返回 { text, segments, images, faces, ats, replyTo, isAtMe, hasSelfFace }
@@ -148,7 +172,7 @@ export function normalizeMessage(raw, selfId) {
     }
   }
 
-  return { text: text.trim(), segments, images, faces, ats, replyTo, isAtMe, hasSelfFace }
+  return { text: stripHostRefs(text), segments, images, faces, ats, replyTo, isAtMe, hasSelfFace }
 }
 
 /**
@@ -284,7 +308,7 @@ function quoteSegmentsToText(raw, images = []) {
         break
     }
   }
-  return out
+  return stripHostRefs(out)
 }
 
 /** message_id 该传数字还是字符串：纯数字且在安全整数范围内就转数字，其余原样（有超长 ID）。 */

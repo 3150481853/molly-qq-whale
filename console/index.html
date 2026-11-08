@@ -484,6 +484,17 @@
             <span class="card-sub" id="sleepHint" style="margin:0"></span>
           </div>
         </div>
+        <div class="card card-block" id="timeRulesCard">
+          <h2 class="card-title">分时规则（睡觉 / 语音 / 唱歌）</h2>
+          <p class="card-sub">一条规则可以同时管几件事：到点就睡觉、不发语音、不唱歌。结束时间早于开始时间＝跨午夜（例 23:50–09:00）；开始＝结束＝整天。保存后立即生效，不用重启。</p>
+          <div class="card-sub" id="timeRulesStatus" style="margin:0 0 10px"></div>
+          <div id="timeRulesBox"></div>
+          <div class="row-actions" style="margin-top:12px;flex-wrap:wrap;gap:10px;align-items:center">
+            <button class="btn btn-ghost" id="timeRuleAdd" type="button" onclick="window.__mollyAddTimeRule && window.__mollyAddTimeRule()">+ 新增规则</button>
+            <button class="btn btn-primary" id="timeRulesSave" type="button" onclick="window.__mollySaveTimeRules && window.__mollySaveTimeRules()">保存规则</button>
+            <span class="card-sub" id="timeRulesHint" style="margin:0"></span>
+          </div>
+        </div>
         <div class="card card-block">
           <h2 class="card-title">诊断</h2>
           <p class="card-sub">把当前运行数据（总览 / 记忆 / 表情包）的原始信息复制走，方便排查问题时贴给 Molly。</p>

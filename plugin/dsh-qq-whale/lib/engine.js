@@ -219,6 +219,10 @@ function splitForQQ(text, maxLen = 180) {
 
 import fs from 'node:fs'
 import { clockParts, inClockWindow, parseHHMM } from './clock.js'
+// 分时规则（2026-11-08 主人 m06924 / m06974）：睡觉、语音、唱歌三件事统一由
+// <dataDir>/time-rules.json 决定，控制台「设置 → 时间规则」可改，改完立刻生效；
+// 文件不存在才回退旧字段（sleep-window.json / voiceQuietStart/End / singQuiet*）。
+const TR = await import(sub('./time-rules.js'))
 import { createSidecar } from './sidecar.js'
 
 export class ChatEngine {
@@ -3529,8 +3533,74 @@ export class ChatEngine {
     return { start, end }
   }
 
-  /** 现在是否在她的睡觉时间里（北京时间） */
+  // ── 分时规则（2026-11-08 主人 m06924/m06974：把「唱歌允许时间」搬进控制台）──
+  // 三个 scope（sleep / voice / sing）统一由 <dataDir>/time-rules.json 决定。
+  // 语义铁律：规则文件存在 = 规则说了算（某 scope 没有规则 = 不限制）；
+  //           文件不存在 = 完全走旧字段，行为与以前一模一样。
+
+  /** 分时规则文件路径（和控制台的 sleep-window.json 放同一个 dataDir）。 */
+  timeRulesPath() {
+    const dir = this.config?.dataDir || this.config?.memoryDir || path.join(process.cwd(), 'qq-whale-data')
+    return path.join(dir, 'time-rules.json')
+  }
+
+  /** 分时规则文件是否存在（存在即权威）。 */
+  hasTimeRules() {
+    try {
+      return fs.statSync(this.timeRulesPath()).isFile()
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * 读取并规范化规则文档。按 mtime+size 做缓存，控制台一保存就能立刻生效。
+   * 文件不存在或坏掉 → 返回空文档（调用方据此回退旧字段）。
+   */
+  timeRulesDoc() {
+    const file = this.timeRulesPath()
+    let key = ''
+    try {
+      const st = fs.statSync(file)
+      key = `${st.mtimeMs}:${st.size}`
+      if (this._timeRulesCache && this._timeRulesCache.key === key) return this._timeRulesCache.doc
+    } catch {
+      return { version: TR.RULES_VERSION, rules: [], exists: false }
+    }
+    try {
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
+      const norm = TR.normalizeDoc(parsed)
+      const doc = norm.ok ? norm.doc : { version: TR.RULES_VERSION, rules: [] }
+      doc.exists = true
+      this._timeRulesCache = { key, doc }
+      return doc
+    } catch (err) {
+      this.logger?.('warn', '分时规则文件读不明白，按"没有任何规则"处理：' + ((err && err.message) || err))
+      return { version: TR.RULES_VERSION, rules: [], exists: false }
+    }
+  }
+
+  /**
+   * 某个 scope 此刻命中的规则列表。
+   * @returns {Array<{id:string,name:string,start:string,end:string}>|null} null = 没有规则文件，请回退旧字段
+   */
+  timeRulesHit(scope, now = this.now()) {
+    if (!this.hasTimeRules()) return null
+    const doc = this.timeRulesDoc()
+    if (!doc.exists) return null
+    const parts = this.clockNowParts(now)
+    return TR.hitRules(doc, scope, parts).map((r) => ({
+      id: r.id,
+      name: r.name,
+      start: r.start,
+      end: r.end,
+    }))
+  }
+
+  /** 现在是否在她的睡觉时间里（北京时间）。有分时规则时规则优先。 */
   inSleepWindow(now = this.now()) {
+    const hits = this.timeRulesHit('sleep', now)
+    if (hits) return hits.length > 0
     const w = this.sleepWindow()
     if (!w) return false
     return inClockWindow(this.clockNowParts(now), w.start, w.end)
@@ -3538,9 +3608,11 @@ export class ChatEngine {
 
   /**
    * 语音静默时段（2026-10-22 用户 m05352）：默认 23:50–09:00 不发语音。
-   * 配置 `voiceQuietStart` / `voiceQuietEnd`（HH:mm）可改，置空串可关闭。
+   * 有分时规则时规则优先；否则读 `voiceQuietStart` / `voiceQuietEnd`（置空串 = 不限制）。
    */
   inVoiceQuietHours(now = this.now()) {
+    const hits = this.timeRulesHit('voice', now)
+    if (hits) return hits.length > 0
     const start = String(this.config.voiceQuietStart ?? '23:50').trim()
     const end = String(this.config.voiceQuietEnd ?? '09:00').trim()
     if (!start || !end) return false
@@ -3549,11 +3621,12 @@ export class ChatEngine {
 
   /**
    * 唱歌静默时段（2026-10-31 主人：「把 molly 唱歌的限制同语音，十一点五十之后不唱歌，要不然电脑会吵」）。
-   * 默认直接复用语音那套时段（voiceQuietStart/voiceQuietEnd）；
-   * 想单独设就配 `singQuietStart` / `singQuietEnd` 并把 `singQuietFollowVoice` 设 false，
-   * 两个都留空 = 唱歌不限制。
+   * 有分时规则时规则优先；否则`singQuietFollowVoice !== false` 时直接复用语音时段，
+   * 想单独设就配 `singQuietStart` / `singQuietEnd` 并把 `singQuietFollowVoice` 设 false。
    */
   inSingQuietHours(now = this.now()) {
+    const hits = this.timeRulesHit('sing', now)
+    if (hits) return hits.length > 0
     if (this.config.singQuietFollowVoice !== false) return this.inVoiceQuietHours(now)
     const start = String(this.config.singQuietStart ?? '').trim()
     const end = String(this.config.singQuietEnd ?? '').trim()

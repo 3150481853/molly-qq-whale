@@ -135,7 +135,7 @@ const PORT = Number(pick('MOLLY_CONSOLE_PORT', 'port', 19392)) || 19392;
 // 控制台版本：以插件 package.json 为唯一真源，别在这里写死（2026-10-25 主人 m03522：
 // 左下角一直显示 v1.0.0 就是这一行写死的；发布版本与插件版本从此自动同步）。
 // exe 模式读不到 package.json 时退回 FALLBACK_VERSION，保证打包版也有版本号。
-const FALLBACK_VERSION = '1.1.8-preview.2';
+const FALLBACK_VERSION = '1.1.8';
 const VERSION = (() => {
   try {
     const pkg = JSON.parse(
@@ -1504,6 +1504,46 @@ async function route(req, res) {
     }
     const r = await jget(base + '/dsh-qq-whale/sleep', 3000);
     return sendJson(res, r.ok ? 200 : 502, r.ok ? r.data : { ok: false, error: r.error });
+  }
+
+  /*
+   * 分时规则（2026-11-08 主人 m06924/m06974）：「干脆唱歌允许时间也放到设置里面能调整吧」。
+   * 睡觉 / 语音 / 唱歌 三件事统一由 <dataDir>/time-rules.json 决定，宿主插件那边
+   * 提供 GET/POST /dsh-qq-whale/time/rules 与 POST /dsh-qq-whale/time/preview，
+   * 这里只做透传（校验全在插件里，控制台不重复实现一遍规则语义）。
+   */
+  if (p === '/api/time-rules') {
+    const base = await resolveHostBase();
+    if (!base) return sendJson(res, 503, { ok: false, error: '宿主端口还没探测到' });
+    if (req.method === 'POST') {
+      let body = {};
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        return sendJson(res, 400, { ok: false, error: '请求体不是合法 JSON' });
+      }
+      const r = await jpost(base + '/dsh-qq-whale/time/rules', body, 8000);
+      if (!r.ok) return sendJson(res, 502, { ok: false, error: r.error || '插件没回应' });
+      // 插件的 400（校验不过）要原样透传，否则前端只会看到 502
+      return sendJson(res, r.data && r.data.ok === false ? 400 : 200, r.data);
+    }
+    const r = await jget(base + '/dsh-qq-whale/time/rules', 4000);
+    return sendJson(res, r.ok ? 200 : 502, r.ok ? r.data : { ok: false, error: r.error });
+  }
+
+  if (p === '/api/time-preview') {
+    const base = await resolveHostBase();
+    if (!base) return sendJson(res, 503, { ok: false, error: '宿主端口还没探测到' });
+    if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: 'method not allowed' });
+    let body = {};
+    try {
+      body = await readJsonBody(req);
+    } catch {
+      return sendJson(res, 400, { ok: false, error: '请求体不是合法 JSON' });
+    }
+    const r = await jpost(base + '/dsh-qq-whale/time/preview', body, 6000);
+    if (!r.ok) return sendJson(res, 502, { ok: false, error: r.error || '插件没回应' });
+    return sendJson(res, r.data && r.data.ok === false ? 400 : 200, r.data);
   }
 
   if (p === '/api/health') {

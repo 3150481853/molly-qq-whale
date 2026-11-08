@@ -67,7 +67,17 @@ export function songNames() {
 
 /** 把「唱歌 小星星」这类请求拆出来；不是唱歌请求返回 null。 */
 export function parseSingRequest(text) {
-  const raw = String(text || '').replace(/\s+/g, ' ').trim()
+  /*
+   * 2026-11-08 主人 m06800：「命令 唱歌 期待夏天」被送进干活会话，模型只能回
+   * 「我这会儿发不了语音」——干活会话是通用编码 agent，压根没有唱歌管线。
+   * 所以这里先把路由前缀剥掉：「命令 唱歌 x」= 「唱歌 x」，由 maybeSing 直接接走。
+   * 只剥前缀、不改后面解析，非唱歌的命令（「命令 查天气」）照样返回 null 走会话。
+   */
+  const raw = String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^(?:命令|#chat|#work|#code)[\s,，:：]*/iu, '')
+    .trim()
   if (!raw) return null
   // 2026-11-05 主人 m05040：「点歌 无人之岛」「唱一下 无人之岛」也得认，否则进不了点歌。
   const m = /^(?:麻烦|请|给我|快)?\s*(?:唱歌|点歌|唱一首|唱一下|唱一遍|唱一个|唱个|唱一段|来一首|来一个|来段|唱)\s*([\s\S]*)$/u.exec(raw)

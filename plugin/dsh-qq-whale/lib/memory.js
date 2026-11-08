@@ -864,7 +864,7 @@ export class MemoryStore {
      * 「你说明天再排查。结果这个『明天』我好像等了好几天」。
      * 所以在**入库**这一步按条目自己的写入时间折算成绝对日期。
      */
-    const t = normalizeRelativeDates(String(text || '').trim(), Date.now())
+    const t = normalizeRelativeDates(stripHostRefs(text), Date.now())
     if (!t) return null
     const k = normalizeKind(kind)
     // 计划 / 已发生分开（见 detectTense 的注释）：写路径不加模型调用，纯词面判断
@@ -993,7 +993,7 @@ export class MemoryStore {
       ...(tenseInfo.tense === 'plan' && tenseInfo.dueAt ? { dueAt: tenseInfo.dueAt } : {}),
     }
     /* v1.0：状态翻新（「还没报价」→「已发来报价」），旧的降权不删 */
-    const pendingOld = this.findPendingUpdate({ who: name, qq: q, text: t })
+    const pendingOld = this.findPendingUpdate({ who: name, qq: q, text: t, kind: k })
     if (pendingOld) {
       pendingOld.supersededBy = entry.id
       pendingOld.supersededAt = entry.at
@@ -1157,17 +1157,20 @@ export class MemoryStore {
    *   3. 两条共享 ≥2 个实词（同一件事），同一个人。
    * 命中就把旧条目标 supersededBy——召回降权，正文保留（可回溯）。
    */
-  findPendingUpdate({ who = '', qq = '', text = '' } = {}) {
+  findPendingUpdate({ who = '', qq = '', text = '', kind = '' } = {}) {
     if (process.env.MOLLY_STATE_UPDATE === '0') return null
     const t = String(text || '')
     if (!PENDING_DONE_RE.test(t)) return null
     const q = normalizeQq(qq)
     const name = String(who || '').trim()
+    const wantKind = normalizeKind(kind)
     let best = null
     let bestScore = 0
     for (const e of this.entries) {
       if (e.supersededBy) continue
       if (e.kind === 'meme' || e.kind === 'address') continue
+      // v1.5：跨类别不判翻新——「计划过期」和「事实更新」不是一回事
+      if (normalizeKind(e.kind) !== wantKind) continue
       if (!sameIdentity({ who: name, qq: q }, e)) continue
       if (!PENDING_OPEN_RE.test(String(e.text || ''))) continue
       const n = sharedKeywordCount(e.text, t)
@@ -1187,13 +1190,16 @@ export class MemoryStore {
      * 「面无表情」里的"无"被当成否定词，「学到了表情包：蓝发_面无表情」就被判成
      * 和「学到了表情包：蓝发_半睁眼」改口——两张图而已，谁也不取代谁。
      */
-    if (normalizeKind(kind) === 'meme') return null
+    const wantKind = normalizeKind(kind)
+    if (wantKind === 'meme') return null
     if (!normalizeForDup(text)) return null
     let best = null
     let bestScore = 0
     for (const e of this.entries) {
       if (e.supersededBy) continue // 已经被更正的不用再更正一次
       if (e.kind === 'meme') continue
+      // v1.5：跨类别不判改口（person 被 fact 顶掉 = 档案被降级，不对）
+      if (normalizeKind(e.kind) !== wantKind) continue
       if (!sameIdentity({ who: name, qq: q }, e)) continue
       if (!conflicts(e.text, text)) continue
       const n = sharedKeywordCount(e.text, text)
@@ -1225,6 +1231,7 @@ export class MemoryStore {
       const successor = byId.get(e.supersededBy)
       let reason = ''
       if (!successor) reason = '取代者已不存在'
+      else if (normalizeKind(successor.kind) !== normalizeKind(e.kind)) reason = '跨类别取代'
       else if (!conflicts(successor.text, e.text)) reason = '按新规则不算改口'
       if (!reason) continue
       items.push({
@@ -3057,6 +3064,24 @@ function fmtDateWeekday(ms) {
   const d = new Date(ms)
   const wd = '日一二三四五六'[d.getDay()]
   return `${d.getMonth() + 1}月${d.getDate()}日，周${wd}`
+}
+
+/**
+ * 剥掉宿主/其他 agent 塞进正文的「内部事件引用」（task-72，2026-11-07）。
+ *
+ * 线上症状：群里有别的 agent 账号说话，正文带着 `<acp …>m00012</acp>`，
+ * 被抽取进记忆之后，问「他最近说过什么」她就把 m00012 念出来。
+ * 入站已经在 onebot.js 洗过一遍，这里是第二道闸——记忆是最脏东西的最终归属地，
+ * 宁可多洗一次。
+ */
+export function stripHostRefs(text) {
+  let t = String(text ?? '')
+  if (!t) return ''
+  t = t.replace(/<acp\b[^>]*>[\s\S]*?<\/acp>/gi, ' ')
+  t = t.replace(/<\/?acp\b[^>]*>/gi, ' ')
+  t = t.replace(/\bm\d{5}\b/gi, ' ')
+  t = t.replace(/[ \t]{2,}/g, ' ')
+  return t.replace(/\s+([，。、,.!?！？）)])/g, '$1').trim()
 }
 
 export function normalizeRelativeDates(text, at) {

@@ -7,6 +7,34 @@
 
 ---
 
+## 2026-11-08 · v1.1.8 正式版：「回复错位」这一类问题一次收干净
+
+> 上一正式版 `v1.1.7`；本条目合并 `v1.1.8-preview.1` 与 `v1.1.8-preview.2` 的全部内容，作为正式版对外说明。完整发布说明见 `docs/RELEASE-1.1.8.md`。
+
+**修了什么**
+
+- **被打断的那句不再丢（`lib/engine.js` + `lib/engine-context.js` + `lib/quote-at.js`）**：同一会话来了新消息就会 abort 正在生成的那一轮，原来那条消息**永久没人回答**。现在 `stashCarry()` 留存、下一轮 `takeCarry()` 合并（同一个人、20 秒内、最多 3 条），提示词列出「这一轮你要接的是这几条」，引用框由 `anchorId` 钉在正题上；`quoteStale` 对 `anchored` 命中豁免。
+- **同一个人连发只答一次（`lib/engine.js`）**：`@我` 与闲聊两条泳道会各开一轮。新增 `laneMergeDecision()` 裁决（`@我` 赢、闲聊让位）、`rememberAnswered()` / `alreadyAnswered()`，`carry` 的 key 从 `jobId` 改成会话 key。
+- **引用框不挂错人、不挂错条（`lib/quote-at.js`）**：优先级 `explicit-at > anchor > nudge > 触发条(≤1) > newest`；`lastMessageFrom()` / `lastOtherMessage()` 支持 `excludeId`；模型写的 `<at>` 号要过名册校验。
+- **只发图/语音时引用挂在它自己身上（`lib/quote-at.js`）**：`isPureNudge()` 只数 text 段实字，纯图片消息实字数为 0、被判成「空叫醒」。图片/语音/视频/文件/转发/卡片等（含 `raw_message` 同名 CQ 码）现在一律算「有内容」；`pickQuoteTarget()` 新增 `media` 理由。
+- **命令 / 状态回执不接话（`lib/quote-at.js` + `lib/engine.js`）**：别的机器人的状态行（`茶茶（987654321） · 在线 · v1.1.7-preview.1 · 已运行 1天22小时`）被当成聊天内容起轮，又被 carry 当锚点，引用框挂到系统信息上。新增 `looksLikeEchoLine()`（整条 `#`/`/` 指令，或括号 QQ 号 + 状态词 + 分隔符三条件同时成立），`shouldRespond()` 前拦掉（trace 记 `skip-echo`），且不许进 carry。
+- **印象里的「主人」只对主人成立（`lib/relations.js` + `lib/engine-context.js`）**：`contextFor()` 收 `ownerQq`，含「主人」的印象只对主人本人渲染，不再盖掉认人护栏。
+- **一条一句（`lib/persona.js` + `lib/engine.js`）**：`splitReply()` 换行也分条（原来只认 `<sep/>`），新增 `maxTextBubblesPerReply`（默认 5）。
+- **可观测**：`stats` 新增 `carryMerged` / `quoteAnchored` / `replyStarts` / `replyDelivered` / `replyAborted` / `modelNull` / `skipEcho`；`replyTrace` 新增 `carry` / `lane-merge` / `lane-yield` / `skip-covered` / `skip-echo`；回复流水落盘 `<dataDir>/trace/replies-YYYY-MM-DD.jsonl`。
+
+**为什么**
+
+生成一轮要 20–60 秒，同会话新消息的 abort 几乎必然发生，于是「永远在回下一句」；泳道并行则让同一件事被答两遍。引用问题都出在「触发消息本身没有正文」（纯图片、纯 @、命令回执），旧逻辑一律退化成「引上一条别人的消息」。
+
+**怎么退回**
+
+见 `docs/RELEASE-1.1.8.md` 第六节，可逐项单独退，也可整包退回 `v1.1.7`。
+
+**验证**
+
+`tools/test-quote-anchor.mjs` 51 / `test-lane-dedupe.mjs` 18 / `test-carry.mjs` 7 / `test-split-reply.mjs` 8 / `test-this-turn.mjs` 5 / `test-relations-owner.mjs` 4 / `test-engine-text.mjs` 7 / `test-quote.mjs` 32 / `test-command-fixes.mjs` 12，记忆内核 25 / 55 / 25，全绿；改动的 lib 文件 `node --check` 通过。
+
+---
 ## 2026-11-06 · v1.1.8-preview.2：「总是回下一条」——被打断的那条不再被丢掉
 
 > 只动插件侧文件（`lib/engine.js`、`lib/quote-at.js`、`lib/engine-context.js`、`lib/persona.js`、`lib/relations.js`；回复流水只写到数据目录 `<dataDir>/trace/`，不进仓库）。完整说明见 `docs/RELEASE-1.1.8-preview.2.md`，技术记录见 `docs/quote-anchor-carry-2026-11-06.md`。

@@ -89,7 +89,7 @@ export function createSidecar({ logger = () => {}, root = '' } = {}) {
   const models = String(process.env.MOLLY_EMBED_MODELS || DEFAULT_MODELS)
   const logFile = String(process.env.MOLLY_EMBED_LOG || DEFAULT_LOG)
 
-  let spawned = false
+  let lastSpawnAt = 0
   let healthy = false
 
   const health = () => {
@@ -108,15 +108,19 @@ export function createSidecar({ logger = () => {}, root = '' } = {}) {
    * 它自己会因为空闲 30 分钟退出。
    */
   const ensure = () => {
-    if (off || spawned) return
-    spawned = true
-    if (health()) {
-      logger('info', `嵌入 sidecar 已在运行（${base}）`)
-      return
-    }
+    if (off) return false
+    /*
+     * 2026-11-08（线上实测）：原来的 `spawned` 是一次性开关，起过一次就再也不问服务端。
+     * 可 sidecar 空闲 30 分钟会自己退出，于是插件活着的剩下时间里向量与重排全部
+     * 静默退回关键词——日志里只有一条 boot、一条 stop，之后 recall 再无嵌入调用。
+     * 现在每次都先问 /health，真不在才考虑拉起；中间留 60 秒冷却，避免崩塌式重拉。
+     */
+    if (health()) return true
+    if (Date.now() - lastSpawnAt < 60_000) return false
+    lastSpawnAt = Date.now()
     if (!fs.existsSync(python) || !fs.existsSync(script)) {
       logger('warn', `嵌入 sidecar 起不来：python=${python} script=${script}（退回纯关键词）`)
-      return
+      return false
     }
     const exe = preferWindowlessPython(python)
     const args = [script, '--port', new URL(base).port || '8791', '--models', models]
@@ -134,16 +138,30 @@ export function createSidecar({ logger = () => {}, root = '' } = {}) {
        * 不等的话，插件启停两次就会各 spawn 一个——服务端虽然加了端口守卫会自己退出，
        * 但那是「起两个、死一个」，不如这里就等它 ready，第二次直接看到 health 通过。
        */
-      for (let i = 0; i < 4; i += 1) {
+      for (let i = 0; i < 10; i += 1) {
         sleepSync(700)
         if (health()) {
           logger('info', `已拉起嵌入 sidecar（${exe}，${base}，模型 ${models}）`)
-          return
+          return true
         }
       }
-      logger('warn', '嵌入 sidecar 已拉起但 3 秒内没应答（首次加载模型可能更慢，先按纯关键词跑）')
+      logger('warn', '嵌入 sidecar 已拉起但 7 秒内没应答（首次加载模型可能更慢，先按纯关键词跑）')
     } catch (err) {
       logger('warn', `拉起嵌入 sidecar 失败：${err?.message || err}（退回纯关键词）`)
+    }
+    return false
+  }
+
+  /**
+   * 发请求 + 自愈：服务端可能刚因空闲退出，拉起来再试一次。
+   * 只在真的失败时才动 ensure，正常路径零额外开销。
+   */
+  const callApi = (pathname, body, timeoutSec) => {
+    try {
+      return curlJson(`${base}${pathname}`, body, timeoutSec)
+    } catch (err) {
+      if (!ensure()) throw err
+      return curlJson(`${base}${pathname}`, body, timeoutSec)
     }
   }
 
@@ -151,7 +169,7 @@ export function createSidecar({ logger = () => {}, root = '' } = {}) {
   const embed = (text) => {
     if (off) return null
     try {
-      const j = curlJson(`${base}/embed`, { texts: [String(text || '')], query: true }, 4)
+      const j = callApi('/embed', { texts: [String(text || '')], query: true }, 4)
       const v = j?.vectors?.[0]
       return Array.isArray(v) ? Float32Array.from(v) : null
     } catch (err) {
@@ -164,7 +182,7 @@ export function createSidecar({ logger = () => {}, root = '' } = {}) {
   const rerank = (query, texts) => {
     if (off) return null
     try {
-      const j = curlJson(`${base}/rerank`, { query: String(query || ''), texts }, 8)
+      const j = callApi('/rerank', { query: String(query || ''), texts }, 8)
       return Array.isArray(j?.scores) ? j.scores : null
     } catch (err) {
       logger('debug', `重排失败（退回粗排）：${err?.message || err}`)
@@ -176,7 +194,7 @@ export function createSidecar({ logger = () => {}, root = '' } = {}) {
   const embedBatch = (texts) => {
     if (off) return null
     try {
-      const j = curlJson(`${base}/embed`, { texts: texts.map((t) => String(t || '')), query: false }, 120)
+      const j = callApi('/embed', { texts: texts.map((t) => String(t || '')), query: false }, 120)
       return Array.isArray(j?.vectors) ? j.vectors : null
     } catch {
       return null

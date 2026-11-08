@@ -22,6 +22,7 @@
  */
 
 import http from 'node:http';
+import https from 'node:https';
 import net from 'node:net';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -148,6 +149,169 @@ const VERSION = (() => {
   }
   return FALLBACK_VERSION;
 })();
+
+/* ───────────────────── 检查更新（2026-11-08，主人 m01870）─────────────────────
+ *
+ * 主人报障：控制台里点「检查更新」，永远是「已是最新」，1.1.8 都发出去了也还这么说。
+ *
+ * 原因：那按钮原来只做一件事 —— 比对「页面加载时注入的 build」和 /api/health 回来的
+ * build，也就是「前端文件有没有被换过」。它压根不问 GitHub 有没有新版本。
+ *
+ * 这里补真检查：问一次 GitHub Releases 的 latest，跟当前 VERSION 按 semver 比大小。
+ * 仓库地址不在代码里写死 —— plugin/dsh-qq-whale/package.json 的 repository.url 是
+ * 唯一真源。硬写 api.github.com/repos/<账号>/... 会被 build-publish 的脱敏规则改坏
+ * （那条 GitHub 地址豁免只认 github.com/<账号>/<仓库> 形态），所以运行时解析。
+ */
+const REPO_SLUG = (() => {
+  try {
+    const pkg = JSON.parse(
+      fs.readFileSync(path.join(ROOT, 'plugin', 'dsh-qq-whale', 'package.json'), 'utf8'),
+    );
+    const url = String(
+      (pkg.repository && pkg.repository.url) || pkg.homepage || (pkg.bugs && pkg.bugs.url) || '',
+    );
+    const m = url.match(/github\.com[/:]([^/\s]+)\/([^/\s#?]+)/i);
+    if (m) return m[1] + '/' + m[2].replace(/\.git$/i, '');
+  } catch {
+    /* 解析不出来就不查了，接口会老实说「不知道仓库地址」 */
+  }
+  return '';
+})();
+
+/**
+ * 版本比较：1.1.8 > 1.1.8-preview.2 > 1.1.8-preview.1，返回 1 / 0 / -1。
+ * 与 semver 一致的两条规矩：数字段比大小；同号时正式版比预览版新。
+ */
+function cmpVersion(a, b) {
+  const parse = (v) => {
+    const s = String(v || '').trim().replace(/^v/i, '');
+    const bits = s.split('-');
+    const nums = String(bits[0] || '').split('.').map((x) => Number(x) || 0);
+    while (nums.length < 3) nums.push(0);
+    return { nums: nums.slice(0, 3), pre: bits.slice(1).join('-') };
+  };
+  const A = parse(a);
+  const B = parse(b);
+  for (let i = 0; i < 3; i += 1) {
+    if (A.nums[i] !== B.nums[i]) return A.nums[i] > B.nums[i] ? 1 : -1;
+  }
+  if (!A.pre && B.pre) return 1;
+  if (A.pre && !B.pre) return -1;
+  if (!A.pre && !B.pre) return 0;
+  const pa = A.pre.split(/[.\-]/);
+  const pb = B.pre.split(/[.\-]/);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i += 1) {
+    const x = pa[i];
+    const y = pb[i];
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    const nx = Number(x);
+    const ny = Number(y);
+    if (!Number.isNaN(nx) && !Number.isNaN(ny)) {
+      if (nx !== ny) return nx > ny ? 1 : -1;
+    } else if (x !== y) {
+      return x > y ? 1 : -1;
+    }
+  }
+  return 0;
+}
+
+/** GET 一个 JSON（node:https，零依赖）。超时/非 200/非 JSON 都转成 { error }。 */
+function httpsJson(target, timeoutMs = 8000) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => {
+      if (settled) return;
+      settled = true;
+      resolve(v);
+    };
+    try {
+      const req = https.get(
+        target,
+        {
+          headers: {
+            'User-Agent': 'molly-console/' + VERSION,
+            Accept: 'application/vnd.github+json',
+          },
+        },
+        (res) => {
+          const chunks = [];
+          res.on('data', (c) => chunks.push(c));
+          res.on('end', () => {
+            const text = Buffer.concat(chunks).toString('utf8');
+            if (res.statusCode !== 200) return done({ error: 'GitHub 返回 ' + res.statusCode });
+            try {
+              done({ data: JSON.parse(text) });
+            } catch {
+              done({ error: 'GitHub 返回的不是 JSON' });
+            }
+          });
+        },
+      );
+      req.setTimeout(timeoutMs, () => {
+        req.destroy();
+        done({ error: '连不上 GitHub（' + timeoutMs + 'ms 超时）' });
+      });
+      req.on('error', (err) => done({ error: (err && err.message) || String(err) }));
+    } catch (err) {
+      done({ error: (err && err.message) || String(err) });
+    }
+  });
+}
+
+// 结果缓存 10 分钟：GitHub 未登录时每小时 60 次限额，别让连点把额度打光。
+const UPDATE_TTL = 10 * 60 * 1000;
+let updateCache = { at: 0, data: null };
+
+async function checkUpdate(force) {
+  if (!force && updateCache.data && Date.now() - updateCache.at < UPDATE_TTL) {
+    return Object.assign({}, updateCache.data, { cached: true });
+  }
+  const base = { ok: false, current: VERSION, latest: '', hasUpdate: false, url: '', at: Date.now() };
+  if (!REPO_SLUG) {
+    return Object.assign({}, base, {
+      error: '读不到仓库地址（plugin/dsh-qq-whale/package.json 的 repository）',
+    });
+  }
+  // 用 tags 而不是 /releases/latest：这个仓库的「最新发布」是按发布时间排的，
+  // 前几天发过 dsh-online-time-v0.1.3、jasmine-v0.4.0 这类子项目版本，
+  // latest 会指向那些，而不是主人的 v1.1.x 主线。tag 列表才是版本真源。
+  const r = await httpsJson('https://api.github.com/repos/' + REPO_SLUG + '/tags?per_page=100');
+  if (r.error) {
+    // 失败也留个短缓存（1 分钟），免得面板反复点把空请求打满
+    updateCache = {
+      at: Date.now() - UPDATE_TTL + 60 * 1000,
+      data: Object.assign({}, base, { error: r.error }),
+    };
+    return Object.assign({}, base, { error: r.error });
+  }
+  const rows = Array.isArray(r.data) ? r.data : [];
+  let latest = '';
+  let latestTag = '';
+  for (const row of rows) {
+    const name = String((row && row.name) || '').trim();
+    const m = name.match(/^v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.\-]+)?)$/);
+    if (!m) continue;
+    if (!latest || cmpVersion(m[1], latest) > 0) {
+      latest = m[1];
+      latestTag = name;
+    }
+  }
+  if (!latest) {
+    return Object.assign({}, base, { error: '仓库里没有 vX.Y.Z 形态的 tag' });
+  }
+  const out = {
+    ok: true,
+    current: VERSION,
+    latest,
+    hasUpdate: cmpVersion(latest, VERSION) > 0,
+    url: 'https://github.com/' + REPO_SLUG + '/releases/tag/' + encodeURIComponent(latestTag),
+    tag: latestTag,
+    at: Date.now(),
+  };
+  updateCache = { at: Date.now(), data: out };
+  return out;
+}
 
 // 鉴权：默认关闭（本机免鉴权，行为不变）。MOLLY_CONSOLE_TOKEN 有值才校验请求头
 // x-molly-token —— 放请求头不放 query，避免密钥进访问日志（契约 §7.1.3）
@@ -1548,6 +1712,13 @@ async function route(req, res) {
 
   if (p === '/api/health') {
     return sendJson(res, 200, { ok: true, version: VERSION, build: consoleBuild(), at: Date.now() });
+  }
+
+  /* 检查更新（2026-11-08，主人 m01870）：真去 GitHub 问一次最新版是多少。
+   * force=1 跳过 10 分钟缓存，给「我要现在就查」的场合用。 */
+  if (p === '/api/update-check') {
+    const r2 = await checkUpdate(String(url.searchParams.get('force') || '') === '1');
+    return sendJson(res, r2.ok ? 200 : 502, r2);
   }
 
   /*

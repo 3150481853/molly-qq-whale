@@ -128,7 +128,7 @@
     /* 关于页（2026-11-04）：只放「检查更新」与「更新日志」的就地状态。
        按钮和容器都在静态 HTML 里，4 秒轮询只重写数据容器，所以点「检查更新」
        之后焦点不会被重渲染抢走。 */
-    about: { checking: false, chg: null, chgError: null, chgTitle: '' },
+    about: { checking: false, chg: null, chgError: null, chgTitle: '', up: null },
     /* 在线时间（2026-11-06）：一次拉 days=30 的统计，切「今天/昨天/近 7 天」只重绘分时区，
        不再请求；数据最多 60 秒旧一次（spec §3.2）。 */
     online: { data: null, error: '', at: 0, loading: false, days: 7, tab: 'today' },
@@ -4155,37 +4155,69 @@
 
   /* 状态行单独维护：4 秒轮询只重绘数据容器，不碰这一行，
      否则「已是最新 · 20:14:03」会被下一轮 overview 冲掉。 */
-  function aboutStatus(text, cls, withReload) {
+  function aboutStatus(text, cls, withReload, link) {
     var el = $('#aboutStatus');
     if (!el) return;
     el.className = 'about-status' + (cls ? ' ' + cls : '');
-    el.innerHTML = '<span>' + esc(String(text)) + '</span>' +
+    /* link：有新版本时给一个能直接点过去的地址（GitHub Releases 里那个 tag） */
+    var extra = (link && link.href)
+      ? '<a class="btn btn-ghost btn-sm" href="' + esc(String(link.href)) +
+        '" target="_blank" rel="noopener">' + esc(String(link.label || '去下载')) + '</a>'
+      : '';
+    el.innerHTML = '<span>' + esc(String(text)) + '</span>' + extra +
       (withReload ? '<button class="btn btn-ghost btn-sm" id="aboutReload" type="button">刷新</button>' : '');
   }
 
+  /* 2026-11-08（主人 m01870）：这按钮原来只比对「前端文件有没有被换过」
+     （页面注入的 build 与 /api/health 的 build），1.1.8 都发出去了，点它还只会说
+     「已是最新」。现在并行问一次 /api/update-check，让版本号自己去 GitHub 对。 */
   function checkAboutUpdate() {
     if (state.about.checking) return;
     state.about.checking = true;
     aboutStatus('检查中…', '');
-    fetch('/api/health', { cache: 'no-store' })
-      .then(function (r) {
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        return r.json();
-      })
-      .then(function (j) {
-        state.health = j || {};
+    var at = fmtClock(Date.now());
+    var healthReq = fetch('/api/health', { cache: 'no-store' }).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    });
+    var updateReq = fetch('/api/update-check', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .catch(function (err) { return { ok: false, error: (err && err.message) || '接口没回应' }; });
+    Promise.all([healthReq, updateReq])
+      .then(function (both) {
+        var j = both[0] || {};
+        var up = (both[1] && typeof both[1] === 'object') ? both[1] : { ok: false, error: '接口没回应' };
+        state.health = j;
+        state.about.up = up;
         var fv = $('#footVersion');
-        if (fv && state.health.version) fv.textContent = 'v' + state.health.version;
-        var server = String(state.health.build || '');
-        var at = fmtClock(Date.now());
-        if (!PAGE_BUILD) {
-          aboutStatus('这个页面没有构建标识（不是控制台服务发出的），刷新后以服务端为准', 'is-warn', true);
-        } else if (!server) {
-          aboutStatus('服务端没返回构建号，这次比不了', 'is-warn');
-        } else if (server === PAGE_BUILD) {
-          aboutStatus('已是最新 · ' + at, 'is-ok');
+        if (fv && j.version) fv.textContent = 'v' + j.version;
+        var server = String(j.build || '');
+        var pageOk = !PAGE_BUILD || !server || server === PAGE_BUILD;
+        var pageNote = !PAGE_BUILD
+          ? '这个页面不是控制台服务发出的'
+          : (!server ? '服务端没返回构建号'
+            : (server === PAGE_BUILD ? '' : '前端文件已更新，刷新后生效'));
+        var tail = pageNote ? ' · ' + pageNote : '';
+        if (up && up.ok && up.hasUpdate) {
+          aboutStatus(
+            '有新版本 v' + up.latest + '（当前 v' + up.current + '）',
+            'is-warn',
+            !pageOk,
+            up.url ? { href: up.url, label: '去 GitHub' } : null,
+          );
+        } else if (up && up.ok) {
+          aboutStatus(
+            '已是最新（v' + (up.current || j.version || '') + '） · ' + at + tail,
+            pageOk ? 'is-ok' : 'is-warn',
+            !pageOk,
+          );
         } else {
-          aboutStatus('服务端前端已更新（' + server + '），刷新后生效', 'is-warn', true);
+          /* 查不到就说查不到 —— 别拿「前端文件没换」冒充「全世界都最新」 */
+          aboutStatus(
+            '前端是最新的 · 版本检查没成功：' + ((up && up.error) || '未知原因') + tail,
+            'is-warn',
+            !pageOk,
+          );
         }
         safe(renderAbout);
       })
@@ -4333,9 +4365,13 @@
       pill('idle', desktop ? '桌面应用' : '浏览器')
     ].join(''));
 
+    var up = state.about.up || {};
     setHtml($('#aboutUpdateKv'), [
       kv('当前版本', ver ? '<span class="mono">v' + esc(ver) + '</span>' : '—'),
-      kv('服务端构建', build ? '<span class="mono">' + esc(build) + '</span>' : '—')
+      kv('服务端构建', build ? '<span class="mono">' + esc(build) + '</span>' : '—'),
+      kv('仓库最新', up && up.ok && up.latest
+        ? '<span class="mono">v' + esc(up.latest) + '</span>' + (up.hasUpdate ? ' · 有新版本' : ' · 一致')
+        : '—')
     ].join(''));
 
     /* 数据与连接：全部 /api/overview；其中一块没报就整行写「—」 */

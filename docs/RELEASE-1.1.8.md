@@ -117,3 +117,11 @@
 - **源码部署**：覆盖 `plugin/dsh-qq-whale/lib/` 里改动的文件 → **重启 DSH**（插件模块在宿主内，不会热更）；
 - **用 zip**：解压覆盖同名目录，同样重启；
 - 与 `v1.1.7` 相比，控制台 / 桌面外壳有增量（问题反馈页、在线时间页、体检卡与两列布局），记忆内核同步小改（核心条目排序、群聊点名召回）；数据结构不变，无需迁移。
+
+## 八、附：控制台的「检查更新」现在真的会去问 GitHub（2026-11-08 补）
+
+- **原来**：关于页的「检查更新」只比对「页面注入的 build」与 `/api/health` 回来的 build，也就是「前端文件有没有被换过」。它不去 GitHub 查，所以发版之后点它仍然只会说「已是最新」。
+- **现在**：新增 `GET /api/update-check`（`tools/console-server.mjs`）——运行时从 `plugin/dsh-qq-whale/package.json` 的 `repository.url` 解析 owner/repo（不在代码里写死仓库地址），读 `https://api.github.com/repos/<owner>/<repo>/tags`，取其中最高的 `vX.Y.Z`（正式版高于同号预发布）与当前版本按 semver 比较；结果缓存 10 分钟，`?force=1` 跳过缓存。
+- **为什么用 tags 而不是 `/releases/latest`**：这个仓库的「最新发布」按发布时间排序，前几天发过 `dsh-online-time-v0.1.3`、`jasmine-v0.4.0` 这类子项目版本，latest 会指向它们而不是 v1.1.x 主线；tag 列表才是版本真源。
+- **界面**：有新版本 → 「有新版本 vX（当前 vY）」+ 一个直达 Releases 的按钮；一致 → 「已是最新（vX）· 时间」；查不到 → 「前端是最新的 · 版本检查没成功：<原因>」，不再拿「前端没换」冒充「全世界都最新」。关于页「检查更新」卡片新增一行「仓库最新」。
+- **怎么退回**：删掉 `/api/update-check` 路由与 `REPO_SLUG` / `cmpVersion` / `httpsJson` / `checkUpdate` 四块，前端 `checkAboutUpdate()` 恢复成只比 build。控制台是 SEA 单文件（`dist/desktop/molly-console.exe`），改完要 `node tools/build-exe.mjs` 重新打包。

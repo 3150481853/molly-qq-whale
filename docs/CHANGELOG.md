@@ -7,6 +7,31 @@
 
 ---
 
+## 2026-11-08 · 控制台「检查更新」真的会去问 GitHub
+
+> 主人 m01870：「控制台版本号没更新，检测更新没用吗，点了还是最新版」。
+
+**改了什么**
+
+- `tools/console-server.mjs`：新增 `GET /api/update-check`。运行时从 `plugin/dsh-qq-whale/package.json` 的 `repository.url` 解析 owner/repo（不在代码里写死仓库地址 —— 写死会被 `build-publish` 的 GitHub 哨兵规则改写），读 `https://api.github.com/repos/<owner>/<repo>/tags`，取最高 `vX.Y.Z` 与当前版本按 semver 比（正式版高于同号预发布）；缓存 10 分钟，`?force=1` 跳过。
+- `console/console.js`：`checkAboutUpdate()` 并行请求 `/api/health` 与 `/api/update-check`；真有新版本显示「有新版本 vX（当前 vY）」并给一个直达 Releases 的按钮；查不到就明说「版本检查没成功：<原因>」，不再只拿「前端文件没换」冒充「已是最新」。关于页新增「仓库最新」一行。
+- 重新打包 `dist/molly-console.exe`（`node tools/build-exe.mjs`）并同步 `dist/desktop/`（exe + `console/console.js`），重启控制台进程。
+
+**为什么**
+
+那个按钮原来只比对「页面注入的 build」和 `/api/health` 的 build —— 也就是「前端文件有没有被换过」，根本不去 GitHub 查有没有新版本，所以 1.1.8 发出去之后点它仍然只会说「已是最新」。另外 exe 的版本号是**启动时**算好存在内存里的，版本号改了不重启进程，左下角不会变。
+
+**怎么退回**
+
+- 前端：`dist/desktop/console/console.js.bak-20261108-124303`；
+- 后端：`dist/desktop/molly-console.exe.bak-20261108-124303`（拷回同名文件、重启控制台进程即可）。
+
+**验证**
+
+- `GET /api/update-check` → `{"ok":true,"current":"1.1.8","latest":"1.1.8","hasUpdate":false,"tag":"v1.1.8"}`；
+- `GET /api/health` → `{"version":"1.1.8","build":"b2c57f98"}`（新前端已生效，页面注入的 build 与之一致）；
+- 控制台进程重启后 `molly-console.exe --version` = `molly-console 1.1.8 (sea)`。
+
 ## 2026-11-08 · v1.1.8 正式版：「回复错位」这一类问题一次收干净
 
 > 上一正式版 `v1.1.7`；本条目合并 `v1.1.8-preview.1` 与 `v1.1.8-preview.2` 的全部内容，作为正式版对外说明。完整发布说明见 `docs/RELEASE-1.1.8.md`。

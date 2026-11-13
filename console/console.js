@@ -816,11 +816,39 @@
         ].join('')
         : '<p class="ar-error">数据服务 19391 不可达：' + esc(side.error || '连接被拒绝') + '</p>';
 
+      /* 陌生人审批：数据来自插件 /state 的 gatekeeper，和桌面挂件同源。
+         控制台只做展示 —— 通过/拒绝必须在 QQ 私聊里回「1」「0」，那里才有身份凭证
+         （见 plugin/dsh-qq-whale/lib/web.js 里 gatekeeper 的设计说明）。 */
+      var gk = p.gatekeeper;
+      var gkRows;
+      if (!gk) {
+        gkRows = kv('状态', pill('idle', '插件没报审批队列'));
+      } else {
+        var gkList = Array.isArray(gk.pendingList) ? gk.pendingList : [];
+        var gkWho = gkList.length
+          ? gkList.map(function (it) {
+            var name = it.name ? esc(it.name) : '（没有名字）';
+            var id = it.userId ? '<span class="mono">' + esc(it.userId) + '</span>' : '';
+            var when = it.at ? '<span class="is-dim"> · 首次 ' + esc(agoText(it.at)) + '</span>' : '';
+            var said = it.lastText ? '<div class="is-dim">最后一句：' + esc(it.lastText) + '</div>' : '';
+            return '<div>' + name + ' ' + id + when + said + '</div>';
+          }).join('')
+          : '<span class="is-dim">没有人在等你批</span>';
+        gkRows = [
+          kv('等你批', gk.pending ? pill('warn', gk.pending + ' 人') : pill('ok', '没有人')),
+          kv('是谁', gkWho),
+          kv('怎么批', '<span class="is-dim">在 QQ 私聊里回「1」通过 ·「0」拒绝</span>'),
+          kv('已放行', mono(gk.approved) + ' 人'),
+          kv('已拒绝', mono(gk.denied) + ' 人')
+        ].join('');
+      }
+
       setHtml(cards, [
         card('连接与身份', identity),
         card('消息与响应', msgRows),
         card('守护', wdRows),
         card('QQ 连接', qRows),
+        card('陌生人审批', gkRows),
         card('学习器', learnRows),
         card('数据服务', sideRows)
       ].join(''));

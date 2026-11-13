@@ -7,6 +7,37 @@
 
 ---
 
+## 2026-11-13 · 控制台总览加「陌生人审批」（谁在等你批，看得见）
+
+> 主人 m02221：「还有这个插件里待审的为什么在控制台看不到」。
+
+**改了什么**
+
+- `tools/console-server.mjs`：`buildOverview()` 组 `out.plugin` 时补上 `gatekeeper: { owners, pending, pendingList[{userId,name,at,lastText,count,asked}], approved, denied }`。以前只透传 link/bot/model/metrics/memory/stickers/budget/learner/pest，挂件能看到的审批队列，`/api/overview` 里一个字都没有。只搬数据，不新增写接口。
+- `console/console.js`：总览页新增「陌生人审批」卡。有人等：黄条「N 人」+ 每人「名字（QQ 号）· 首次多久之前」+「最后一句」；没人等：「没有人在等你批」；另列已放行 / 已拒绝。照样只给提示「在 QQ 私聊里回「1」通过 ·「0」拒绝」，不放批准按钮 —— 审批必须在 QQ 里回，那里才有发信人身份（见 `plugin/dsh-qq-whale/lib/web.js` 里 gatekeeper 的设计说明）。
+- `console/index.html`：待核实页副标题补一句，说明「陌生人的好友/私聊申请不在这页」，避免把两条队列看混。
+- 重新打包 `dist/molly-console.exe` 并同步 `dist/desktop/`（exe + 前端三件套），重启控制台进程。
+
+**为什么**
+
+控制台的「待核实」是记忆入库闸门（`memory/pending`），陌生人审批是 `gatekeeper`，两条完全不同的队列。挂件黄条读的是 `/state` 的 `gatekeeper`，控制台既没透传也没渲染，所以主人在挂件上看到「有 1 个人在等你审批」，进控制台却找不到是谁。
+
+**怎么退回**
+
+`console/console.js` 删掉 `card('陌生人审批', gkRows)` 那一行；`tools/console-server.mjs` 删掉 `gatekeeper:` 字段。前端改完直接覆盖 `dist/desktop/console/console.js` 即可（静态资源不打包），服务端改动要重跑 `tools/build-exe.mjs`。备份：`dist/desktop/molly-console.exe.bak-20261113-113224`、`dist/desktop/console/*.bak-20261113-113224`。
+
+**验证**
+
+- `node --check` 两个文件 0。
+- 临时端口（19399）起一份服务：`/api/overview` 的 `plugin.gatekeeper = {owners:["222222222","333333333"], pending:0, pendingList:[], approved:20, denied:0}`。
+- 真机页面（19392）：总览出现「陌生人审批」卡；`pending:0` 显示「没有人」；用一份假数据（`pending:1` + `Oui！ 3062785938`）渲染验证排版——名字 / QQ 号 / 「首次 3 分钟前」/「最后一句：[图片]」/ 已放行 19 / 已拒绝 0 都对。
+
+**构建坑（2026-11-13 记录）**
+
+G 盘（WD My Passport 2626）当天出现硬件故障（NTFS Event 140、`Molly.exe` 报 `0xc0000006`），在 G: 上跑 `tools/build-exe.mjs` 会在 postject 注入那步崩（`Fatal process out of memory: Zone`），而 blob 生成、生成 exe 都是正常的。绕法：把 `node.exe` 副本与 `dist/_build/sea-prep.blob` 拷到 C: 注入，再把成品 exe 拷回 `dist/desktop/`。**盘修好之前别在 G: 上直接构建 exe。**
+
+---
+
 ## 2026-11-08 · 控制台「检查更新」真的会去问 GitHub（并入 v1.1.8 正式版）
 
 > 主人 m01870：「控制台版本号没更新，检测更新没用吗，点了还是最新版」。

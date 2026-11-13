@@ -783,6 +783,30 @@ async function buildOverview() {
               nextPickInMinutes: isNum(s.pest.nextPickInMinutes) ? s.pest.nextPickInMinutes : null,
             }
           : null,
+        /*
+         * 陌生人审批队列。挂件（assets/qq-widget.js）从 /state 读同一份快照，
+         * 控制台以前完全没透传，主人只能在挂件上看到一个数字、在控制台看不到是谁。
+         * 这里只搬运、不提供批准入口 —— 审批必须回 QQ 私聊里回「1」，那里才有身份
+         * （见 plugin/dsh-qq-whale/lib/web.js 里 gatekeeper 的设计说明）。
+         */
+        gatekeeper: s.gatekeeper
+          ? {
+              owners: Array.isArray(s.gatekeeper.owners) ? s.gatekeeper.owners.map(String) : [],
+              pending: isNum(s.gatekeeper.pending) ? s.gatekeeper.pending : null,
+              pendingList: Array.isArray(s.gatekeeper.pendingList)
+                ? s.gatekeeper.pendingList.slice(0, 20).map((p) => ({
+                    userId: String(p && p.userId != null ? p.userId : ''),
+                    name: typeof (p && p.name) === 'string' ? p.name : '',
+                    at: isNum(p && p.at) ? p.at : null,
+                    lastText: typeof (p && p.lastText) === 'string' ? p.lastText.slice(0, 120) : '',
+                    count: isNum(p && p.count) ? p.count : null,
+                    asked: !!(p && p.asked),
+                  }))
+                : [],
+              approved: isNum(s.gatekeeper.approved) ? s.gatekeeper.approved : null,
+              denied: isNum(s.gatekeeper.denied) ? s.gatekeeper.denied : null,
+            }
+          : null,
         base: pluginBase,
       };
 

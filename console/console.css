@@ -668,6 +668,60 @@ select.input{ cursor: pointer; }
   gap: var(--s-3);
 }
 
+/* 2026-11-13：表情包一多（现在快一千张），整页就无限往下长，窗口滚动条跑到窗口最右边，
+   白底上那根半透明 thumb 还几乎看不见（desktop glass 主题把它刷成白的）。
+   改成「网格自己滚动」：页头和搜索框留在上面不动，网格右边缘一条 12px 实体滑道，看得见也抓得住。
+   高度用 max-height 定值（同 §37 记忆页写法），不依赖各主题的 padding 差异。 */
+.page[data-page="stickers"]:not([hidden]){
+  display: flex;
+  flex-direction: column;
+}
+.page[data-page="stickers"] .sticker-grid{
+  flex: 0 0 auto;
+  align-content: start;
+  max-height: calc(100vh - 310px);
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding-right: var(--s-2);
+  margin-right: calc(var(--s-2) * -1);
+}
+/* 空列表 / 读取失败时不要占满整屏，否则提示会被挤到看不见 */
+.page[data-page="stickers"] .sticker-grid:empty{
+  max-height: none;
+  min-height: 0;
+  overflow: hidden;
+  padding-right: 0;
+  margin-right: 0;
+}
+.page[data-page="stickers"] .sticker-grid::-webkit-scrollbar{ width: 12px; }
+.page[data-page="stickers"] .sticker-grid::-webkit-scrollbar-track{
+  background: rgba(25, 33, 30, .055);
+  border-radius: 999px;
+  margin: 6px 4px;
+}
+.page[data-page="stickers"] .sticker-grid::-webkit-scrollbar-thumb{
+  background: rgba(25, 33, 30, .42);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: 999px;
+  min-height: 48px;
+}
+.page[data-page="stickers"] .sticker-grid::-webkit-scrollbar-thumb:hover,
+.page[data-page="stickers"] .sticker-grid::-webkit-scrollbar-thumb:active{
+  background: rgba(25, 33, 30, .58);
+  background-clip: content-box;
+}
+@supports not selector(::-webkit-scrollbar){
+  .page[data-page="stickers"] .sticker-grid{ scrollbar-width: thin; }
+}
+/* 窄屏（真手机宽度）才退回整页滚动。断点故意比 §37 记忆页的 1280 更窄：
+   桌面控制台默认窗口就是 1256px，用 1280 会把这条修正一并关掉。 */
+@media (max-width: 900px){
+  .page[data-page="stickers"] .sticker-grid{ max-height: none; min-height: 0; }
+}
+
 .sticker{
   display: flex;
   flex-direction: column;

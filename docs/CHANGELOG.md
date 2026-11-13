@@ -7,6 +7,39 @@
 
 ---
 
+## 2026-11-13 · 表情包页：999 张卡不再把整页拉长，滚动条就在网格边上
+
+> 主人 m03374：「控制台表情包界面也加一个滚动条方便拉动」（附截图，箭头指着页面右侧的空白）。
+
+**现象**
+
+- 表情包页现在有 999 张，`.sticker-grid` 一次性铺满整页，文档高度 57,236px —— 真正能滚的是**整页**，抓滚动条得先把鼠标移到窗口最右边。
+- 桌面壳（`Molly.exe`，`html[data-shell="desktop"][data-glass="true"]`）下全局滚动条 thumb 被刷成 `rgba(255,255,255,.52)`，白底上几乎看不见，等于「找不到可抓的东西」。
+
+**根因**
+
+`.sticker-grid` 只是普通 grid，没有任何高度约束；滚动发生在 `.content`（desktop glass）或文档（浏览器）上，滚条离内容远、颜色还被玻璃主题盖掉。
+
+**改了什么**
+
+- `console/console.css`（§13 表情包段）：网格自己成为滚动区 —— `max-height: calc(100vh - 310px)` + `overflow-y: auto` + `overscroll-behavior: contain` + `scrollbar-gutter: stable`；页头与搜索框留在上面不动。
+- 滚动条按 §37 记忆页那套「实体滑道」重画：12px 宽、track `rgba(25,33,30,.055)` 圆角、thumb `rgba(25,33,30,.42)`（hover/active `.58`）、`min-height: 48px`。选择器写成 `.page[data-page="stickers"] .sticker-grid::-webkit-scrollbar-thumb`，特异性高于玻璃主题的全局覆盖，所以桌面壳里也是深色的。
+- 空列表 / 读取失败时（`grid:empty`）放开 max-height，否则提示语会被挤到看不见；≤900px 的窄屏退回整页滚动（断点故意不用 §37 的 1280 —— 桌面控制台默认窗口就是 1256px，用 1280 会把这条修正一并关掉）。
+
+**为什么**
+
+一千张卡片整页铺开，首屏只能看到 9 张，翻页全靠窗口滚动条；主子要的是「就在旁边、看得见、抓得住」的滚动条。用 `max-height` 定值而不是 flex 定高，是因为各主题 `.content` 的 padding 不一样（v3 主题是 38/60，desktop 壳是 26/…），flex + `100vh` 会在某些主题下多出 50px 的二次滚动条。
+
+**怎么退回**
+
+删掉 `.page[data-page="stickers"] .sticker-grid{ max-height / overflow-y … }` 那几条（保留 `.sticker-grid` 的 grid 定义即可），回到整页滚动。
+
+**验证**
+
+- `C:\Molly-build-test` 的 ego 浏览器 1256×774 打开 `http://127.0.0.1:19392/#/stickers`：`docScrollH === docClientH === 774`（整页不再滚）、`gridClientH 464 / gridScrollH 56,931`（网格自己滚）、滚动条宽 **12px**；`scrollTop=3000` 能设置生效；搜索「白发少女」过滤后 8 张正常、清空恢复 999 张。
+- 截图：`C:\Molly-build-test\console-sticker-scroll-2.png`。
+- 静态资源不进 exe（SEA 只读 `EXE_DIR\console`），把 `console/console.css` 拷进 `dist/desktop/console/` 后刷新即生效，不用重编 `molly-console.exe`。
+
 ## 2026-11-13 · 语音「又掉了」：保活只探端口，半死的服务撑了 8 天
 
 > 主人 m02477：「还有，为什么现在 Molly 的语音又掉了」。

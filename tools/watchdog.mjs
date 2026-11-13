@@ -619,6 +619,11 @@ async function portListening(port) {
 // 新注册计划任务被系统拒绝（Access is denied），所以让本 watchdog（本身
 // 是提权任务、每分钟跑一次）顺手保活：端口不通就拉一次启动脚本。
 let _voiceSpawnAt = 0
+// 2026-11-13 事故（用户 m02477「Molly 的语音又掉了」）：11-05 起的那个 api_v2
+// 端口在听、/docs 也回 200，但对每一句 /tts 都回 400「[Errno 13] Permission denied」，
+// 而这里只探端口 → 半死状态撑了 8 天，watchdog 天天报「在线」。
+// 所以每 10 分钟真合成一句（脚本 -Check：text='嗯。'，能拿到 wav 才算活）。
+const VOICE_DEEP_CHECK_MS = 10 * 60 * 1000
 
 async function voiceAlive(port) {
   try {
@@ -630,13 +635,41 @@ async function voiceAlive(port) {
   }
 }
 
+// 真合成自检：调 voice-sovits-start.ps1 -Check，退出码 0 才算活着。
+async function voiceDeepOk() {
+  const script = path.join(HERE, 'voice-sovits-start.ps1')
+  if (!fs.existsSync(script)) return true // 没脚本就退回只看端口的老行为
+  try {
+    execFileSync('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Check',
+    ], { cwd: path.dirname(HERE), windowsHide: true, timeout: 130000, stdio: 'ignore' })
+    return true
+  } catch (e) {
+    log('语音保活：合成自检失败（端口通但合成不出声音）', String(e?.status ?? e?.message ?? e))
+    return false
+  }
+}
+
 async function ensureVoice(cfg) {
   if (!cfg || cfg.voiceKeepAlive === false) return { ok: true, skipped: true }
   const port = Number(cfg.voicePort || 9880)
-  if (await voiceAlive(port)) return { ok: true, note: '在线' }
+  const throttleFile = path.join(path.dirname(HERE), 'out', 'voice-keepalive-throttle.json')
+  let meta = {}
+  try {
+    meta = JSON.parse(fs.readFileSync(throttleFile, 'utf8')) || {}
+  } catch {}
+
+  let needRestart = false
+  if (await voiceAlive(port)) {
+    const deepDue = !meta.lastDeepAt || Date.now() - Number(meta.lastDeepAt) > VOICE_DEEP_CHECK_MS
+    if (!deepDue) return { ok: true, note: '在线' }
+    try { fs.writeFileSync(throttleFile, JSON.stringify({ ...meta, lastDeepAt: Date.now() })) } catch {}
+    if (await voiceDeepOk()) return { ok: true, note: '在线（合成自检通过）' }
+    // 端口在听但合成不出声音：这就是 11-13 那种「半死」，按死处理，下面重启。
+    needRestart = true
+  }
   // 节流必须落盘：watchdog 每分钟是一个新 node 进程，模块级变量记不住上次拉起时间，
   // 2026-10-22 实测 12 秒内被拉了两份 api_v2（第二份抢不到端口）。
-  const throttleFile = path.join(path.dirname(HERE), 'out', 'voice-keepalive-throttle.json')
   let lastSpawnAt = _voiceSpawnAt
   try {
     const j = JSON.parse(fs.readFileSync(throttleFile, 'utf8'))
@@ -645,7 +678,7 @@ async function ensureVoice(cfg) {
   if (lastSpawnAt && Date.now() - lastSpawnAt < 3 * 60 * 1000) {
     return { ok: false, note: '刚拉起过，等待就绪' }
   }
-  try { fs.writeFileSync(throttleFile, JSON.stringify({ at: Date.now() })) } catch {}
+  try { fs.writeFileSync(throttleFile, JSON.stringify({ ...meta, at: Date.now() })) } catch {}
   _voiceSpawnAt = Date.now()
   try {
     const script = path.join(HERE, 'voice-sovits-start.ps1')
@@ -661,9 +694,12 @@ async function ensureVoice(cfg) {
     execFileSync('C:\\Windows\\System32\\cmd.exe', [
       '/c', 'start', '""', '/b', 'powershell.exe',
       '-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', script,
+      ...(needRestart ? ['-Restart'] : []),
     ], { cwd: path.dirname(HERE), windowsHide: true, timeout: 15000, stdio: 'ignore' })
-    log('语音保活：9880 不在线，已触发 voice-sovits-start.ps1（cmd start）')
-    return { ok: false, note: '已触发启动' }
+    log(needRestart
+      ? '语音保活：端口在听但合成不出声音，已触发 voice-sovits-start.ps1 -Restart（cmd start）'
+      : '语音保活：9880 不在线，已触发 voice-sovits-start.ps1（cmd start）')
+    return { ok: false, note: needRestart ? '半死，已触发重启' : '已触发启动' }
   } catch (e) {
     log('语音保活：拉起失败', String(e?.message || e))
     return { ok: false, note: String(e?.message || e) }

@@ -18,6 +18,10 @@
 [CmdletBinding()]
 param(
     [switch]$Restart,
+    # 2026-11-13 事故（用户 m02477「语音又掉了」）后新增：
+    # 旧进程端口还在听、/docs 也 200，但每次 /tts 都 400「[Errno 13] Permission denied」，
+    # 而 watchdog 只看端口，于是这个半死状态撑了 8 天。加 -Check 让保活方真合成一句。
+    [switch]$Check,
     [int]$ReadyTimeoutSeconds = 180
 )
 
@@ -59,6 +63,49 @@ function Invoke-Api([string]$path) {
     } catch {
         return $null
     }
+}
+
+# 真·健康检查：合成一句最短的话，能拿到 wav 才算活着。
+# 光看端口（甚至 /docs）骗人：2026-11-05 起的那个实例端口在听、/docs 200，
+# 但 /tts 一律 400 errno 13，Molly 的语音就这么静悄悄地没了。
+function Test-Synth([int]$TimeoutSec = 120) {
+    $body = @{
+        text               = '嗯。'
+        text_lang          = 'zh'
+        ref_audio_path     = $RefAudio
+        prompt_text        = '想的美，今天本鱼才是老大，你喝白开水去！'
+        prompt_lang        = 'zh'
+        text_split_method  = 'cut0'
+        batch_size         = 1
+        media_type         = 'wav'
+        streaming_mode     = $false
+    } | ConvertTo-Json -Compress
+    $out = Join-Path $env:TEMP ("molly-voice-check-{0}.wav" -f $PID)
+    try {
+        $r = Invoke-WebRequest -Uri ("http://127.0.0.1:$Port/tts") -Method Post `
+            -Body ([System.Text.Encoding]::UTF8.GetBytes($body)) `
+            -ContentType 'application/json; charset=utf-8' `
+            -OutFile $out -TimeoutSec $TimeoutSec -PassThru -ErrorAction Stop
+        $size = (Get-Item $out -ErrorAction SilentlyContinue).Length
+        # -OutFile 不带 -PassThru 时 $r 是 $null（2026-11-13 踩过：健康检查永远 false），
+        # 所以两条都判：拿得到状态码就要 200，拿不到就看落盘大小。
+        if ($null -ne $r -and $r.StatusCode -ne 200) { return $false }
+        return ([int]$size -gt 2000)
+    } catch {
+        Write-Log ("✗ 合成测试失败：{0}" -f $_.Exception.Message)
+        if ($_.ErrorDetails) { Write-Log ("  detail: {0}" -f $_.ErrorDetails.Message) }
+        return $false
+    } finally {
+        Remove-Item $out -ErrorAction SilentlyContinue
+    }
+}
+
+# —— 健康检查模式：给 watchdog 调用，不重启、不写状态文件 ——
+if ($Check) {
+    if (-not (Test-Port $Port)) { Write-Log '健康检查：端口不在听'; exit 3 }
+    $ok = Test-Synth
+    Write-Log ("健康检查：synth={0}" -f $ok)
+    if ($ok) { exit 0 } else { exit 3 }
 }
 
 function Get-Status {
@@ -156,6 +203,14 @@ $sv = Invoke-Api ('/set_sovits_weights?weights_path=' + [uri]::EscapeDataString(
 $ref = Invoke-Api ('/set_refer_audio?refer_audio_path=' + [uri]::EscapeDataString($RefAudio))
 $status.refer = ($null -ne $ref)
 $status.note = ("gpt={0} sovits={1} refer={2}" -f ($null -ne $gpt), ($null -ne $sv), ($null -ne $ref))
+
+# —— 4. 就绪后真合成一句：权重都切上了也可能整个服务已经坏掉 ——
+$synth = Test-Synth
+$status.note = ("{0} synth={1}" -f $status.note, $synth)
 Save-Status $status
 Write-Log ("就绪：{0}" -f $status.note)
+if (-not $synth) {
+    Write-Log '✗ 服务端口通、权重也切上了，但合成不出声音——下次 watchdog 检查会重启它'
+    Exit-Script 4
+}
 Exit-Script 0

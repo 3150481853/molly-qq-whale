@@ -7,6 +7,48 @@
 
 ---
 
+## 2026-11-13 · 语音「又掉了」：保活只探端口，半死的服务撑了 8 天
+
+> 主人 m02477：「还有，为什么现在 Molly 的语音又掉了」。
+
+**现象**
+
+- 群里不再出现她的语音条；`/state` 里 `voiceSent` 停在旧数字，`voiceDemoted` 一路涨。
+- 本地 TTS（`127.0.0.1:9880`）对**任何**一句合成都立刻回 `HTTP 400 {"message":"tts failed","Exception":"[Errno 13] Permission denied"}`。
+- 那个进程是 **11-05 08:42 起的（PID 33372）**，它的 stdout 日志 `out/voice-sovits.out.log` **从 11-11 00:15 起再没写过一行** —— 连自己的日志都写不进去了，属于「端口在听、内部已经坏了」的半死状态。
+- 排除项：换三种参考音频（G: 原文件 / C: 副本 / D: 安装目录副本）报错完全一样，所以不是参考音频读不到；`GPT_SoVITS/configs/tts_infer.yaml` 能正常独占写，也不是配置被锁。
+
+**根因**
+
+`tools/watchdog.mjs` 的 `voiceAlive()` 只 `fetch('…/docs')` 看 200 —— 端口和文档页都在，于是半死状态被当成「在线」，`ensureVoice()` 永远早退，一天检查 1440 次都报健康。同时 `tools/voice-sovits-start.ps1 -Restart` 因为 `Get-Status` 读不到 `CommandLine`（权限不足）拿不到 pid，退化成「端口已在监听，跳过启动」，脚本级重启也救不回来。
+
+**改了什么**
+
+- `tools/voice-sovits-start.ps1`：新增 `Test-Synth()` —— 真发一句 `text='嗯。'` 到 `/tts`，拿到 >2KB 的 wav 才算活；新增 `-Check` 模式（给 watchdog 调用，只检查、不重启、不写状态文件）；就绪后的收尾也跑一次 `Test-Synth`，`status.note` 变成 `gpt=… sovits=… refer=… synth=…`，合成不出来就 exit 4 并写日志。
+- `tools/watchdog.mjs`：新增 `VOICE_DEEP_CHECK_MS = 10 * 60 * 1000` 与 `voiceDeepOk()`；`ensureVoice()` 现在先看端口，端口在听再每 10 分钟跑一次 `voice-sovits-start.ps1 -Check`，**自检失败就当死处理**，走原来的 `cmd /c start … -Restart` 重启路径（节流仍写 `out/voice-keepalive-throttle.json`，新增 `lastDeepAt` 字段，重启节流字段 `at` 保留原语义）。
+
+**为什么**
+
+语音是「加分项」，坏了群里只是少了语音条，不掉线、不报错，主人隔几天才发现。保活脚本的设计目标是「端口不通就拉起来」，但 GPT-SoVITS 这种带模型常驻的服务，端口在听 ≠ 能干活（这次是内部写盘被拒，连日志都写不动）。健康检查必须落到「能不能真的合成一句话」。
+
+**怎么退回**
+
+`watchdog.mjs` 里删掉 `voiceDeepOk()` 调用、把 `ensureVoice()` 的第一段改回 `if (await voiceAlive(port)) return { ok: true, note: '在线' }`；`voice-sovits-start.ps1` 删掉 `Test-Synth()`、`-Check` 分支与第 4 步，`status.note` 回到 `gpt/sovits/refer` 三项。
+
+**验证**
+
+- 手工重启：`powershell -NoProfile -ExecutionPolicy Bypass -File "${MOLLY_ROOT}\qq-whale\tools\voice-sovits-start.ps1" -Restart` → `就绪：gpt=True sovits=True refer=True`（20:27:53）。
+- 直连合成：POST `/tts`「测试一下，主人你听见了吗」→ **HTTP 200 / 154,284B / 4 秒**（前一刻同样请求是 400 errno 13）。
+- 新健康检查：`… -Check` → 日志 `健康检查：synth=True`，exit 0（修 `-OutFile` 不带 `-PassThru` 时 `$r` 为 `$null` 导致的假失败后复测通过）。
+- watchdog 实跑一次（`node tools/watchdog.mjs --once`，20:30:15）：日志里 `健康检查：synth=True`，`voice-keepalive-throttle.json` 出现 `lastDeepAt`，无重启动作。
+- `node --check tools/watchdog.mjs` = 0。
+
+**顺带记一笔（不是代码问题）**
+
+11-13 这类「进程还在、但什么都干不了」的形态，和当天 G 盘（WD My Passport 2626）的 NTFS Event 140 是同一种味道：设备层出错，进程活着但读写全废。真凶换盘才能根治。
+
+---
+
 ## 2026-11-13 · 控制台总览加「陌生人审批」（谁在等你批，看得见）
 
 > 主人 m02221：「还有这个插件里待审的为什么在控制台看不到」。

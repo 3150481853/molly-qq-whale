@@ -7,6 +7,37 @@
 
 ---
 
+## 2026-11-14 · 开唱前先看一眼提交内存：不够就直接唱短的
+
+> 主人 m03208：「可以」——同意我在页面文件那条建议里提的「开唱前先看提交内存，低于 3GB 就直接用短时长」。
+
+**现象**
+
+- 上一条是「崩了以后砍短重跑」——可重跑也要三五分钟，主人已经白等一轮。现场那次提交内存只剩 6.4GB，pymss 就是在注意力层要不到内存崩的。
+
+**改了什么**
+
+- `lib/bili-sing.js`：
+  - 新增导出 `freeCommitMB({fresh})`：走 `powershell -NoProfile -Command "[math]::Round((Get-CimInstance Win32_OperatingSystem).FreeVirtualMemory / 1024)"`，拿的是 **提交上限 − 已提交**（`os.freemem()` 只是物理空闲，页面文件够大时两者差一大截，不能替代）；一次 0.6~1.5 秒，结果缓存 10 秒，拿不到就返回 `null`。
+  - 构造函数新增 `memoryGuardMB`（默认 **3000**，设 0 关闭）与可注入的 `probe`（测试用）。
+  - 新增 `_precheckMaxSec()`：`freeMB < memoryGuardMB` → 这一轮直接压到 `min(45, maxSec)`；探针抛错/拿不到数字 → 照原时长跑（宁可按原时长试，不凭猜测砍歌）；本来就只唱 30 秒的不会被放大。
+  - `_singWithFallback({…, maxSec})` 接受本轮时长，重跑阈值跟着这一轮走（原来写死 `this.maxSec`）；`_run` 一律收到明确秒数。
+  - `sing()`：命中预检降级时结果带 `preShortened` / `freeCommitMB`，**且不写缓存**（避免 45 秒的半首把 110 秒的缓存占掉）。
+- `lib/engine.js`（构造 `BiliSinger` 处）：透传 `memoryGuardMB: config.singMemoryGuardMB`，可用配置覆盖或设 0 关掉。
+
+**怎么退回**
+
+- 想关掉预检：配置 `singMemoryGuardMB: 0`，不用改代码。
+- 想改阈值：`singMemoryGuardMB: 5000` 之类。
+- 彻底回退：删掉 `_precheckMaxSec()` 调用，`sing()` 里恢复成 `this._singWithFallback({ query: q, bv, shift })`。
+
+**验证**
+
+- `node --check` 三个文件 → 0。
+- `node tools/test-sing-oom.mjs` → **17 passed, 0 failed**（原 10 条 + 新增 7 条：内存够/不够/本来就短/探针抛错/探针 null/guard=0 不调探针/`sing()` 端到端）。
+- 回归：`test-quote-anchor` 51、`test-split-reply` 8、`test-relations-owner` 4、`test-lane-dedupe` 18 全绿；`test-command-fixes` 仍是 11 过 / 1 挂（历史遗留的 `readLastAssistant` 兜底用例，与本改动无关）。
+- 线上副本 `${HOME}\.dsh\profiles\desktop\node_modules\dsh-qq-whale\lib\` 已同步：`bili-sing.js` SHA `2D81956E6A5B`、`engine.js` SHA `1CC4C8834823`，与源码一致；重启 DSH 生效。
+
 ## 2026-11-14 · 唱歌崩了别把 traceback 甩进群；内存不够就砍短重跑一次
 
 > 主人 m03582：「1.报错 2.报错」（两张截图：`Everything` 弹 `mem_virtual_alloc(): error: 1455`，群里 Molly 回「没弄成（退出码 1： x, _ = self.attention(q, k, v, mask=attn_mask) | ^^^^^^^^^^^^^^^^），换一首吧。」）。

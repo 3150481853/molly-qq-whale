@@ -19,7 +19,7 @@
  * JSON、缓存结果。一首歌（默认只做 75 秒）大约 70~90 秒，所以超时给得很宽。
  */
 
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -53,6 +53,37 @@ export function isMemoryish(text) {
   return /DefaultCPUAllocator|out of memory|not enough memory|can't allocate|cannot allocate|MemoryError|bad allocation|OutOfMemory|error: 1455|页面文件/i.test(s)
 }
 
+/**
+ * 现在还剩多少「提交内存」（MB）？
+ *
+ * 主人 m03208 同意：开唱之前先看一眼，低于阈值就直接用短时长，别等它崩了再重跑。
+ * 走 `FreeVirtualMemory`（= 提交上限 − 已提交），这才是 pymss 要不到内存的真实原因；
+ * `os.freemem()` 只是物理空闲，页面文件够大时它俩能差一大截，不能替代。
+ *
+ * 一次 PowerShell 约 0.6~1.5 秒，换来少跑一轮三五分钟的渲染，值。结果缓存 10 秒，
+ * 同一个人的连点不会反复起进程。拿不到就返回 null（当作不知道，不拦）。
+ */
+let _commitCache = { at: 0, mb: null }
+
+export function freeCommitMB({ fresh = false } = {}) {
+  if (process.platform !== 'win32') return null
+  const now = Date.now()
+  if (!fresh && now - _commitCache.at < 10000) return _commitCache.mb
+  let mb = null
+  try {
+    const out = execFileSync('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-Command',
+      '[math]::Round((Get-CimInstance Win32_OperatingSystem).FreeVirtualMemory / 1024)',
+    ], { timeout: 5000, encoding: 'utf8', windowsHide: true })
+    const n = Number(String(out).trim())
+    if (Number.isFinite(n) && n >= 0) mb = n
+  } catch {
+    mb = null
+  }
+  _commitCache = { at: now, mb }
+  return mb
+}
+
 export class BiliSinger {
   /**
    * @param {object} opts
@@ -60,13 +91,17 @@ export class BiliSinger {
    * @param {string} opts.script  bili_sing.py 绝对路径
    * @param {string} [opts.cacheDir]
    * @param {number} [opts.maxSec]  只做多久（秒），0 = 整首
+   * @param {number} [opts.memoryGuardMB] 提交内存低于多少 MB 就先砍短（默认 3000，0 = 关闭）
+   * @param {Function} [opts.probe]  测提交内存的函数（测试时可注入）
    * @param {number} [opts.timeoutMs]
    * @param {Function} [opts.logger]
    */
-  constructor({ python, script, cacheDir, maxSec = 75, timeoutMs = 600000, logger } = {}) {
+  constructor({ python, script, cacheDir, maxSec = 75, memoryGuardMB = 3000, probe, timeoutMs = 600000, logger } = {}) {
     this.python = python || ''
     this.script = script || ''
     this.maxSec = Number(maxSec) || 0
+    this.memoryGuardMB = Number(memoryGuardMB) || 0
+    this.probe = typeof probe === 'function' ? probe : freeCommitMB
     this.timeoutMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : 600000
     this.logger = typeof logger === 'function' ? logger : () => {}
     this.cacheDir = cacheDir || ''
@@ -142,9 +177,13 @@ export class BiliSinger {
     const running = this.inflight.get(key)
     if (running) return running
 
-    const job = this._singWithFallback({ query: q, bv, shift })
+    // 开唱前先看提交内存（主人 m03208 批的）：不够就这次直接用短时长，别等崩了再重跑
+    const pre = this._precheckMaxSec()
+
+    const job = this._singWithFallback({ query: q, bv, shift, maxSec: pre.maxSec })
       .then((res) => {
-        if (res.ok) this._writeCache(key, res)
+        if (res.ok && !pre.shortened) this._writeCache(key, res)
+        if (pre.shortened && res.ok) return { ...res, preShortened: pre.maxSec, freeCommitMB: pre.freeMB }
         return res
       })
       .finally(() => this.inflight.delete(key))
@@ -153,14 +192,37 @@ export class BiliSinger {
   }
 
   /**
+   * 提交内存够不够？够就照常，不够就把这一轮的时长压到 45 秒以内。
+   * 探针失败（拿不到数字）时一律照常跑 —— 宁可按原时长试一次，也不要凭猜测砍歌。
+   * @returns {{maxSec:number, freeMB:number|null, shortened:boolean}}
+   */
+  _precheckMaxSec() {
+    const maxSec = this.maxSec
+    if (!(this.memoryGuardMB > 0)) return { maxSec, freeMB: null, shortened: false }
+    let free = null
+    try {
+      free = this.probe()
+    } catch {
+      free = null
+    }
+    if (free == null || !Number.isFinite(Number(free))) return { maxSec, freeMB: null, shortened: false }
+    const freeMB = Math.round(Number(free))
+    if (freeMB >= this.memoryGuardMB) return { maxSec, freeMB, shortened: false }
+    const short = Math.round(Math.min(45, maxSec > 0 ? maxSec : 45))
+    this.logger('warn', `唱歌：提交内存只剩 ${freeMB}MB（低于 ${this.memoryGuardMB}MB），这次只唱 ${short} 秒`)
+    return { maxSec: short, freeMB, shortened: true }
+  }
+
+  /**
    * 跑一次；如果是内存不够崩的，砍短时长再来一次（m03582）。
    * 主人等一次三五分钟已经够久了，所以只重试一次，且只在原时长够长时才有意义。
    */
-  async _singWithFallback({ query, bv, shift }) {
-    const res = await this._run({ query, bv, shift })
-    if (res.ok || !res.memoryHint || !(this.maxSec > 50)) return res
-    const shorter = Math.max(20, Math.min(45, Math.round(this.maxSec / 2)))
-    this.logger('warn', `唱歌：内存不够，改成 ${shorter} 秒重跑一次（原来是 ${Math.round(this.maxSec)} 秒）`)
+  async _singWithFallback({ query, bv, shift, maxSec }) {
+    const first = maxSec == null ? this.maxSec : Number(maxSec) || 0
+    const res = await this._run({ query, bv, shift, maxSec: first })
+    if (res.ok || !res.memoryHint || !(first > 50)) return res
+    const shorter = Math.max(20, Math.min(45, Math.round(first / 2)))
+    this.logger('warn', `唱歌：内存不够，改成 ${shorter} 秒重跑一次（原来是 ${Math.round(first)} 秒）`)
     const again = await this._run({ query, bv, shift, maxSec: shorter })
     if (again.ok) return { ...again, shortened: shorter }
     return { ...again, error: again.error || res.error }

@@ -412,6 +412,8 @@ export class ChatEngine {
         script: config.singBiliScript || '',
         cacheDir: path.join(config.dataDir || config.memoryDir, 'sing', 'bili-cache'),
         maxSec: config.singBiliMaxSec,
+        // 主人 m03208：开唱前先看提交内存，低于 3GB 就直接用短时长（0 = 关掉这个预检）
+        memoryGuardMB: config.singMemoryGuardMB,
         timeoutMs: config.singBiliTimeoutMs,
         logger,
       })

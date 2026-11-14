@@ -66,7 +66,7 @@ await t('内存不够：砍短到一半重跑一次，成功就带 shortened', a
   const res = await s._singWithFallback({ query: 'モス', bv: '', shift: '' })
   assert.equal(res.ok, true)
   assert.equal(res.shortened, 45)
-  assert.deepEqual(s.calls, [undefined, 45])
+  assert.deepEqual(s.calls, [110, 45])
 })
 
 await t('重跑也崩：返回失败，不无限重试', async () => {
@@ -94,6 +94,78 @@ await t('短时长也有下限，不会砍到 0', async () => {
   const s = makeSinger([oom, { ok: false, memoryHint: true, error: '崩了' }], { maxSec: 52 })
   await s._singWithFallback({ query: 'x', bv: '', shift: '' })
   assert.equal(s.calls[1], 26)
+})
+
+console.log('_precheckMaxSec（开唱前看提交内存，主人 m03208）：')
+
+function makeProbeSinger({ maxSec = 110, memoryGuardMB = 3000, free = 6000, throwIt = false } = {}) {
+  const s = new BiliSinger({
+    python: '', script: '', maxSec, memoryGuardMB, timeoutMs: 1000,
+    probe: () => { if (throwIt) throw new Error('powershell 没了'); return free },
+  })
+  return s
+}
+
+await t('提交内存够（6GB）：照常不砍', () => {
+  const p = makeProbeSinger({ free: 6000 })._precheckMaxSec()
+  assert.equal(p.maxSec, 110)
+  assert.equal(p.shortened, false)
+  assert.equal(p.freeMB, 6000)
+})
+
+await t('提交内存低于 3GB：这次直接 45 秒', () => {
+  const p = makeProbeSinger({ free: 1200 })._precheckMaxSec()
+  assert.equal(p.maxSec, 45)
+  assert.equal(p.shortened, true)
+})
+
+await t('本来就只唱 30 秒：不放大', () => {
+  const p = makeProbeSinger({ maxSec: 30, free: 500 })._precheckMaxSec()
+  assert.equal(p.maxSec, 30)
+  assert.equal(p.shortened, true)
+})
+
+await t('探针抛错：当作不知道，照常跑', () => {
+  const p = makeProbeSinger({ throwIt: true })._precheckMaxSec()
+  assert.equal(p.maxSec, 110)
+  assert.equal(p.shortened, false)
+  assert.equal(p.freeMB, null)
+})
+
+await t('探针拿不到数字（null）：照常跑', () => {
+  const s = new BiliSinger({ python: '', script: '', maxSec: 110, probe: () => null })
+  const p = s._precheckMaxSec()
+  assert.equal(p.maxSec, 110)
+  assert.equal(p.shortened, false)
+})
+
+await t('memoryGuardMB = 0：预检整个关掉，连探针都不调', () => {
+  let called = 0
+  const s = new BiliSinger({
+    python: '', script: '', maxSec: 110, memoryGuardMB: 0,
+    probe: () => { called += 1; return 100 },
+  })
+  const p = s._precheckMaxSec()
+  assert.equal(p.maxSec, 110)
+  assert.equal(called, 0)
+})
+
+await t('sing() 端到端：内存少 → 只跑 45 秒、结果带 preShortened、不进缓存', async () => {
+  const s = makeProbeSinger({ free: 900 })
+  Object.defineProperty(s, 'enabled', { value: true })
+  s.calls = []
+  let cached = 0
+  s._writeCache = () => { cached += 1 }
+  s._run = async ({ maxSec: sec }) => {
+    s.calls.push(sec)
+    return { ok: true, file: 'C:/x.wav', seconds: 45 }
+  }
+  const res = await s.sing('モス')
+  assert.equal(res.ok, true)
+  assert.equal(res.preShortened, 45)
+  assert.equal(res.freeCommitMB, 900)
+  assert.deepEqual(s.calls, [45])
+  assert.equal(cached, 0)
 })
 
 console.log(`\n${pass} passed, ${fail} failed`)

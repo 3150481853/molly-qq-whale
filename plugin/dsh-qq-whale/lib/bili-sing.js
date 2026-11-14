@@ -39,6 +39,20 @@ export function lastJsonLine(text) {
   return null
 }
 
+/**
+ * 这次的失败像不像「内存不够」？
+ *
+ * 主人 m03582 报的现场：群里收到「没弄成（退出码 1： x, _ = self.attention(q, k, v,
+ * mask=attn_mask) | ^^^^^^^^^^^^^^^^），换一首吧。」—— 那是 torch 在注意力层分配
+ * 张量时提交内存不足崩掉，把 traceback 残句直接甩给主人看，既不像话也浪费时间。
+ * 同一时刻 Everything 报 `mem_virtual_alloc(): error: 1455`（页面文件不够），
+ * 说明是整机提交内存见底，不是歌的问题。这种失败砍短时长重跑一次往往就过了。
+ */
+export function isMemoryish(text) {
+  const s = String(text || '')
+  return /DefaultCPUAllocator|out of memory|not enough memory|can't allocate|cannot allocate|MemoryError|bad allocation|OutOfMemory|error: 1455|页面文件/i.test(s)
+}
+
 export class BiliSinger {
   /**
    * @param {object} opts
@@ -128,7 +142,7 @@ export class BiliSinger {
     const running = this.inflight.get(key)
     if (running) return running
 
-    const job = this._run({ query: q, bv, shift })
+    const job = this._singWithFallback({ query: q, bv, shift })
       .then((res) => {
         if (res.ok) this._writeCache(key, res)
         return res
@@ -138,12 +152,27 @@ export class BiliSinger {
     return job
   }
 
-  _run({ query, bv, shift }) {
+  /**
+   * 跑一次；如果是内存不够崩的，砍短时长再来一次（m03582）。
+   * 主人等一次三五分钟已经够久了，所以只重试一次，且只在原时长够长时才有意义。
+   */
+  async _singWithFallback({ query, bv, shift }) {
+    const res = await this._run({ query, bv, shift })
+    if (res.ok || !res.memoryHint || !(this.maxSec > 50)) return res
+    const shorter = Math.max(20, Math.min(45, Math.round(this.maxSec / 2)))
+    this.logger('warn', `唱歌：内存不够，改成 ${shorter} 秒重跑一次（原来是 ${Math.round(this.maxSec)} 秒）`)
+    const again = await this._run({ query, bv, shift, maxSec: shorter })
+    if (again.ok) return { ...again, shortened: shorter }
+    return { ...again, error: again.error || res.error }
+  }
+
+  _run({ query, bv, shift, maxSec }) {
     return new Promise((resolve) => {
       const args = ['-u', this.script]
       if (bv) args.push('--bv', bv)
       else args.push('--search', query)
-      if (this.maxSec > 0) args.push('--max-sec', String(Math.round(this.maxSec)))
+      const secs = maxSec == null ? this.maxSec : Number(maxSec) || 0
+      if (secs > 0) args.push('--max-sec', String(Math.round(secs)))
       args.push('--mix')
       if (shift !== '' && shift != null) args.push('--shift', String(shift))
 
@@ -228,8 +257,19 @@ export class BiliSinger {
           })
           return
         }
-        const tail = (err || out).trim().split(/\r?\n/).slice(-6).join(' | ')
-        finish({ ok: false, error: parsed?.error || `退出码 ${code}：${tail || '没有输出'}` })
+        // 失败时说人话：traceback 只写日志，群里别看到「^^^^」这种东西（m03582）
+        const raw = `${err}\n${out}`
+        if (isMemoryish(raw)) {
+          this.logger('warn', `唱歌：内存不够崩了（退出码 ${code}），尾段：${raw.trim().split(/\r?\n/).slice(-4).join(' | ')}`)
+          finish({ ok: false, memoryHint: true, error: '内存不够，渲染崩了' })
+          return
+        }
+        const tail = (err || out).trim().split(/\r?\n/).filter((l) => {
+          const t = l.trim()
+          return t && !/^\^+$/.test(t)
+        }).slice(-3).join(' | ')
+        this.logger('warn', `唱歌：退出码 ${code}，尾段：${tail || '没有输出'}`)
+        finish({ ok: false, error: parsed?.error || `渲染时出错了（退出码 ${code}）` })
       })
     })
   }

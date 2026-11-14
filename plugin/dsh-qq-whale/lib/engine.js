@@ -4289,7 +4289,8 @@ export class ChatEngine {
     if (!res?.ok) {
       this.stats.singFail += 1
       this.logger('warn', `扒音轨唱歌失败：${res?.error || '未知原因'}`)
-      await this.sayQuick(ev, scene, `没弄成（${String(res?.error || '未知原因').slice(0, 80)}），换一首吧。`)
+      const why = String(res?.error || '未知原因').slice(0, 40)
+      await this.sayQuick(ev, scene, `没弄成（${why}），换一首吧。`)
       return true
     }
     // 主人 2026-11-07：唱歌只发「图卡 + 语音」，不再发那一堆文字（出处记在 result.json 里）

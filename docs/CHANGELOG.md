@@ -7,7 +7,51 @@
 
 ---
 
-## 2026-11-13 · 表情包页：999 张卡不再把整页拉长，滚动条就在网格边上
+## 2026-11-14 · 唱歌崩了别把 traceback 甩进群；内存不够就砍短重跑一次
+
+> 主人 m03582：「1.报错 2.报错」（两张截图：`Everything` 弹 `mem_virtual_alloc(): error: 1455`，群里 Molly 回「没弄成（退出码 1： x, _ = self.attention(q, k, v, mask=attn_mask) | ^^^^^^^^^^^^^^^^），换一首吧。」）。
+
+**现象**
+
+- 点歌《モス》后，Molly 等了几分钟，最后在群里甩出一段被 `.slice(0,80)` 砍断的 Python traceback —— 主人看到的是 `^^^^` 这种残句，既不像话也没告诉他「这次为什么没成」。
+- 同一时刻 `Everything` 报 `mem_virtual_alloc(): Fatal error: out of memory, size: 000000000000040f, error: 1455`（1455 = 页面文件太小）—— 说明当时整机**提交内存**已经见底。
+
+**根因**
+
+- 不是歌的问题：当晚用同样的命令（`--search モス --max-sec 110 --mix`）手工重跑两次，**都成功**（25 秒版、110 秒版都 exit 0，产物 `ne1372726245_110s_p+0\molly-ne1372726245.wav` / `mix-…wav`）。
+- 崩在 `pymss` 推理的注意力层（`x, _ = self.attention(q, k, v, mask=attn_mask)`）：torch 在 CPU 上给张量要不到提交内存 → `exit 1`。当时内存账：物理 31.6GB 可用 6.7GB、提交上限 59.1GB 可用 6.4GB、`C:\pagefile.sys` 只有 890MB（自动管理，峰值 2.7GB）；同时跑着 15 个 `DeepSeek Harness`（私有 3.2GB）、49 个 msedge、`python`（GPT-SoVITS 9880）私有 6.0GB、`pythonw` 4.5GB。
+- 报错文案由 `lib/bili-sing.js:232` 拼成 `退出码 ${code}：${tail}`（tail = 最后 6 行 stderr），再被 `lib/engine.js:4292` 的 `.slice(0,80)` 砍半发出去。
+
+**改了什么**
+
+- `lib/bili-sing.js`：
+  - 新增导出 `isMemoryish(text)`：认 `DefaultCPUAllocator` / `out of memory` / `not enough memory` / `can't allocate` / `MemoryError` / `bad allocation` / `error: 1455` / `页面文件`。
+  - 新增 `_singWithFallback({query,bv,shift})`：`_run` 返回 `memoryHint` 且原时长 > 50 秒时，砍到 **min(45, 一半)** 秒再跑一次（成功则结果带 `shortened`），只重试一次，不无限循环。
+  - `_run({…, maxSec})` 支持临时时长；失败分支：内存类 → `{ ok:false, memoryHint:true, error:'内存不够，渲染崩了' }`，其它 → `渲染时出错了（退出码 N）`，**traceback 只写日志、不再进群**。
+- `lib/engine.js:4289-4294`：失败提示改成 `没弄成（${why}），换一首吧。`，`why` 截 40 字（不再 80 字砍半截 traceback）。
+- 新增自测 `tools/test-sing-oom.mjs`（10 条：错误分类 5 + 降级重跑 5）。
+
+**为什么**
+
+主人要的是「成没成、为什么」，不是一段 Python 栈。内存类失败在数据上确实会用更短时长跑通（现场复现两次都过），所以「先砍短再试一次」比「直接说换一首」划算；但仍然只试一次，避免让主人等两轮五分多钟。
+
+**怎么退回**
+
+- 不想自动重跑：把 `_singWithFallback` 里的 `if (res.ok || !res.memoryHint || !(this.maxSec > 50)) return res` 改成 `return res`。
+- 想恢复旧文案：`engine.js` 那句改回 `String(res?.error || '未知原因').slice(0, 80)`。
+
+**验证**
+
+- `node --check plugin/dsh-qq-whale/lib/bili-sing.js` / `engine.js` → 0。
+- `node tools/test-sing-oom.mjs` → **10 passed, 0 failed**。
+- 回归全绿：test-quote-anchor 51、test-carry 7、test-this-turn 5、test-lane-dedupe 18、test-split-reply 8、test-relations-owner 4、test-engine-text 7、test-quote 32；`test-command-fixes` 仍是 11 过 / 1 挂（历史遗留的 `readLastAssistant` 兜底用例，与本改动无关）。
+- 线上副本 `${HOME}\.dsh\profiles\desktop\node_modules\dsh-qq-whale\lib\` 已同步：`bili-sing.js` SHA `677D90605C83`、`engine.js` SHA `F2D10ECB7C0B`，与源码一致；重启 DSH 生效。
+
+**顺带**
+
+- 内存这块软件治不了根：那台机器提交上限 59.1GB，但 `C:\pagefile.sys` 是「自动管理」且只长到 890MB。建议手动设成固定 16~32GB（系统属性 → 高级 → 性能 → 虚拟内存），并关掉不用的 DSH 窗口（15 个进程 ≈ 3.2GB 私有）。
+
+
 
 > 主人 m03374：「控制台表情包界面也加一个滚动条方便拉动」（附截图，箭头指着页面右侧的空白）。
 

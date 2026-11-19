@@ -79,6 +79,14 @@ function stripInternalMarks(s) {
   // ⑤ CQ 码：[CQ:at,qq=123] 或 CQ:image,file=a.jpg（参数止于空白/右括号，
   //    不能吞掉后面的正常文字）
   s = s.replace(/\[?CQ:[a-z_]+(?:,[^\s\]]*)?\]?/gi, SENTINEL)
+  // ⑥ 上游动作回执（2026-11-19 真机泄漏，QQ 群 125）：bili 的压缩工具拒绝了
+  //    一次 1415 字符的小折叠（minCompressRange=5000），回的
+  //    「❌ [ACP] Compression FAILED: Total compressible content too small…」
+  //    进了她的上下文，下一轮被当成正文发进群。这是**回执**不是内容——
+  //    只认「整行以回执前缀开头」（回执永远另起一行），不按关键词在句子中间砍，
+  //    所以正常聊天里提到 "compression" 不受影响。
+  s = s.replace(/^[^\S\n]*(?:[❌⚠⛔]\ufe0f?\s*)?\[ACP\][^\n]*$/gim, '')
+  s = s.replace(/^[^\S\n]*\[Compression\s+(?:FAILED|refused|no-op)\b[^\n]*$/gim, '')
   // 占位清理：连同前面那个分隔符一起删，避免留下「，，」
   s = s.replace(/[，,、；;：:]?\s*\u0002\s*/g, '')
   s = s.replace(/\u0002/g, '')

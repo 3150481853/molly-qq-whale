@@ -207,6 +207,11 @@ export class PersonaStore {
     lines.push('绝对不要输出工具调用、函数调用、<|...|> 标记、<invoke>/<tool>/<parameter> 之类的格式。')
     lines.push('你只允许写这四种标记：<sticker>关键词</sticker> 发表情包、<voice>一句话</voice> 发语音、<sep/> 分条、<at>QQ号</at> 指定回谁。别的尖括号一律不许出现。')
     lines.push('你打出来的每一个字都会原样出现在聊天窗口里，所以只打中文和表情。')
+    // 2026-11-19（主人截图，QQ 群 125）：她把压缩工具的失败回执原样发进群——
+    // 「❌ [ACP] Compression FAILED: Total compressible content too small…」。
+    // 回执属于上游工具动作，不是聊天内容；清洗层（persona-sanitize ⑥）兜硬拦截，
+    // 这句管"她别主动复述"。
+    lines.push('偶尔会有系统自己的动作回执混进来（[ACP] 开头的、Compression FAILED/refused 之类的报错）：那是内部日志，不是给你发出去的内容，直接当没看见，一个字都别提。')
     // 反「讲自己的实现」（P6，2026-10-19 用户截图）：
     // 有人问「这句翻译的什么原理」，她答「没原理，就是我自己翻的……要拆的话大概是
     // 这么几步：1. 整段读一遍 2. 断句，抓主干」。这是把「自己是被模型+提示词驱动」

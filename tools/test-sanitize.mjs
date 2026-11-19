@@ -357,6 +357,51 @@ t('33. 原有段落没被删：你有 QQ 的手 / 先列 todo / 有产出文件�
   )
 })
 
+/* 上游动作回执（2026-11-19，QQ 群 125 真机泄漏）
+ * 背景：bili（billion-context）拒绝了 Molly 的一次 1415 字符小折叠
+ * （compress.minCompressRange 默认 5000），回执
+ *   「❌ [ACP] Compression FAILED: Total compressible content too small…」
+ * 进了她的上下文，下一轮被当正文发进群。
+ * 这里只测「整行以回执前缀开头就整行丢」，**不测关键词过滤**——
+ * 句中的 compression / ACP 属于正常内容，一刀切会误伤技术问答。
+ */
+console.log('上游动作回执（群 125 泄漏，2026-11-19）')
+
+t('34. 群 125 原文：回执整行消失，前面的正常话保留', () => {
+  const out = sanitizeOutbound(
+    '那是要上色了呗，上完能好看不少，这个脸我实在看不下去了。\n' +
+      '❌ [ACP] Compression FAILED: Total compressible content too small (1415 chars across 1 range(s), min 5000).',
+  )
+  assert.equal(out, '那是要上色了呗，上完能好看不少，这个脸我实在看不下去了。')
+})
+
+t('35. 换任一前缀/emoji 都认，且不吞下一行', () => {
+  const out = sanitizeOutbound('⚠️ [ACP] Compression refused: nothing to do\n后面这句要留着')
+  assert.equal(out, '后面这句要留着')
+
+  const bare = sanitizeOutbound('[Compression no-op: nothing to compact]\n照样留着')
+  assert.equal(bare, '照样留着')
+})
+
+t('36. 句中顺带提到 compression / ACP 不动（回执只认行首）', () => {
+  const inline = '压缩就是 compression 的意思，别跟 zip 搞混。'
+  assert.equal(sanitizeOutbound(inline), inline)
+
+  const talk = '「ACP」这个缩写我不认识，你说的是协议吗？'
+  assert.equal(sanitizeOutbound(talk), talk)
+})
+
+t('37. 整条只有回执 → 空串（上层「空就不发」才拦得住）', () => {
+  assert.equal(sanitizeOutbound('❌ [ACP] Compression FAILED: cancelled. Nothing compressed.'), '')
+})
+
+const personaSrc = readFileSync(new URL('../plugin/dsh-qq-whale/lib/persona.js', import.meta.url), 'utf8')
+
+t('38. 提示词侧也有护栏：回执属内部日志，不许复述', () => {
+  has(personaSrc, '动作回执混进来')
+  has(personaSrc, '那是内部日志，不是给你发出去的内容')
+})
+
 console.log('')
 console.log(`${pass} passed, ${fails.length} failed`)
 if (fails.length) {

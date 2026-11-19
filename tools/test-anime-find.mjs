@@ -18,6 +18,8 @@ import {
   matchRank,
   rankCandidates,
   mergeMagnets,
+  dedupeMagnets,
+  magnetizeItems,
   buildAnimeTool,
   registerAnimeTool,
   ANIME_TOOL_NAME,
@@ -354,6 +356,56 @@ await t('注册成功后把 dispose 交回去', () => {
   assert.equal(typeof res.dispose, 'function', 'register 给了 dispose 就要原样交回去')
   res.dispose()
   assert.equal(disposed, true)
+})
+
+console.log('磁力去重 / .torrent 换 magnet：')
+
+await t('dedupeMagnets：同标题同体积只留一条，优先留带 magnet 的', () => {
+  const out = dedupeMagnets([
+    { title: '[A] 进击 1080p', size: 1e9, torrent: 'https://x/1.torrent' },
+    { title: '[A] 进击 1080p', size: 1e9, magnet: 'magnet:?xt=urn:btih:AA' },
+    { title: '[B] 进击 720p', size: 2e8, torrent: 'https://x/2.torrent' },
+  ])
+  assert.equal(out.length, 2, '重复那条要并掉')
+  assert.match(out[0].magnet, /btih:AA/, '留下带 magnet 的那条')
+})
+
+await t('magnetizeItems：.torrent 换成真 magnet，转不出来就留链接', async () => {
+  const info = 'd6:lengthi999e4:name3:abce'
+  const torrentBuf = Buffer.from(`d4:info${info}e`, 'binary')
+  const good = 'https://x/good.torrent'
+  const bad = 'https://x/bad.torrent'
+  const res = await magnetizeItems(
+    {
+      items: [
+        { title: '好种子', size: 3e9, torrent: good },
+        { title: '坏种子', size: 2e9, torrent: bad },
+        { title: '本来就是 magnet', size: 1e9, magnet: 'magnet:?xt=urn:btih:FEED' },
+      ],
+      failed: [],
+    },
+    {
+      fetchImpl: async (url) => {
+        if (url === good) return torrentBuf
+        throw new Error('404')
+      },
+    },
+  )
+  const expect = crypto.createHash('sha1').update(info).digest('hex')
+  assert.equal(res.items.find((i) => i.title === '好种子').magnet, `magnet:?xt=urn:btih:${expect}`)
+  const badItem = res.items.find((i) => i.title === '坏种子')
+  assert.equal(badItem.magnet, undefined, '转不出来就别编')
+  assert.equal(badItem.torrent, bad, '原链接要留着')
+  assert.equal(res.items.find((i) => i.title === '本来就是 magnet').magnet, 'magnet:?xt=urn:btih:FEED')
+})
+
+await t('排版：中文名和原名一样时只写一遍，不排「《X / X》」', () => {
+  const text = formatAnimeReport(
+    { nameCn: '进击的巨人', name: '进击的巨人', score: 8.2, votes: 0, tags: [], url: 'https://bgm.tv/subject/55770', source: 'AniBT' },
+    { items: [], failed: [] },
+  )
+  assert.match(text, /《进击的巨人》/)
+  assert.ok(!text.includes('进击的巨人 / 进击的巨人'), '不许重复')
 })
 
 console.log(`\n${pass} 过 / ${fail} 挂`)

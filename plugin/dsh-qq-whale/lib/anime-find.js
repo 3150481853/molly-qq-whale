@@ -106,7 +106,7 @@ function cacheWrite(kind, key, value) {
  *
  * @returns {Promise<{status:number, body:string, headers:object}>}
  */
-function directGet(url, { timeoutMs = DEFAULT_TIMEOUT_MS, headers = {}, method = 'GET', body = null } = {}) {
+function directGet(url, { timeoutMs = DEFAULT_TIMEOUT_MS, headers = {}, method = 'GET', body = null, binary = false } = {}) {
   return new Promise((resolve, reject) => {
     const u = new URL(url)
     const mod = u.protocol === 'http:' ? http : https
@@ -129,7 +129,8 @@ function directGet(url, { timeoutMs = DEFAULT_TIMEOUT_MS, headers = {}, method =
         const chunks = []
         res.on('data', (c) => chunks.push(c))
         res.on('end', () => {
-          resolve({ status: res.statusCode || 0, body: Buffer.concat(chunks).toString('utf8'), headers: res.headers })
+          const buf = Buffer.concat(chunks)
+          resolve({ status: res.statusCode || 0, body: binary ? buf : buf.toString('utf8'), headers: res.headers })
         })
       },
     )
@@ -800,7 +801,8 @@ export function formatAnimeReport(subject, magnets, { maxMagnets = 3 } = {}) {
   if (!subject) {
     lines.push('没找到这个番的条目。换个正式点的名字（日文原名、或者带「第几季」）再试一次？')
   } else {
-    const names = [subject.nameCn, subject.name].filter(Boolean)
+    // 中文名和原名常常一模一样，别排成「《进击的巨人 / 进击的巨人》」
+    const names = [...new Set([subject.nameCn, subject.name].filter(Boolean))]
     const title = names.length ? names.join(' / ') : `subject ${subject.id || ''}`
     const year = fmtDate(subject.date)
     const res = subject.resources ? `资源 ${subject.resources} 个` : ''
@@ -851,6 +853,74 @@ export function formatAnimeReport(subject, magnets, { maxMagnets = 3 } = {}) {
   }
 
   return lines.join('\n')
+}
+
+/**
+ * 直连取二进制（.torrent 这类）。中继只给文本，所以这里不挂中继腿。
+ *
+ * @returns {Promise<Buffer|null>} 取不到就 null，绝不抛
+ */
+export async function fetchBinary(url, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  if (!url) return null
+  try {
+    const res = await directGet(url, { timeoutMs, binary: true })
+    if (res.status !== 200 || !Buffer.isBuffer(res.body) || res.body.length === 0) return null
+    return res.body
+  } catch {
+    return null
+  }
+}
+
+/** 标题归一：只留字与数字，去掉字幕组括号之类，用来去重。 */
+function normTitle(title) {
+  return String(title || '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '')
+}
+
+/**
+ * 磁力去重：同一条种子（同标题同体积）只留一条，优先留有 magnet 的那条。
+ *
+ * @param {Array<object>} items
+ * @returns {Array<object>}
+ */
+export function dedupeMagnets(items) {
+  const seen = new Map()
+  for (const it of Array.isArray(items) ? items : []) {
+    if (!it) continue
+    const key = `${normTitle(it.title)}|${Number(it.size) || 0}`
+    const prev = seen.get(key)
+    if (!prev) {
+      seen.set(key, it)
+      continue
+    }
+    if (it.magnet && !prev.magnet) seen.set(key, it)
+  }
+  return [...seen.values()]
+}
+
+/**
+ * 把 RSS 里只给 `.torrent` 链接的条目补成真 magnet。
+ *
+ * 为什么要多这一步：QQ 里发一条 `https://…/xxx.torrent` 对方点开还得下载，
+ * 而 `magnet:?xt=urn:btih:…` 点一下就进下载器；acg.rip 与蜜柑基本都只给 .torrent。
+ * 只转前几条（默认 3 条），并发转、各给 6 秒，转不出来就保留原链接。
+ */
+export async function magnetizeItems(magnets, { timeoutMs = DEFAULT_TIMEOUT_MS, maxConvert = 3, fetchImpl = fetchBinary } = {}) {
+  const items = dedupeMagnets(magnets?.items)
+  const targets = items.filter((it) => !it.magnet && it.torrent).slice(0, maxConvert)
+  await Promise.all(
+    targets.map(async (it) => {
+      try {
+        const buf = await withDeadline(fetchImpl(it.torrent, { timeoutMs: Math.min(timeoutMs, 6000) }), 6500, 'torrent')
+        const m = buf ? magnetFromTorrent(buf) : ''
+        if (m) it.magnet = m
+      } catch {
+        /* 转不出来就留着链接 */
+      }
+    }),
+  )
+  return { ...magnets, items }
 }
 
 /**
@@ -920,7 +990,9 @@ export async function animeFind(query, { proxy, scope = 'all', timeoutMs = DEFAU
     }
   }
 
-  const magnets = mergeMagnets({ items: fromAnibt }, await magnetPromise)
+  const merged = mergeMagnets({ items: fromAnibt }, await magnetPromise)
+  // RSS 只给 .torrent 链接的，顺手换成真 magnet（只转前 3 条，转不出来就留链接）
+  const magnets = wantMagnet ? await magnetizeItems(merged, { timeoutMs: Math.min(timeoutMs, 6000) }) : merged
 
   if (!subject && magnets.items.length === 0) {
     const why = errors.length ? `（${errors.slice(0, 2).join('；').slice(0, 200)}）` : ''

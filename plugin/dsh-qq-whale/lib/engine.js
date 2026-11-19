@@ -112,6 +112,14 @@ const { Singer, SONGS, songNames, parseSingRequest } = await import(sub('./singi
 // 唱歌 v2（2026-10-31，主人 m01736「去 b 站扒音轨来练」）：曲库里没有的歌就走
 // 「B 站扒音轨 → 分人声 → RVC 换成 Molly 音色」，见 lib/bili-sing.js。
 const { BiliSinger } = await import(sub('./bili-sing.js'))
+// 搜番（2026-11-19，主人 m03315）：番名 → Bangumi 评分/简介 + 多源磁力。
+// 装不上不该拖垮聊天链路，所以这里兜一层。
+let animeFindQuery = null
+try {
+  animeFindQuery = (await import(sub('./anime-find.js'))).animeFind || null
+} catch (err) {
+  animeFindQuery = null
+}
 // 撤回处理（2026-10-24，主人 m00480）：纯函数模块（字段解析/TTL 清理/history 剔除）。
 // 撤回带来的状态（recalled Map、计数）留在这个类里，方便 /state 观察。
 const recallUtil = await import(sub('./engine-recall.js'))
@@ -3056,6 +3064,11 @@ export class ChatEngine {
          */
         if (await this.maybeSing({ ev, scene, text: norm?.text })) return
         /*
+         * 搜番（2026-11-19，主人 m03315）：显式指令直接由程序查，不进模型。
+         * 排在路由之前，免得「搜番 xxx」被当成聊天或者下发给干活会话。
+         */
+        if (await this.maybeAnimeFind({ ev, scene, text: norm?.text })) return
+        /*
          * task-46：命令块不再只认「命令 」前缀，而是先过路由器：
          *   #chat/#work/#code 显式覆盖 → commandPrefixes → 改代码规则 → chat。
          * 只有 work/code 会真的动会话；chat 落回下面的聊天链路。
@@ -4081,6 +4094,21 @@ export class ChatEngine {
       await this.singByBili({ song: q }, { ev, scene })
       return true
     }
+    if (p.kind === 'kind') {
+      // 我问过「念还是换一首」：回「念」就换念白模式重跑，回「换/算了」就作废
+      const nt = String(t || '').replace(/[\s,，。！!~～]/g, '')
+      const want = /^(?:念|念吧|念念|念一下|念白|读|读吧|朗读|就念|要念|念出来)/u.test(nt)
+      const no = /^(?:换|换一首|换首|算了|不用|不要|别|取消|不唱)/u.test(nt)
+      if (!want && !no) return false
+      this.singPending = null
+      if (no) {
+        await this.sayQuick(ev, scene, '那这首就算了，换个歌名再点我。')
+        return true
+      }
+      this.logger('info', `点歌：主人要念白（${p.keyword}）`)
+      await this.singByBili({ song: p.keyword, bv: p.bvid || '', recite: true }, { ev, scene })
+      return true
+    }
     if (p.kind === 'choice') {
       const bvh = t.match(/BV[0-9A-Za-z]{10}/)
       const m = t.match(/^\s*(?:第)?([1-9])\s*(?:个|首|条)?\s*$/)
@@ -4113,6 +4141,54 @@ export class ChatEngine {
       return true
     }
     return false
+  }
+
+  /*
+   * 搜番（2026-11-19，主人 m03315：「我记得之前有给Molly做一个搜图功能吧，
+   * 你看看能不能把这个加进去？」）。
+   *
+   * 三条入口，各管一段：
+   *   ① 这里是**显式指令**：「搜番 进击的巨人」/「#茉莉搜番 …」/ 群里 @ 她再说这几个字。
+   *      直接由程序查，不进模型——模型手上没有实时评分数据，靠它自己说只会编。
+   *   ② 模型自己调 `anime_find` 工具：用户顺口问「这部多少分 / 有没有资源」时
+   *      由模型判断要不要搜（工具描述里写清了什么时候该用）。
+   *   ③ 私有钩子 recognize.mjs 认图之后拿番名回来补资料。
+   *
+   * 返回 true 表示这条消息已经被搜番接走（调用方直接 return）。
+   */
+  async maybeAnimeFind({ ev, scene, text }) {
+    if (this.config.animeFindEnabled === false) return false
+    if (!animeFindQuery) return false
+    const textStr = String(text || '').trim()
+    if (!textStr) return false
+    // 带 # 的指令在哪都执行；不带 # 的只认私聊 / 被 @ / 手打 @昵称
+    const hashCmd = /^[#＃]\s*(?:茉莉)?\s*(?:搜番|找番|番剧)/iu.test(textStr)
+    const bare = /^(?:搜番|找番)\s*\S/u.test(textStr)
+    if (!hashCmd && !bare) return false
+    const handAt = /^(?:@|＠)\s*(?:molly|茉莉|莫莉|小鱼|小莫|小茉莉)/iu.test(textStr)
+    if (!hashCmd && scene !== SCENE_PRIVATE && scene !== SCENE_MENTION && !handAt) return false
+
+    const query = textStr
+      .replace(/^(?:@|＠)\s*(?:molly|茉莉|莫莉|小鱼|小莫|小茉莉)[\s,，:：、]*/iu, '')
+      .replace(/^[#＃]\s*/u, '')
+      .replace(/^(?:茉莉)?\s*(?:搜番|找番|番剧)[\s,，:：、]*/iu, '')
+      .replace(/^(?:搜番|找番)[\s,，:：、]*/iu, '')
+      .trim()
+    if (!query) {
+      await this.sayQuick(ev, scene, '搜哪个番？给我名字，比如「搜番 进击的巨人」。')
+      return true
+    }
+
+    const proxy = this.config.animeFindProxy === undefined ? 'http://127.0.0.1:12450' : String(this.config.animeFindProxy || '')
+    const timeoutMs = Number(this.config.animeFindTimeoutMs) > 0 ? Number(this.config.animeFindTimeoutMs) : 8000
+    try {
+      const res = await animeFindQuery(query, { proxy, scope: 'all', timeoutMs })
+      await this.sayQuick(ev, scene, String(res?.text || '没搜到，换个名字再试？'))
+    } catch (err) {
+      this.logger('warn', `搜番失败（${query}）：${err?.message || err}`)
+      await this.sayQuick(ev, scene, '搜番这条链路出问题了，回头再试？')
+    }
+    return true
   }
 
   async maybeSing({ ev, scene, text }) {
@@ -4191,9 +4267,10 @@ export class ChatEngine {
   async singByBili(req, { ev, scene }) {
     const q = String(req.song || req.requested || '').trim()
     if (!q) return false
+    const recite = !!req.recite            // 主人确认「这不是歌，念吧」→ 念白模式
     this.singPending = null          // 新的一次点歌，旧的「等你回话」作废
     const hit = q.match(/BV[0-9A-Za-z]{10}/)
-    const bv = hit ? hit[0] : ''
+    const bv = String(req.bv || '').trim() || (hit ? hit[0] : '')
     if (!this.biliSinger || !this.biliSinger.enabled) {
       await this.sayQuick(ev, scene, '我这边的扒音轨工具没接好（python 或脚本路径没配上），这首先欠着。')
       return true
@@ -4206,14 +4283,40 @@ export class ChatEngine {
     const wantNz = /网易云|网易|云音乐|云村|网抑云/i.test(q)
     const where = wantNz ? '网易云' : 'B 站'
     const cleanQ = q.replace(/^(?:去|上|在|从|用)?\s*(?:网易云|网易|云音乐|云村|网抑云|b\s*站|哔哩哔哩|bilibili|破站)\s*/i, '').trim() || q
-    await this.sayQuick(ev, scene, `《${cleanQ}》？行，等我去 ${where} 扒一段回来，五六分钟，别催。`)
+    await this.sayQuick(ev, scene, recite
+      ? `《${cleanQ}》行，那我念给你听，等我一会儿。`
+      : `《${cleanQ}》？行，等我去 ${where} 扒一段回来，五六分钟，别催。`)
     let res = null
     try {
-      res = await this.biliSinger.sing(q, { bv })
+      res = await this.biliSinger.sing(q, { bv, recite })
     } catch (err) {
       this.stats.singFail += 1
       this.logger('warn', `扒音轨唱歌异常：${err?.message || err}`)
       await this.sayQuick(ev, scene, 'B 站那边没扒下来，这首先欠着。')
+      return true
+    }
+    // 主人 2026-11-15：点了演讲/念白被硬套唱歌管线会出废片（分离把说话声整段扔进伴奏轨）。
+    // py 侧判出「不是歌」→ 先问一句「念还是换一首」，不擅自决定。
+    if (res?.needKind) {
+      const kw = res.keyword || q
+      const ev0 = res.evidence || {}
+      const share = Number(ev0.voc_share)
+      const why = Number.isFinite(share) && share < 0.05
+        ? '分离出来的人声几乎是空的，这段本来就是说话，不是唱的'
+        : '音高听着像说话，不像唱'
+      const lines = [
+        `《${kw}》这段听着不像歌，是演讲/念白（${why}）。`,
+        '要我念给你听，还是换一首？回「念」或「换」（群里 @ 我）。',
+      ]
+      this.logger('info', `点歌判成非歌曲：${kw}（${res.audioKind || 'speech'}）`)
+      this.singPending = {
+        kind: 'kind',
+        keyword: kw,
+        bvid: bv || res.bvid || '',
+        at: Date.now(),
+        username: ev?.sender?.nickname || '',
+      }
+      await this.sayQuick(ev, scene, lines.join('\n'))
       return true
     }
     // 主人 2026-10-31：「默认原唱，没有就问一下」——没搜到原唱就列候选问，不自己拍脑袋

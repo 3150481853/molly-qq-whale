@@ -24,6 +24,27 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
+/**
+ * 连孙进程一起杀掉（Windows）。
+ *
+ * venv312 的 python.exe 只是 shim，真正的 uv python / RVC 是它的子进程；
+ * `child.kill('SIGKILL')` 在 Windows 上只杀得掉 shim，GPU 上的活儿会变成孤儿
+ * 一直跑到几十万毫秒（2026-11-15《麦恩莉》那次就是：上层 600 s 超时已返回失败，
+ * RVC 进程还在后台占着显卡跑到 37 分钟，把后面的点歌全拖死）。
+ */
+export function killTree(pid) {
+  if (!pid) return
+  try {
+    execFileSync('taskkill', ['/F', '/T', '/PID', String(pid)], {
+      timeout: 15000,
+      windowsHide: true,
+      stdio: 'ignore',
+    })
+  } catch {
+    // 进程已经没了、或者权限不够——都不影响主流程
+  }
+}
+
 export function lastJsonLine(text) {
   const lines = String(text || '').trim().split(/\r?\n/)
   for (let i = lines.length - 1; i >= 0; i -= 1) {
@@ -96,13 +117,13 @@ export class BiliSinger {
    * @param {number} [opts.timeoutMs]
    * @param {Function} [opts.logger]
    */
-  constructor({ python, script, cacheDir, maxSec = 75, memoryGuardMB = 3000, probe, timeoutMs = 600000, logger } = {}) {
+  constructor({ python, script, cacheDir, maxSec = 75, memoryGuardMB = 3000, probe, timeoutMs = 780000, logger } = {}) {
     this.python = python || ''
     this.script = script || ''
     this.maxSec = Number(maxSec) || 0
     this.memoryGuardMB = Number(memoryGuardMB) || 0
     this.probe = typeof probe === 'function' ? probe : freeCommitMB
-    this.timeoutMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : 600000
+    this.timeoutMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : 780000
     this.logger = typeof logger === 'function' ? logger : () => {}
     this.cacheDir = cacheDir || ''
     this.inflight = new Map()
@@ -163,31 +184,31 @@ export class BiliSinger {
    * 点一首。query 可以是歌名（走搜索），也可以是 BV 号。
    * @returns {Promise<{ok:boolean, file?:string, creditLine?:string, seconds?:number, bvid?:string, cached?:boolean, error?:string}>}
    */
-  async sing(query, { bv = '', shift = '' } = {}) {
+  async sing(query, { bv = '', shift = '', recite = false } = {}) {
     const q = String(query || '').trim()
     if (!q && !bv) return { ok: false, error: '没给歌名' }
     if (!this.enabled) return { ok: false, error: '扒音轨的 python 或脚本没配好' }
 
     const key = bv || q
-    const cacheHit = this._readCache(key)
+    const cacheHit = recite ? null : this._readCache(key)
     if (cacheHit) {
       this.logger('info', `唱歌命中缓存：${key}`)
       return { ...cacheHit, cached: true }
     }
-    const running = this.inflight.get(key)
+    const running = this.inflight.get(recite ? key + '#recite' : key)
     if (running) return running
 
     // 开唱前先看提交内存（主人 m03208 批的）：不够就这次直接用短时长，别等崩了再重跑
     const pre = this._precheckMaxSec()
 
-    const job = this._singWithFallback({ query: q, bv, shift, maxSec: pre.maxSec })
+    const job = this._singWithFallback({ query: q, bv, shift, maxSec: pre.maxSec, recite })
       .then((res) => {
-        if (res.ok && !pre.shortened) this._writeCache(key, res)
+        if (res.ok && !pre.shortened && !recite) this._writeCache(key, res)
         if (pre.shortened && res.ok) return { ...res, preShortened: pre.maxSec, freeCommitMB: pre.freeMB }
         return res
       })
-      .finally(() => this.inflight.delete(key))
-    this.inflight.set(key, job)
+      .finally(() => this.inflight.delete(recite ? key + '#recite' : key))
+    this.inflight.set(recite ? key + '#recite' : key, job)
     return job
   }
 
@@ -217,25 +238,26 @@ export class BiliSinger {
    * 跑一次；如果是内存不够崩的，砍短时长再来一次（m03582）。
    * 主人等一次三五分钟已经够久了，所以只重试一次，且只在原时长够长时才有意义。
    */
-  async _singWithFallback({ query, bv, shift, maxSec }) {
+  async _singWithFallback({ query, bv, shift, maxSec, recite = false }) {
     const first = maxSec == null ? this.maxSec : Number(maxSec) || 0
-    const res = await this._run({ query, bv, shift, maxSec: first })
+    const res = await this._run({ query, bv, shift, maxSec: first, recite })
     if (res.ok || !res.memoryHint || !(first > 50)) return res
     const shorter = Math.max(20, Math.min(45, Math.round(first / 2)))
     this.logger('warn', `唱歌：内存不够，改成 ${shorter} 秒重跑一次（原来是 ${Math.round(first)} 秒）`)
-    const again = await this._run({ query, bv, shift, maxSec: shorter })
+    const again = await this._run({ query, bv, shift, maxSec: shorter, recite })
     if (again.ok) return { ...again, shortened: shorter }
     return { ...again, error: again.error || res.error }
   }
 
-  _run({ query, bv, shift, maxSec }) {
+  _run({ query, bv, shift, maxSec, recite = false }) {
     return new Promise((resolve) => {
       const args = ['-u', this.script]
       if (bv) args.push('--bv', bv)
       else args.push('--search', query)
       const secs = maxSec == null ? this.maxSec : Number(maxSec) || 0
       if (secs > 0) args.push('--max-sec', String(Math.round(secs)))
-      args.push('--mix')
+      if (recite) args.push('--recite')
+      else args.push('--mix')
       if (shift !== '' && shift != null) args.push('--shift', String(shift))
 
       this.logger('info', `唱歌：跑 ${path.basename(this.python)} ${args.slice(1).join(' ')}`)
@@ -256,8 +278,13 @@ export class BiliSinger {
       }
 
       const timer = setTimeout(() => {
-        this.logger('warn', `唱歌超时（${this.timeoutMs}ms），杀掉进程`)
-        try { child.kill('SIGKILL') } catch { /* ignore */ }
+        this.logger('warn', `唱歌超时（${this.timeoutMs}ms），杀掉进程树`)
+        // venv312 的 python.exe 只是 shim，真正的 uv python 是它的子进程；
+        // 只 kill(child.pid) 会留下 GPU 上的孤儿（2026-11-15「麦恩莉」就是这样：
+        // 上层 600 s 超时返回失败，RVC 进程还在后台跑到 37 分钟）。
+        try { killTree(child.pid) } catch { /* ignore */ }
+        const tail = (out + '\n' + err).trim().slice(-1200)
+        if (tail) this.logger('warn', `超时前的最后输出：\n${tail}`)
         finish({ ok: false, error: `渲染超时（${Math.round(this.timeoutMs / 1000)}s）` })
       }, this.timeoutMs)
 
@@ -281,9 +308,20 @@ export class BiliSinger {
           })
           return
         }
-        // 一首歌有好几个歌手的版本：python 退出码 3 + need_artist 让我先问主人要谁的版本
-        if (parsed && parsed.need_artist) {
+        // 判出来不是歌（演讲/念白）：python 退出码 3 + need_kind，让我先问主人「念还是换一首」
+        if (parsed && parsed.need_kind) {
           finish({
+            ok: false,
+            needKind: true,
+            audioKind: parsed.audio_kind || 'speech',
+            keyword: parsed.keyword || query,
+            evidence: parsed.evidence || null,
+            error: parsed.error || '这不是歌',
+          })
+          return
+        }
+        // 一首歌有好几个歌手的版本：python 退出码 3 + need_artist 让我先问主人要谁的版本
+        if (parsed && parsed.need_artist) {          finish({
             ok: false,
             needArtist: true,
             keyword: parsed.keyword || query,

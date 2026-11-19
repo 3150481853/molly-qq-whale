@@ -7,6 +7,41 @@
 
 ---
 
+## 2026-11-19 · 会自己搜番了：番名进去，评分 + 简介 + 磁力出来
+
+> 主人 m03315：「我记得之前有给Molly做一个搜图功能吧，你看看能不能把这个加进去？」——截图里是 DSH 插件 `@cocofhu/anime-find`（多源搜番、Bangumi 评分、复制磁力）。
+
+**现象**
+
+- 原来只有 `#茉莉识图`（图 → 出处）。问「进击的巨人好看吗」「有没有资源」，她只会凭记忆瞎答，或者老实说不知道——因为**根本没有任何联网查番的能力**。
+- 这台机器的出网很糟：`api.bgm.tv` 直连必然失败（DNS 被污染到 Facebook 的 IP），`127.0.0.1:12450` 那个代理常年不在监听。所以不能把宝押在 Bangumi 一个源上。
+
+**改了什么**
+
+- 新增 `lib/anime-find.js`（零依赖，ESM）：
+
+  - 传输三条腿：**代理 → 直连 → 公共中继**（`https://api.cors.lol/?url=`），墙内站（蜜柑/花园/AniBT）用 `preferDirect` 先直连，省掉一次必然失败的握手；每条腿失败都记原因，最后拼进「哪些源挂了」。
+  - 条目源：**AniBT 为主**（`https://anibt.net/api/seasons/anime`，200/0.8 秒，带评分与 bgmId），Bangumi v0 兜底（有代理时才可能成功）。
+  - 磁力源四家并发：ACG.RIP、蜜柑、动漫花园、nyaa；`.torrent` 只给链接的，用 bencode 扫 `info` 字典算 sha1 拼 magnet。
+  - `shortMagnet()`：群里只发 `magnet:?xt=urn:btih:<hash>&dn=<最多 40 字>`，把几十个 tracker 全删掉——原样贴一条 1500 字的长 magnet 等于刷屏。
+  - 排版：`《中文名 / 原名》` + 年份/类型/话数 + 评分（Bangumi 分数带人数与排名，AniBT 就只写「评分 7.6（AniBT）」，不编「0 人评分」）+ 标签 + 截断简介 + 最多 3 条磁力；同名候选收在「另外还有：《…》」一行。
+- 接进聊天：`lib/engine.js` 新增 `maybeAnimeFind()`（在 `maybeSing()` 之后、正式起轮之前拦），认 `#茉莉搜番 / 搜番 / 找番 / 番剧`，私聊与 @ 里裸词也认；`lib/main.js` 把它注册成宿主工具 `anime_find`，由模型自己决定什么时候查——工具描述里写清了「问怎么样/值不值得看」「问有没有资源」「拿不准是哪个番」这几种该主动调。
+- **顺手修掉一个真 bug**：`magnetFromTorrent()` 原来的 bencode 扫描把 `i12345e` 这种整数当成字符串读飞，位子算错 → 真实 `.torrent` 算出来的 infohash 是错的（发出去就是死链）。改成正经的 `skipBencode()`，字典/列表/整数/字符串分开跳。
+- 配置项：`animeFindEnabled`（默认开）、`animeFindProxy`（`undefined` = 用 `127.0.0.1:12450`，传空串 = 不用代理）、`animeFindTimeoutMs`（默认 8000）。
+
+**怎么退回去**
+
+- 不想让她搜番：`animeFindEnabled: false`（或删掉 `lib/anime-find.js`，`main.js` 里的加载是 optional，缺文件只是不注册）。
+- 只想管住工具、留着手打命令：把 `registerAnimeTool(...)` 那段的 `state.animeTool` 置空即可。
+
+**验证**
+
+- `tools/test-anime-find.mjs`：**30 过 / 0 挂**（体量换算、两种 RSS、CDATA/实体、infohash、magnet 压缩、AniBT 映射、候选排序、排版、空输入、工具形状、注册降级），离线跑，不碰网络。
+- 真机（`proxy:''`）：`进击的巨人` 25.9 秒 → **6.06 秒**，`孤独摇滚` 34.3 秒 → **6.02 秒**，能出 AniBT 真 magnet（7.9GB / 4.8GB）与蜜柑的 `.torrent`。
+- 已知限制：Bangumi 评分在这台机器上取不到（除非把代理起回来）；`animes.garden` 的接口回的是 Next.js 的 HTML，本机走不通，没有接。
+
+---
+
 ## 2026-11-14 · 开唱前先看一眼提交内存：不够就直接唱短的
 
 > 主人 m03208：「可以」——同意我在页面文件那条建议里提的「开唱前先看提交内存，低于 3GB 就直接用短时长」。

@@ -103,6 +103,15 @@ const registerQqTool = qqtoolsMod?.registerQqTool || null
 const registerWorkshopTool = qqtoolsMod?.registerWorkshopTool || null
 
 /*
+ * 搜番（主人 m03315：「我记得之前有给Molly做一个搜图功能吧，你看看能不能把
+ * 这个加进去」）。跟 qqtools 一样当可选模块：缺了只是少一个工具，
+ * 聊天主链路绝不能因为它起不来。
+ */
+const animeMod = await loadModule('animeFind', './anime-find.js', { optional: true })
+const registerAnimeTool = animeMod?.registerAnimeTool || null
+const setAnimeCacheDir = animeMod?.setAnimeCacheDir || null
+
+/*
  * 私聊 `#` 命令通道（主人 m01007）：私聊发 `#` 直接给菜单，不经过模型。
  *
  * 为什么单独一个模块而不是塞进 commands.js：那套是「自然语言路由」，
@@ -1384,6 +1393,24 @@ export function apply(root, rawConfig = {}) {
     : null
   state.qqTool = qqTool ? qqTool.status : { registered: false, error: 'qqtools.js 没加载上' }
   if (qqTool?.dispose) disposers.push(qqTool.dispose)
+
+  /*
+   * 搜番工具 `anime_find`。
+   *
+   * 和 qq_onebot 一样在 apply 阶段注册，这样「命令」链路建立时模型已经看得见它；
+   * 缓存落在 <dataDir>/anime 下（中继限速，同一部番半小时内只搜一次）。
+   */
+  let animeTool = null
+  try {
+    if (setAnimeCacheDir) setAnimeCacheDir(path.join(dataDir, 'anime'))
+    animeTool = registerAnimeTool
+      ? registerAnimeTool({ ctx: root, getConfig: () => config, logger })
+      : null
+  } catch (err) {
+    logger('warn', `anime_find 初始化失败：${err?.message || err}`)
+  }
+  state.animeTool = animeTool ? animeTool.status : { registered: false, error: 'anime-find.js 没加载上' }
+  if (animeTool?.dispose) disposers.push(animeTool.dispose)
 
   /*
    * 插件工坊（用户 333333333：「写个插件……然后不挂载」）。

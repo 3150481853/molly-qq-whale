@@ -74,6 +74,14 @@ function stripInternalMarks(s) {
   // ③ 模板变量残留 {{x}} 与工具调用标签残留
   s = s.replace(/\{\{[\s\S]*?\}\}/g, '')
   s = s.replace(/<\/?(?:function_calls|invoke|parameter)\b[^>]*>/gi, '')
+  // ③b DSML 假调用（2026-11-20 真机泄漏，QQ 群 125）：模型把工具调用协议原样吐成正文，
+  //     形如 </｜｜DSML｜｜ invoke> </｜｜DSML｜｜ calls>——竖线是全角 ｜ 或半角 |，
+  //     中间的空格也不固定。带尖括号的整段删，不带尖括号的裸标记也删。
+  s = s.replace(/<\/?[|｜\s]{1,8}DSML[|｜\s]{0,8}[^>]*>/gi, '')
+  s = s.replace(/[|｜]{2}\s*DSML\s*[|｜]{2}[^\s>]{0,24}/gi, '')
+  // ③c 伪造引用头（同一次事故）：她照着上下文里的「昵称（QQ 123456）：」格式，
+  //     把自己的回复写成一条引用。只砍**行首**那一段，句子中间出现的原样保留。
+  s = s.replace(/^[^\S\n]*[^\n：（）()]{1,24}[（(]\s*QQ\s*[:：]?\s*\d{5,12}\s*[）)]\s*[:：]\s*/gim, '')
   // ④ 内部字段：message_id 1968616843 / user_id: 123 / group_id=456
   s = s.replace(/(?:message_id|user_id|group_id|msg_id|event_id)\s*[:=]?\s*\d+/gi, SENTINEL)
   // ⑤ CQ 码：[CQ:at,qq=123] 或 CQ:image,file=a.jpg（参数止于空白/右括号，

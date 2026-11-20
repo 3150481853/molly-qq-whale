@@ -7,6 +7,48 @@
 
 ---
 
+## 2026-11-20 · 游戏模式也要管住浏览器：识图不再拉 headless Edge
+
+> 主人（m04031）：「我都在控制台开游戏模式了就不要搞什么弹出个浏览器查东西卡我游戏了啊」
+
+**查到的实情**
+
+- 插件本体（`plugin/dsh-qq-whale/lib/*.js`）里根本没有浏览器：搜 `msedge|chrome|headless|browserExe`
+  一条都没有 —— 「弹浏览器」不是插件自己干的。
+- 真正会拉浏览器的是私有钩子 `data/qq-whale/private/recognize.mjs` →
+  `fish-find-chicken/src/fish-find-chicken.js:275` 的 `--headless=new` Edge（只有 yandex/google 这类
+  浏览器引擎才用），一开就是十几个子进程，打游戏时最难受。
+- 现场那两个 msedge（PID 75096 / 7732）用的是 `${HOME}\AppData\Local\ego-lite-linux\profile`，
+  是 agent 侧的 ego 浏览器，不是 Molly 的（识图那份 profile 在 `fish-find-chicken/state/fish-find-profile`，
+  最后写入还是 11-06）。
+- 游戏模式原来只翻两个开关（`lib/web.js` 的 `/gamemode`）：`config.voiceEnabled`、`config.singingEnabled`，
+  跟浏览器无关。
+
+**改了什么**
+
+- `lib/web.js` 的 `/gamemode` 多翻一个 `config.gameModeOn`（开/关成对恢复），响应里加 `browserBlocked`
+  方便控制台和排查。
+- 私有钩子 `recognize.mjs`：`runSearch()` 开头先问 `gameModeOn(engine)` —— 运行时 `config.gameModeOn`
+  或磁盘 `out\mem-config.json` 的 `gameMode`（3000ms 缓存）任一为真，就**把浏览器类引擎
+  （yandex / bing / google / lens）整体摘掉**，只留 saucenao / tracemoe 这类纯 HTTP 引擎，
+  命了还会在回复末尾补一句「你在打游戏，浏览器类引擎这轮没开（免得抢 CPU）」。
+
+**怎么退回去**
+
+- 想让游戏模式继续开浏览器：删掉 `recognize.mjs` 里那段 `if (gameModeOn(engine)) { … }` 过滤即可
+  （私有钩子不进发布仓，改完下一条消息就生效）。
+- `lib/web.js` 那几行回滚成原样即可，`gameModeOn` 没有别处读。
+
+**验证**
+
+- `node --check lib/web.js`、`node --check private/recognize.mjs` 均过；
+  `C:\Molly-build-test\probe-gamemode-browser.mjs` **5 过 / 0 挂**（磁盘 true / 磁盘 false / 运行时开关优先 /
+  文件缺失回退 / 过滤后只剩直连引擎）；本机读 `out\mem-config.json` 得 `gameMode → true`。
+- 注意：`web.js` 那份要 DSH 重启才生效；`recognize.mjs` 是每次下单重读文件，已经立刻生效
+  （磁盘开关就读得到）。
+
+---
+
 ## 2026-11-20 · 群里冒出「</｜｜DSML｜｜ invoke>」：假调用协议不许出门
 
 > 主人截图（QQ 群 666666666，13:13）：Yeats 发了张图问「打出来效果是这样」，Molly 回了三颗气泡，第一颗是

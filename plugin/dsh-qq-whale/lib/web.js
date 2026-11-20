@@ -1314,14 +1314,19 @@ export class WebWidget {
           }
           this.config.voiceEnabled = false
           this.config.singingEnabled = false
+          // 2026-11-20（主人 m04031）：游戏模式也要管住「开浏览器查东西」。
+          // 插件本体从不拉浏览器；会拉的是私有钩子 recognize.mjs 的 headless Edge。
+          // 这里放一个运行时开关，钩子读 engine.config.gameModeOn 自己决定跳过浏览器类引擎。
+          this.config.gameModeOn = true
           this._gameMode.on = true
-          this.logger('warn', '游戏模式 → 开（语音合成 / 点歌热禁用）')
+          this.logger('warn', '游戏模式 → 开（语音合成 / 点歌热禁用 / 识图不拉浏览器）')
         } else if (!on && this._gameMode.on) {
           const b = this._gameMode.backup || {}
           this.config.voiceEnabled = b.voiceEnabled !== false
           this.config.singingEnabled = b.singingEnabled !== false
+          this.config.gameModeOn = false
           this._gameMode.on = false
-          this.logger('info', '游戏模式 → 关（语音合成 / 点歌恢复）')
+          this.logger('info', '游戏模式 → 关（语音合成 / 点歌 / 识图浏览器恢复）')
         }
         sendJson(res, 200, {
           ok: true,
@@ -1329,6 +1334,7 @@ export class WebWidget {
             ...gameModeState(),
             voiceEnabled: this.config.voiceEnabled !== false,
             singingEnabled: this.config.singingEnabled !== false,
+            browserBlocked: this.config.gameModeOn === true,
           },
         })
       }),

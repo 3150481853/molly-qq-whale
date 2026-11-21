@@ -3872,3 +3872,41 @@ html[data-shell="desktop"][data-glass="true"] .on-kpi {
   font-size: var(--fs-sub);
   color: var(--stone);
 }
+/* §39 桌面壳：文档不许滚，滚的是内容区（2026-11-21，主人 m04278
+   「每次我点游戏模式开关界面就飞成这样」）
+   ------------------------------------------------------------------
+   现场：玻璃模式下 html / body 是透明的（§前文的 background: transparent），
+   而 .app / .main 是 height:100vh; overflow:hidden。实测 document.scrollingElement
+   的 scrollHeight 仍是 1509（视口 774）—— 页面里总有东西把文档撑高一点点，
+   于是滚轮一过（点「游戏模式」开关时焦点落到页面底部、浏览器顺手 scroll 了一下）
+   就把整个 .app 顶出视口，下面露出壁纸 —— 看起来就是「界面飞了、只剩上一条」。
+   设计本意一直是 §31 说的「内容区自己滚动」，所以这里把文档滚动彻底关掉，
+   只留 .content 当唯一的滚动容器；.main / .app 改成 100%（跟着 html 走，
+   避免某些 WebView2 时机下 100vh 拿到旧视口高度）。
+   ------------------------------------------------------------------ */
+html[data-shell="desktop"],
+html[data-shell="desktop"] body{
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+html[data-shell="desktop"] .app{
+  /* position:fixed 是最后一道保险：就算文档被什么东西撑出可滚高度、
+     又被 focus / scrollIntoView 顺手滚了一下，.app 也钉在视口上不会跟着走。 */
+  position: fixed;
+  inset: 0;
+  height: auto;
+  min-height: 0;
+  overflow: hidden;
+}
+html[data-shell="desktop"] .main{
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+html[data-shell="desktop"] .content{
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}

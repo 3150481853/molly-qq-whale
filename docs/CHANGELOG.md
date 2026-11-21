@@ -7,6 +7,41 @@
 
 ---
 
+## 2026-11-21 · 一点「游戏模式」界面就飞：整页被滚出了视口
+
+> 主人 m04213 / m04217 / m04234（控制台 app 实拍）：「每次我点游戏模式开关界面就会飞成这样」。
+> 现象是整个 app 只剩窗口顶部约 380px，下面透出模糊的桌面壁纸，右下角还浮着「查看日志」按钮。
+
+**查到的实情**
+
+- 跟「游戏模式」这个开关本身没关系：`console.js:7355 toggleGameMode()` 只发一条 `memPost('mem/gamemode')`，
+  服务端 `console-server.mjs:3144` 写 `out/mem-config.json` 再转发插件 `/gamemode`，全是 JSON 响应、不导航、不改窗口。
+  点开关只是把焦点带到页面底部，浏览器顺手把**文档**滚了一下 —— 等于替你踩了一脚早就埋着的坑。
+- 真正的坑在 CSS：§31 只写了 `.app{height:100vh;overflow:hidden}` / `.main{height:100vh;overflow:hidden}` /
+  `.content{overflow-y:auto}`，但**文档本身还能滚**。实测 `document.scrollingElement.scrollHeight = 1509`、
+  `clientHeight = 774`，滚 600px 之后 `.app` 的 `top` 变成 -600，整块被顶出视口。
+- 玻璃模式下 `html,body{background:transparent}`，被顶出去的地方没有底色，露出来就是壁纸 —— 于是读起来像「界面飞了、只剩上一条」。
+
+**改了什么**
+
+- `console/console.css` 末尾追加 §39（只作用于 `html[data-shell="desktop"]`，浏览器模式 / 关玻璃都不受影响）：
+  - `html`、`body`：`height:100%; overflow:hidden; overscroll-behavior:none` —— 文档不再当滚动容器；
+  - `.app`：`position:fixed; inset:0` —— 最后一道保险，就算文档被什么撑出可滚高度、又被 focus/scrollIntoView 滚了一下，app 也钉在视口上；
+  - `.main`：`height:100%; min-height:0; overflow:hidden`；`.content`：`flex:1 1 auto; min-height:0; overflow-y:auto`（唯一滚动容器，按 §31 原设计）。
+  - `.app`/`.main` 的 `100vh` 一并换成 `100%`：某些 WebView2 时机下 `100vh` 会拿到旧视口高度。
+
+**怎么退回去**
+
+- 删掉 `console/console.css` 里 `§39 桌面壳：文档不许滚` 那一整段即可，其余样式不受影响（§31 的原规则还在）。
+
+**验证**
+
+- ego 浏览器 `http://127.0.0.1:19392/?shell=desktop#/settings`（1256×774）：`docScrollH === clientHeight === 774`；
+  `window.scrollTo(0,600)` 之后 `scrollY` 仍是 0、`.app` 的 `top` 恒为 0；CDP 真滚轮（`Input.dispatchMouseEvent` wheel）
+  只滚 `.content`（scrollTop 600），文档不动。
+- 真机：重启 `dist/desktop/Molly.exe` 后滚轮滚 14 档，整窗不再上移（截图 `C:\Molly-build-test\app-scrolled-2.png`）。
+- 复现用的旧证据：`C:\Molly-build-test\app-scrolled.png`（修之前，滚 12 档就飞成主人截图那样）。
+
 ## 2026-11-21 · 她手里其实没有网：给聊天面补一个只读「查一下」
 
 > 主人转来的两张群截图（m04129–m04132）：孤星两次怼她「你说话之前不开联网搜索和思考吗？

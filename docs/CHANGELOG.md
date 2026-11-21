@@ -7,6 +7,49 @@
 
 ---
 
+## 2026-11-21 · 她手里其实没有网：给聊天面补一个只读「查一下」
+
+> 主人转来的两张群截图（m04129–m04132）：孤星两次怼她「你说话之前不开联网搜索和思考吗？
+> 天天不懂乱说」；她先答「Anthropic 还没上市吧？哪来的发行价 83 刀」，被怼之后来一句「行，那我闭嘴。」
+
+**查到的实情**
+
+- 她不是嘴硬，是**真没网**：`plugin/dsh-qq-whale/lib/commands.js:102` 的 `CHAT_DENY_TOOLS`
+  把 `web_search` / `web_fetch` / `research` 全列进了 deny（那是「聊天时她根本没能力动我文件」
+  那一轮的产物），连只读搜索一起误伤了。聊天面唯一能查资料的工具只有 `anime_find`（只搜番）。
+- 事实反证：Bing RSS 搜「Anthropic 上市 发行价」**294ms** 就回来了 —— 11-19 纳斯达克上市、
+  发行价 83 美元、估值 1.5 万亿。她那句话正好是错的。
+- 语气那半：`persona.js` 里没有「被指正怎么接」的规矩，「行，那我闭嘴」这类甩门话没有拦。
+
+**改了什么**
+
+- 新增 `plugin/dsh-qq-whale/lib/web-lookup.js`：工具名 `web_lookup`，只读搜索 ——
+  复用现成的 `webview.js` 的 `searchBing()`（Bing RSS，国内直连、无 key、实测 300ms 上下），
+  参数只有 `query`（截 120 字）和 `limit`（1..5，默认 3），输出「标题 / 摘要 / 链接 + 这只是网页摘要」。
+  搜索失败给「没查成（…）」并明确让人别编；空查询直接反问要关键词。
+- `lib/main.js` 按 `anime_find` 那套可选模块注册（`loadModule('webLookup', './web-lookup.js', { optional: true })`），
+  `state.webLookupTool` 记注册状态，失败只降级。
+- `lib/persona.js` 加两节：`# 事实先查再答`（最近的事、数字、日期、股价/上市/版本/比赛结果/身份，
+  不确定就先 `web_lookup`；尤其别断言「XX 还没上市吧」这种否定句）、`# 被指正的时候`
+  （真错了就认，不许写「行，那我闭嘴」「那我不说了」「随便你」这类赌气话）。
+- 名字故意叫 `web_lookup` 而不是 `web_search`：既跟宿主那个（能读整页的）区分开，
+  也就不在 deny 清单里 —— `CHAT_DENY_TOOLS` **没动**，文件/shell 那套照旧禁。
+
+**怎么退回去**
+
+- 不想要这个能力：删掉 `lib/main.js` 里 `lookupMod` 那三行与 `webLookupTool` 注册块即可
+  （工具就消失，persona 那两节留着也无害；真嫌啰嗦就把 persona 里两节一起删）。
+
+**验证**
+
+- `tools/test-web-lookup.mjs`：**46 过 / 0 挂**（关键词压缩与截断、limit 收边、排版与序号、
+  空结果/抛错文案、工具形状与描述措辞、注册降级、`CHAT_DENY_TOOLS` 里确实没有 `web_lookup`
+  而 `web_search` 仍然被禁、persona 两节都在）。
+- 真机：`webLookup('Anthropic 上市 发行价 83 美元', {limit:3})` → ok=true / 321ms / 3 条真实结果。
+- 注意：`main.js` 是 apply 阶段注册，**要 DSH 重启才看得见这个工具**；persona 同理。
+
+---
+
 ## 2026-11-20 · 游戏模式也要管住浏览器：识图不再拉 headless Edge
 
 > 主人（m04031）：「我都在控制台开游戏模式了就不要搞什么弹出个浏览器查东西卡我游戏了啊」

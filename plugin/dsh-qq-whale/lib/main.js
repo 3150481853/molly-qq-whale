@@ -112,6 +112,15 @@ const registerAnimeTool = animeMod?.registerAnimeTool || null
 const setAnimeCacheDir = animeMod?.setAnimeCacheDir || null
 
 /*
+ * 「查一下」（主人 m04129/m04130/m04132 转来的群截图）：群里有人两次怼她
+ * 「你说话之前不开联网搜索和思考吗」，她拿「Anthropic 还没上市吧」当事实说出口。
+ * 聊天面的 deny 清单把 web_search / web_fetch / research 全禁了，她手里其实没网。
+ * 这里补一个**只读**的 web_lookup（Bing RSS，国内直连），同样当可选模块。
+ */
+const lookupMod = await loadModule('webLookup', './web-lookup.js', { optional: true })
+const registerWebLookupTool = lookupMod?.registerWebLookupTool || null
+
+/*
  * 私聊 `#` 命令通道（主人 m01007）：私聊发 `#` 直接给菜单，不经过模型。
  *
  * 为什么单独一个模块而不是塞进 commands.js：那套是「自然语言路由」，
@@ -1411,6 +1420,25 @@ export function apply(root, rawConfig = {}) {
   }
   state.animeTool = animeTool ? animeTool.status : { registered: false, error: 'anime-find.js 没加载上' }
   if (animeTool?.dispose) disposers.push(animeTool.dispose)
+
+  /*
+   * 「查一下」工具 `web_lookup`（只读搜索，Bing RSS）。
+   *
+   * 跟 anime_find 一样在 apply 阶段注册：绑定的是 tools 服务，注册成功聊天面就能看见；
+   * 名字故意叫 web_lookup，跟宿主被 deny 掉的 web_search 区分开。
+   */
+  let lookupTool = null
+  try {
+    lookupTool = registerWebLookupTool
+      ? registerWebLookupTool({ ctx: root, getConfig: () => config, logger })
+      : null
+  } catch (err) {
+    logger('warn', `web_lookup 初始化失败：${err?.message || err}`)
+  }
+  state.webLookupTool = lookupTool
+    ? lookupTool.status
+    : { registered: false, error: 'web-lookup.js 没加载上' }
+  if (lookupTool?.dispose) disposers.push(lookupTool.dispose)
 
   /*
    * 插件工坊（用户 333333333：「写个插件……然后不挂载」）。

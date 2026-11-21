@@ -20,15 +20,25 @@
 - 真正的坑在 CSS：§31 只写了 `.app{height:100vh;overflow:hidden}` / `.main{height:100vh;overflow:hidden}` /
   `.content{overflow-y:auto}`，但**文档本身还能滚**。实测 `document.scrollingElement.scrollHeight = 1509`、
   `clientHeight = 774`，滚 600px 之后 `.app` 的 `top` 变成 -600，整块被顶出视口。
+- 往下一层还有第二个坑（这才是 App 里真正吃到的那个）：`.app` 自己的 `scrollHeight` 也是 1509。
+  `overflow:hidden` 只是「不显示滚动条」，它仍然是个滚动容器 —— 点开关时焦点落到 `input` 上，
+  Chromium 顺手 `scrollIntoView` 把它滚了 **527px**（实测 `.app.scrollTop = 527`），于是 `.main` 的
+  `top` 变成 -527、底部 247 以下整块空掉。溢出源头是 `.content` 里 2350px 长的页面把「可滚溢出」
+  漏给了 `.app`。
 - 玻璃模式下 `html,body{background:transparent}`，被顶出去的地方没有底色，露出来就是壁纸 —— 于是读起来像「界面飞了、只剩上一条」。
 
 **改了什么**
 
 - `console/console.css` 末尾追加 §39（只作用于 `html[data-shell="desktop"]`，浏览器模式 / 关玻璃都不受影响）：
   - `html`、`body`：`height:100%; overflow:hidden; overscroll-behavior:none` —— 文档不再当滚动容器；
-  - `.app`：`position:fixed; inset:0` —— 最后一道保险，就算文档被什么撑出可滚高度、又被 focus/scrollIntoView 滚了一下，app 也钉在视口上；
-  - `.main`：`height:100%; min-height:0; overflow:hidden`；`.content`：`flex:1 1 auto; min-height:0; overflow-y:auto`（唯一滚动容器，按 §31 原设计）。
-  - `.app`/`.main` 的 `100vh` 一并换成 `100%`：某些 WebView2 时机下 `100vh` 会拿到旧视口高度。
+  - `.app`：`position:fixed; inset:0; height:auto` —— 钉在视口上，高度永远等于窗口（不再信 `100vh`，
+    WebView2 某些时机下会拿到旧视口高度），`overflow:hidden` 保持；
+  - `.main`：`height:auto; min-height:0; overflow:hidden`（高度由 flex stretch 从 `.app` 拿）；
+  - `.content`：`flex:1 1 auto; min-height:0; overflow-y:auto; overscroll-behavior:contain` +
+    **`contain:paint`** —— 这一条是关键：让内容区的可滚溢出到此为止，`.app` 的 `scrollHeight` 从 1509 回到 774，
+    再也没有「可滚的余量」给它滚；
+  - §31 那几条规则带 `[data-glass="true"]`（两个属性选择器，权重更高），所以 §39 每条都把 `data-glass` 版本一起写上，
+    同权重靠后生效。
 
 **怎么退回去**
 
@@ -36,11 +46,14 @@
 
 **验证**
 
-- ego 浏览器 `http://127.0.0.1:19392/?shell=desktop#/settings`（1256×774）：`docScrollH === clientHeight === 774`；
-  `window.scrollTo(0,600)` 之后 `scrollY` 仍是 0、`.app` 的 `top` 恒为 0；CDP 真滚轮（`Input.dispatchMouseEvent` wheel）
-  只滚 `.content`（scrollTop 600），文档不动。
-- 真机：重启 `dist/desktop/Molly.exe` 后滚轮滚 14 档，整窗不再上移（截图 `C:\Molly-build-test\app-scrolled-2.png`）。
-- 复现用的旧证据：`C:\Molly-build-test\app-scrolled.png`（修之前，滚 12 档就飞成主人截图那样）。
+- ego 浏览器 `http://127.0.0.1:19392/?shell=desktop#/settings`（1256×774）：
+  `.app.scrollHeight === clientHeight === 774`、`docScrollH === 774`；`window.scrollTo(0,600)` 后 `scrollY` 仍 0；
+  CDP 真滚轮只滚 `.content`；`scrollIntoView({block:'center'})` 仍然能把内容区滚到位（`contain:paint` 不影响它，
+  `overflow:clip` 会影响 —— 所以没用 clip）。
+- 点开关实测：`#memGame` 点一下之后 `.app.scrollTop` 恒为 0、`.main` 的 `top` 恒为 0（修之前是 527）。
+- 真机（Molly.exe 2040×1320 物理 / 1360×880 DIP）：进设置 → 滚 8 档 → 点「游戏模式」开关 →
+  整页纹丝不动、开关变开、下方提示「正在暂停语音与点歌…」（截图 `C:\Molly-build-test\app-after-gamemode.png`），
+  再点回去恢复原状。复现用的旧证据：`C:\Molly-build-test\app-scrolled.png`。
 
 ## 2026-11-21 · 她手里其实没有网：给聊天面补一个只读「查一下」
 

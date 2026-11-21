@@ -3890,23 +3890,34 @@ html[data-shell="desktop"] body{
   overflow: hidden;
   overscroll-behavior: none;
 }
-html[data-shell="desktop"] .app{
-  /* position:fixed 是最后一道保险：就算文档被什么东西撑出可滚高度、
-     又被 focus / scrollIntoView 顺手滚了一下，.app 也钉在视口上不会跟着走。 */
+/* §31 的规则带 [data-glass="true"]（两个属性选择器），权重比我单属性高一级，
+   所以下面每条都把 data-glass 版本一起写上：同权重、靠后生效。 */
+html[data-shell="desktop"] .app,
+html[data-shell="desktop"][data-glass="true"] .app{
+  /* position:fixed 是最后一道保险：就算文档被撑出可滚高度、又被 focus /
+     scrollIntoView 顺手滚了一下，.app 也钉在视口上；height:auto + inset:0
+     让高度永远等于窗口（不再信 100vh —— WebView2 某些时机下会拿到旧视口高度）。 */
   position: fixed;
   inset: 0;
   height: auto;
   min-height: 0;
   overflow: hidden;
 }
-html[data-shell="desktop"] .main{
-  height: 100%;
+html[data-shell="desktop"] .main,
+html[data-shell="desktop"][data-glass="true"] .main{
+  height: auto;
   min-height: 0;
   overflow: hidden;
 }
-html[data-shell="desktop"] .content{
+html[data-shell="desktop"] .content,
+html[data-shell="desktop"][data-glass="true"] .content{
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
+  /* 关键：没有 contain 时，内容区里 2350px 长的页面会把「可滚溢出」漏给上层
+     —— 实测 .app 的 scrollHeight 变成 1509（视口才 774），于是 .app 自己能被
+     scrollIntoView / focus 滚掉 527~735px，.main 顶出视口、下半截露壁纸。
+     contain:paint 让内容区的溢出到此为止，.app 只剩 774，滚不动。 */
+  contain: paint;
 }

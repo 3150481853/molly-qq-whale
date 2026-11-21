@@ -7,7 +7,47 @@
 
 ---
 
-## 2026-11-21 · 一点「游戏模式」界面就飞：整页被滚出了视口
+## 2026-11-21 · 游戏模式也管住「控制台自己弹浏览器」
+
+> 主人：「不是，你不是说开游戏模式就不会开浏览器了吗」。
+> 对，我上一轮只做了**三分之一** —— 只管了识图那条，别的路没管，这是我的问题。
+
+**Molly 会自己开浏览器的路，一共就三条**
+
+1. 识图那条 headless Edge（私有钩子 `private/recognize.mjs` 里的 `browserEngines`）——
+   已在 2026-11-20 那条改动里拦住（游戏模式开着就过滤掉 `yandex/bing/google/lens` 这类要起浏览器的引擎）。
+2. 桌面壳 `Molly.exe` —— 它启动 `molly-console.exe` 时带 `--no-browser`（`desktop/MainWindow.xaml.cs:541`），
+   这条路从来不开浏览器。
+3. **`tools/console-server.mjs` 的 `openAppWindow()`** —— 控制台已经在跑、主人又启动一次 `molly-console` 时，
+   它会用 Edge/Chrome 开一个 `--app=` 独立窗口。**这条路以前完全不看游戏模式**：打游戏时手滑点一下快捷方式，
+   屏幕上就多出一个浏览器窗口。
+
+**改了什么**
+
+- 新增 `readGameMode()`：读 `out/mem-config.json` 的 `gameMode`（就是控制台那个开关写的那份），
+  读不到 / 解析失败一律当「没开」—— 不能因为配置坏了反而挡住主人开窗。
+- `handleOccupiedPort()`：控制台已在跑时先看游戏模式，开着就只打印一行
+  `[console] 游戏模式开着：这次不弹浏览器。要看得自己开：<地址>` 然后退出，不开窗。
+- `openAppWindow()` 里再挡一次（双保险，防以后新增调用点又忘了看）。
+- 桌面壳那条 `--no-browser` 保持原样；识图钩子那条不用动。
+
+**验证**
+
+- `node --check tools/console-server.mjs` 通过。
+- 实测（`out/mem-config.json` 里 `gameMode: true`，控制台正在 19392 跑）：
+  `node tools/console-server.mjs` → 打印「游戏模式开着：这次不弹浏览器」，**exit 0**，
+  前后 `msedge.exe` 顶层进程数都是 4（没有多出窗口）。
+- 游戏模式关掉时仍然按原逻辑开窗（这一支没改动、也没实测，免得在主人眼前弹一个窗出来）。
+
+**还有一件事得说清楚**：主人看到的、profile 是
+`${HOME}\AppData\Local\ego-lite-linux\profile` 的那个 Edge，是**我这边的浏览工具**（agent 用来读页面 / 截图），
+不是 Molly，Molly 的游戏模式管不到它 —— 以后主人开着游戏，我不主动用它。
+`${MOLLY_ROOT}\out\edge-github-main` 那个开 GitHub 的 Edge 窗口是 11-17 12:36 起就在的常驻窗口（不是新弹的），
+`edge-github` / `edge-github2` / `edge-github-headless` 则是 10 月留下的历史 profile，源码里已经没有任何脚本引用它们。
+
+**怎么退回去**：删掉 `readGameMode()` 与那两处判断即可，行为回到「控制台已在跑就开窗」。
+
+
 
 > 主人 m04213 / m04217 / m04234（控制台 app 实拍）：「每次我点游戏模式开关界面就会飞成这样」。
 > 现象是整个 app 只剩窗口顶部约 380px，下面透出模糊的桌面壁纸，右下角还浮着「查看日志」按钮。

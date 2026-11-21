@@ -1456,6 +1456,25 @@ function processNameOf(pid) {
   }
 }
 
+// 游戏模式总闸（2026-11-21，主人：「你不是说开游戏模式就不会开浏览器了吗」）
+//
+// Molly 会「自己开浏览器」的路一共就三条，这一版把它们对齐到同一个开关上：
+//   ① 识图那条 headless Edge —— 在私有钩子 private\recognize.mjs 里，它自己已经看游戏模式；
+//   ② 桌面壳 Molly.exe —— 启动 molly-console 时带 --no-browser，绝不会开浏览器；
+//   ③ 这里：控制台已经在跑、主人又启动一次 molly-console 时，会用 Edge/Chrome 开一个 --app 独立窗口。
+//      以前它不看游戏模式 —— 打游戏时手滑点一下快捷方式，屏幕上就炸出一个浏览器窗口。
+// 配置来源与识图钩子保持一致：out\mem-config.json 的 gameMode（控制台那个开关写的就是它）。
+// 这里刻意不用文件里更靠下的 MEM_CONFIG_FILE 常量，避免模块还没执行到那一行就被调用。
+function readGameMode() {
+  try {
+    const raw = fs.readFileSync(path.join(OUT, 'mem-config.json'), 'utf8');
+    const cfg = JSON.parse(raw);
+    return cfg && cfg.gameMode === true;
+  } catch {
+    return false; // 读不到 / 解析不了就当没开——不能因为配置坏了反而挡住主人开窗
+  }
+}
+
 // 找浏览器：顺序与 tools\open-console-window.ps1 一致（Edge 优先，其次 Chrome）
 function findBrowser() {
   const dirs = [process.env['ProgramFiles(x86)'], process.env.ProgramFiles, process.env.LOCALAPPDATA]
@@ -1484,6 +1503,8 @@ function findBrowser() {
 // 所以 openAppWindow 之后调用方必须等 OPEN_SETTLE_MS 再退（见 handleOccupiedPort）。
 const OPEN_SETTLE_MS = 1500;
 function openAppWindow(url) {
+  // 双保险：调用点已经挡过一次，这里再挡一次，免得以后有人加新调用点忘了看游戏模式。
+  if (readGameMode()) return { opened: false, reason: '游戏模式开着，不弹浏览器' };
   const browser = findBrowser();
   if (!browser) return { opened: false, reason: '没找到 Edge / Chrome' };
   try {
@@ -1607,6 +1628,11 @@ async function handleOccupiedPort() {
     console.log(`控制台已经在运行：${SELF_URL}（本次不再启动，直接给你开窗口）`);
     if (NO_BROWSER) {
       console.log('[console] 原生应用模式：复用健康服务，不打开浏览器。');
+      return 0;
+    }
+    // 游戏模式：主人开着游戏时不弹任何浏览器窗口（控制台本来就在跑，地址给他就够了）。
+    if (readGameMode()) {
+      console.log(`[console] 游戏模式开着：这次不弹浏览器。要看得自己开：${SELF_URL}`);
       return 0;
     }
     const r = openAppWindow(SELF_URL);

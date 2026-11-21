@@ -215,6 +215,24 @@ export class Drift {
     return this.config.driftEnabled !== false && Boolean(this.executor?.run)
   }
 
+  /**
+   * 游戏模式：主人开着游戏的时候，闲逛这条线要停手。
+   *
+   * 为什么（2026-11-21 主人：「我应该还没关游戏模式吧，为什么又开始小黑盒」）：
+   * 闲逛是唯一一条「Molly 自己会开浏览器」的常驻定时任务 —— 它每一轮都让那条
+   * drift 干活会话去小黑盒翻帖子，翻帖子就要拉浏览器（ego_*）、要占 CPU。
+   * 之前 tick() 只看时间窗 / 额度 / 空闲，根本不看游戏模式，所以主人一开游戏，
+   * 它照样到点开浏览器。
+   *
+   * 信号来源与识图钩子、控制台一致：`config.gameModeOn`（web.js 的 /gamemode 运行时开关）。
+   * 注意它不落盘 —— DSH 重启后由控制台按 out/mem-config.json 的 gameMode 自动补开一次。
+   */
+  get gameModeOn() {
+    if (this.config?.gameModeOn === true) return true
+    if (this.engine?.config?.gameModeOn === true) return true
+    return false
+  }
+
   get ownerUin() {
     const u = this.config.commanderUsers
     if (Array.isArray(u) && u.length) return String(u[0])
@@ -374,6 +392,9 @@ export class Drift {
 
   async tick() {
     if (!this.available || this.running) return
+    // 游戏模式优先于一切自动触发：主人在打游戏，这一轮连浏览器都不开。
+    // 手动那一轮（runOnce，控制台「现在逛一轮」）不拦 —— 那是主人自己点的。
+    if (this.gameModeOn) return
     const d = new Date()
     if (!this.inWindow(d)) return
     if (this.countDate !== localDateKey(d)) {
@@ -651,6 +672,8 @@ export class Drift {
     return {
       enabled: this.config.driftEnabled !== false,
       ok: this.available,
+      // 游戏模式开着时 tick 会被跳过，状态里直接写出来，省得主人猜「怎么不逛了 / 怎么又逛了」
+      gameMode: this.gameModeOn,
       running: this.running,
       count: this.count,
       dailyCap: Number(this.cfg.dailyCap),

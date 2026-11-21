@@ -7,7 +7,40 @@
 
 ---
 
-## 2026-11-21 · 游戏模式也管住「控制台自己弹浏览器」
+## 2026-11-21 · 游戏模式也管住「闲逛」：打游戏时 Molly 不再自己去翻小黑盒
+
+> 主人 m04658：「我应该还没关游戏模式吧，为什么又开始小黑盒」。
+
+**查到的实情**
+
+- 「又开始小黑盒」不是新功能，是**闲逛（drift）**到点了。`${MOLLY_ROOT}\data\qq-whale\drift\batches.json`
+  里最近的批次：`14:55:23`（2 条）、`19:39:27`、`20:24:33`、**`21:31:36`**（各 3 条 3 草稿）——
+  最后一轮就发生在主人打游戏的时候（同一时刻 `无畏契约登录器` 在前台）。
+- 闲逛是**唯一一条「Molly 自己会开浏览器」的常驻定时任务**：`lib/drift.js` 每 60 秒 `tick()` 一次，
+  到点就让 `workSessionTag: 'drift2'` 那条干活会话去小黑盒翻帖子、点开详情，
+  翻帖子就要拉浏览器（`ego_*`）、要占 CPU —— 主人感受到的就是「又开始小黑盒、还卡」。
+- 而 `tick()` 的门禁只有四条：`available`、`inWindow`（8–24 点）、`dailyCap`、`idleMinutes`/`everyMinutes`/`minBudgetLeft`。
+  **完全没有游戏模式这一项**，所以开关拨上去它照跑。
+
+**改了什么**
+
+- `lib/drift.js` 新增 `get gameModeOn()`：认 `config.gameModeOn === true` 或 `engine.config.gameModeOn === true`
+  （就是 `web.js` 的 `/gamemode` 拨的那个运行时开关，跟识图钩子同一个信号），只认真正的 `true`。
+- `tick()` 里在 `available/running` 之后立刻 `if (this.gameModeOn) return` —— 优先级高于时间窗、额度、冷却。
+  **手动那一轮（`runOnce`，控制台「现在逛一轮」）不拦**：那是主人自己点的。
+- `status()` 增加 `gameMode: this.gameModeOn`，`/state` 一眼能看出「现在是因为游戏模式没逛」。
+
+**验证**
+
+- `node --check lib\drift.js` 通过；新增 `tools/test-drift-gamemode.mjs`：**9 过 / 0 挂**
+  （config 上开 / 只在 engine.config 上开 / 关着照跑 / 值缺失不拦 / 字符串与 1 不算开 /
+  游戏模式压过「额度够+无冷却」/ running 仍不动 / status 上报 / 重启后如实报 false）。
+
+**怎么退回去**：删掉 `tick()` 里那一行与 `gameModeOn` getter 即可，行为回到「到点就逛」。
+
+**注意**：这类改动要**插件重载 / DSH 重启**才生效；`web.js` 那边本来也是重启才生效。
+
+
 
 > 主人：「不是，你不是说开游戏模式就不会开浏览器了吗」。
 > 对，我上一轮只做了**三分之一** —— 只管了识图那条，别的路没管，这是我的问题。

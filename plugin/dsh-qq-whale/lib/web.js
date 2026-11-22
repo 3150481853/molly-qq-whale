@@ -1280,6 +1280,39 @@ export class WebWidget {
      *   - `this.config.singingEnabled = false` → maybeSing（engine.js:3968）立刻返回 false
      * 关掉时按开启前记下的原值恢复，不会把「本来就关着」的东西打开。
      */
+    /*
+     * 2026-11-22（主人 m04743「为什么又小黑盒」）：开关必须落盘。
+     * 只在内存里的话，DSH 一重启就没了，闲逛 / 识图照旧开浏览器。
+     * 落 <dataDir>/game-mode.json，插件起来时读回来（drift.js 与私有钩子共用同一份）。
+     */
+    const gameModeFile = path.join(String(this.config?.dataDir || '.'), 'game-mode.json')
+    const readGameModeFile = () => {
+      try {
+        return JSON.parse(fs.readFileSync(gameModeFile, 'utf8'))?.on === true
+      } catch {
+        return false
+      }
+    }
+    const persistGameMode = (on) => {
+      try {
+        fs.mkdirSync(path.dirname(gameModeFile), { recursive: true })
+        fs.writeFileSync(gameModeFile, JSON.stringify({ on, at: Date.now() }), 'utf8')
+      } catch (err) {
+        this.logger?.('warn', `游戏模式开关落盘失败（本次照常生效）：${err?.message || err}`)
+      }
+    }
+    if (!this._gameMode) this._gameMode = { on: false, backup: null }
+    if (readGameModeFile() && !this._gameMode.on) {
+      this._gameMode.backup = {
+        voiceEnabled: this.config.voiceEnabled !== false,
+        singingEnabled: this.config.singingEnabled !== false,
+      }
+      this.config.voiceEnabled = false
+      this.config.singingEnabled = false
+      this.config.gameModeOn = true
+      this._gameMode.on = true
+      this.logger('warn', '游戏模式 → 按落盘状态恢复为开（语音合成 / 点歌热禁用 / 识图不拉浏览器）')
+    }
     const gameModeState = () => ({ on: this._gameMode?.on === true })
     add({
       kind: 'exact',
@@ -1319,6 +1352,7 @@ export class WebWidget {
           // 这里放一个运行时开关，钩子读 engine.config.gameModeOn 自己决定跳过浏览器类引擎。
           this.config.gameModeOn = true
           this._gameMode.on = true
+          persistGameMode(true)
           this.logger('warn', '游戏模式 → 开（语音合成 / 点歌热禁用 / 识图不拉浏览器）')
         } else if (!on && this._gameMode.on) {
           const b = this._gameMode.backup || {}
@@ -1326,6 +1360,7 @@ export class WebWidget {
           this.config.singingEnabled = b.singingEnabled !== false
           this.config.gameModeOn = false
           this._gameMode.on = false
+          persistGameMode(false)
           this.logger('info', '游戏模式 → 关（语音合成 / 点歌 / 识图浏览器恢复）')
         }
         sendJson(res, 200, {

@@ -11,7 +11,7 @@
  * 3. 不碰主人那条几百轮的干活会话：用 workSessionTag:'drift1' 单独开一条，
  *    首建时才带得上 ego_*（浏览器）工具。
  */
-import { promises as fs } from 'node:fs'
+import { promises as fs, readFileSync } from 'node:fs'
 import path from 'node:path'
 
 const pad2 = (n) => String(n).padStart(2, '0')
@@ -181,6 +181,8 @@ export class Drift {
     this.lastSay = null
     this.lastShare = null
     this._timer = null
+    this._gmFile = null
+    this._gmLoggedAt = 0
   }
 
   /**
@@ -224,13 +226,32 @@ export class Drift {
    * 之前 tick() 只看时间窗 / 额度 / 空闲，根本不看游戏模式，所以主人一开游戏，
    * 它照样到点开浏览器。
    *
-   * 信号来源与识图钩子、控制台一致：`config.gameModeOn`（web.js 的 /gamemode 运行时开关）。
-   * 注意它不落盘 —— DSH 重启后由控制台按 out/mem-config.json 的 gameMode 自动补开一次。
+   * 信号有两个来源：内存里的 `config.gameModeOn`（web.js 的 /gamemode 拨的），
+   * 以及落盘的 `<dataDir>/game-mode.json`。
+   *
+   * 2026-11-22（主人 m04743 再问一次「为什么又小黑盒」）：**只认内存守不住重启**。
+   * DSH 一重启 `config.gameModeOn` 就没了，控制台不会主动补推，于是「主人明明开着
+   * 游戏模式」的那几轮照样跑掉了（11-22 的 08:01 / 08:46 / 10:16 / 11:23 / 12:14）。
+   * 现在开关由 web.js 落盘，这里读回来兜底：3 秒缓存，读不到就当没开。
    */
   get gameModeOn() {
-    if (this.config?.gameModeOn === true) return true
-    if (this.engine?.config?.gameModeOn === true) return true
-    return false
+    return this.gameModeState().on
+  }
+
+  gameModeState(nowMs = Date.now()) {
+    if (this.config?.gameModeOn === true) return { on: true, source: 'runtime' }
+    if (this.engine?.config?.gameModeOn === true) return { on: true, source: 'engine' }
+    const cache = this._gmFile
+    if (cache && nowMs - cache.at < 3000) return { on: cache.on, source: 'disk' }
+    let on = false
+    try {
+      const file = path.join(path.dirname(this.dir), 'game-mode.json')
+      on = JSON.parse(readFileSync(file, 'utf8'))?.on === true
+    } catch {
+      on = false
+    }
+    this._gmFile = { at: nowMs, on }
+    return { on, source: 'disk' }
   }
 
   get ownerUin() {
@@ -394,7 +415,15 @@ export class Drift {
     if (!this.available || this.running) return
     // 游戏模式优先于一切自动触发：主人在打游戏，这一轮连浏览器都不开。
     // 手动那一轮（runOnce，控制台「现在逛一轮」）不拦 —— 那是主人自己点的。
-    if (this.gameModeOn) return
+    const gm = this.gameModeState()
+    if (gm.on) {
+      // 每半小时最多记一条，免得日志被刷满
+      if (Date.now() - this._gmLoggedAt > 30 * 60000) {
+        this._gmLoggedAt = Date.now()
+        this.logger('info', `闲逛跳过这一轮：游戏模式开着（信号来源 ${gm.source}）`)
+      }
+      return
+    }
     const d = new Date()
     if (!this.inWindow(d)) return
     if (this.countDate !== localDateKey(d)) {
@@ -674,6 +703,7 @@ export class Drift {
       ok: this.available,
       // 游戏模式开着时 tick 会被跳过，状态里直接写出来，省得主人猜「怎么不逛了 / 怎么又逛了」
       gameMode: this.gameModeOn,
+      gameModeSource: this.gameModeState().source,
       running: this.running,
       count: this.count,
       dailyCap: Number(this.cfg.dailyCap),

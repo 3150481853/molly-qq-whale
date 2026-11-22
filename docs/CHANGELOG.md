@@ -7,6 +7,41 @@
 
 ---
 
+## 2026-11-22 · 游戏模式开关落盘：DSH 一重启就不算数，那是 bug
+
+> 主人 m04743：「为什么又小黑盒」（这是第二次问）。
+
+**查到的实情**
+
+- 上一版（11-21）给闲逛加了游戏模式闸门，但那个信号 `config.gameModeOn` **只在内存里**：
+  DSH 一重启就没了，而**控制台不会在 DSH 重启后主动补推** `/gamemode`。
+- 证据：`drift\batches.json` 里 11-21 21:37 重启之后照样跑 —— 11-21 `22:50:28`，
+  11-22 `08:01:33` / `08:46:16` / `10:16:28` / `11:23:36`，外加 12:14 那轮（还失败了：
+  `没解析到帖子（模型输出不是 JSON）`）。闸门写对了，缺的是「重启后信号从哪儿来」。
+- 反证：`/dsh-qq-whale/state` 的 `drift.gameMode` 现在报 `true`（getter 认信号没问题），
+  而 `/dsh-qq-whale/gamemode` 的 GET 也报 `{on:true}` —— 说明重启后是靠人再拨了一次才有的。
+
+**改了什么**
+
+- `lib/web.js` 的 `/gamemode`：开关**落盘**到 `<dataDir>/game-mode.json`（`{on, at}`），开/关都写；
+  插件起来时读回来 —— 上次是开着的话，自动恢复「语音合成 + 点歌热禁用 + 浏览器闸门」。
+- `lib/drift.js`：`gameModeOn` 改成 `gameModeState()`，信号来源三档
+  `runtime`（内存开关）→ `engine` → **`disk`（落盘文件，3 秒缓存）**，读不到就当没开；
+  `tick()` 跳过时每半小时记一条「闲逛跳过这一轮：游戏模式开着（信号来源 disk）」；
+  `status()` 多一个 `gameModeSource`。
+
+**验证**
+
+- `node --check lib\drift.js` / `lib\web.js` 通过。
+- 新增 `tools/test-drift-gamemode-disk.mjs`：**14 过 / 0 挂**（说开 / 说关 / 缺失 / 坏 JSON /
+  内存优先 / engine 优先 / 3 秒缓存窗口内不重读 / 过窗口读回 / tick 真不跑 / tick 照跑 /
+  status 两个字段）。老的 `tools/test-drift-gamemode.mjs` 仍 **9 过 / 0 挂**。
+
+**怎么退回去**：删掉 `web.js` 里 `persistGameMode()` 的两处调用与 `drift.js` 的 disk 分支，
+行为回到「只在内存里，重启即失效」。
+
+---
+
 ## 2026-11-21 · 游戏模式也管住「闲逛」：打游戏时 Molly 不再自己去翻小黑盒
 
 > 主人 m04658：「我应该还没关游戏模式吧，为什么又开始小黑盒」。

@@ -3551,7 +3551,7 @@ html[data-shell="desktop"][data-glass="true"] .on-kpi {
   color: var(--charcoal);
 }
 
-/* 热力：7 行 × 24 列，5 档透明度，空格给一条极淡的底 */
+/* 热力：7 行 × 24 列，配色跟「按天」同一套口径（见 console.js onHeatBg） */
 .on-heat-grid { display: flex; flex-direction: column; gap: 2px; }
 .on-heat-row {
   display: grid;
@@ -3569,6 +3569,22 @@ html[data-shell="desktop"][data-glass="true"] .on-kpi {
 .on-heat-row.is-head .on-heat-cell { display: none; }
 .on-heat-hour { font-size: 10.5px; line-height: 14px; color: var(--muted); }
 .on-heat-hour.is-end { text-align: right; }
+/* 图例：没有它，深绿/浅绿/琥珀在玻璃背景上根本分不出来 */
+.on-heat-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.on-heat-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.on-heat-legend i {
+  display: inline-block;
+  width: 12px;
+  height: 10px;
+  border-radius: 3px;
+}
 
 /* 轨迹：28px 的一条带子 + 0/6/12/18/24 刻度 + 今天的会话列表 */
 .on-band {

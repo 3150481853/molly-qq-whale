@@ -6703,6 +6703,26 @@
       + '<div class="on-hours-axis">' + axis + '</div>';
   }
 
+  /*
+   * 一周格子的配色（2026-11-23，主人 m04800「明明有黄色的不在线时间，底下按一周
+   * 分布全是绿的」）。
+   *
+   * 旧版只有 0 / 25 / 50 / 75 / 100 五档绿，而 Molly 的在线率长期在 95–100% 之间：
+   * 81%、93%、99.9%、100% 全都落进「≥75%」那一档，画出来一模一样的最深绿 ——
+   * 于是上面按天的橙格子（97.9%）和下面「全是绿的」自相矛盾。
+   *
+   * 现在改成跟上面按天那套同一口径：
+   *   ≥99.5% 深绿 / 99–99.5% 浅绿 / 95–99% 琥珀（断过） / <95% 红 / 没有采样 浅灰
+   */
+  function onHeatBg(value) {
+    var n = Number(value);
+    if (!isFinite(n) || n <= 0) return { bg: 'rgba(25,33,30,.05)', label: '没有采样' };
+    if (n >= 0.995) return { bg: 'rgba(41,79,62,1)', label: '一直在线' };
+    if (n >= 0.99) return { bg: 'rgba(41,79,62,.66)', label: '差一点' };
+    if (n >= 0.95) return { bg: 'rgba(186,132,36,.72)', label: '断过' };
+    return { bg: 'rgba(163,58,48,.72)', label: '断得多' };
+  }
+
   function onHeatmap(data) {
     if (!data.summary || !data.summary.daysWithData) {
       return '<div class="on-empty">还没有采样数据，等一会儿再看</div>';
@@ -6713,11 +6733,12 @@
     for (var w = 0; w < 7; w++) {
       rows += '<div class="on-heat-row"><span class="on-heat-label">周' + ON_WEEK[w] + '</span>';
       for (var h = 0; h < 24; h++) {
-        var v = Number((matrix[w] || [])[h]) || 0;
-        var step = v <= 0 ? 0 : (v < 0.25 ? 0.25 : (v < 0.5 ? 0.5 : (v < 0.75 ? 0.75 : 1)));
-        var bg = step === 0 ? 'rgba(25,33,30,.05)' : 'rgba(41,79,62,' + step + ')';
-        var tip = '周' + ON_WEEK[w] + ' ' + pad2(h) + ':00 · 在线 ' + Math.round(v * 100) + '%';
-        rows += '<i class="on-heat-cell" style="background:' + bg + '" data-tip="' + esc(tip) + '"></i>';
+        var raw = (matrix[w] || [])[h];
+        var v = raw === undefined || raw === null ? -1 : Number(raw);
+        var scale = onHeatBg(v);
+        var tip = '周' + ON_WEEK[w] + ' ' + pad2(h) + ':00 · '
+          + (v > 0 ? '在线 ' + onPct(v * 100) + '（' + scale.label + '）' : '没有采样');
+        rows += '<i class="on-heat-cell" style="background:' + scale.bg + '" data-tip="' + esc(tip) + '"></i>';
         if (w === 0) {
           var label = h === 0 || h === 6 || h === 12 || h === 18 || h === 23 ? String(h) : '';
           head += '<span class="on-heat-hour' + (h === 23 ? ' is-end' : '') + '">' + label + '</span>';
@@ -6726,7 +6747,14 @@
       rows += '</div>';
     }
     head += '</div>';
-    return '<div class="on-heat-grid">' + head + rows + '</div>';
+    var legend = '<div class="on-heat-legend">'
+      + '<span><i style="background:rgba(41,79,62,1)"></i>≥99.5% 一直在线</span>'
+      + '<span><i style="background:rgba(41,79,62,.66)"></i>99–99.5%</span>'
+      + '<span><i style="background:rgba(186,132,36,.72)"></i>95–99% 断过</span>'
+      + '<span><i style="background:rgba(163,58,48,.72)"></i>低于 95%</span>'
+      + '<span><i style="background:rgba(25,33,30,.05)"></i>没有采样</span>'
+      + '</div>';
+    return '<div class="on-heat-grid">' + head + rows + '</div>' + legend;
   }
 
   function onSegName(status) {

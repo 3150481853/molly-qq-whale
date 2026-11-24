@@ -7,6 +7,42 @@
 
 ---
 
+## 2026-11-24 · 连点开关不会打架：一次只干一件事，后来的说了算
+
+> 主人 m05133：「如果我快速连续开关会不会出问题」
+
+**原来会出什么问题**
+
+`/gamemode` 没有串行化。两个请求几乎同时进来，就会同时跑 `applyGameMode`：
+
+- `cfg.__gmBackup` 互相覆盖 → 关掉的时候还原成「开着」，语音再也回不来；
+- 「停 SoVITS」和「起 SoVITS」插队 → 结果可能是开关显示「开着」，9880 却还在吃 9GB；
+- `voiceKeepAlive` 被后来的那一次写成 `false`，而用户其实已经关了游戏模式。
+
+还有一个隐蔽的：`startSovits` 只是把脚本 detach 出去，**9880 要 20–40 秒后才监听**。
+刚点「开」立刻点「关」，旧代码看到端口没开就回「本来就没在跑」直接走人 —— 过一会儿 SoVITS 自己起来了，
+开关却显示「关」。
+
+**改了什么**
+
+- `lib/game-mode.js`：`applyGameMode()` 现在走一条队列（`_seq` / `_latestSeq` / `_applyChain`），
+  **串行执行，后来居上** —— 排队期间又有新拨动时，旧的那次返回 `{superseded:true}` 并让位，不去启停进程。
+  真正的实现改名 `runApplyGameMode()`（不导出）。
+- `stopSovits()` 增加 `startGraceMs`（默认 20 秒）与 `startedAt`：90 秒内刚拉起来过（`lastStartAt`），
+  就先等端口监听上再发 `exit`，不再误判「本来就没在跑」。`startSovits()` 成功时记 `lastStartAt`。
+- `tools/test-game-mode.mjs` 18 → **21 条**：连按「开→关→开」时只最后一次真的动手（中间两次 `superseded`）、
+  刚拉起就点关会等监听再 exit、本来就没跑时不等待也不发 exit。
+
+**怎么退回去**
+
+`git revert` 这对改动即可；行为退回「并发各自跑」，但不影响游戏模式本身是否生效。
+
+**验证**
+
+`node tools/test-game-mode.mjs` → 21 过 / 0 挂；`node --check lib/game-mode.js` 通过。
+
+---
+
 ## 2026-11-24 · 游戏模式做成总闸：SoVITS 和嵌入 sidecar 也跟着关
 
 > 主人 m04935：「你游戏模式能不能做好了，为什么开了游戏模式实际上啥用没有？」

@@ -197,6 +197,48 @@ await t('看门狗：起来时磁盘说开着 → 立刻静默收活；变了才
   sup.stop()
 })
 
+await t('快速连续开关：只有最后一次真的动手', async () => {
+  const cfg = mkCfg({ voiceEnabled: true, singingEnabled: true })
+  const calls = []
+  const deps = {
+    setWatchdogVoiceKeepAlive: (on) => { calls.push('keepAlive:' + on); return { ok: true, changed: true } },
+    stopSovits: async () => { calls.push('stop'); return { ok: true } },
+    stopEmbed: async () => { calls.push('embed'); return { ok: true } },
+    startSovits: () => { calls.push('start'); return { ok: true } },
+  }
+  // 三下几乎同时按下：开 → 关 → 开
+  const p1 = applyGameMode({ on: true, config: cfg, deps })
+  const p2 = applyGameMode({ on: false, config: cfg, deps })
+  const p3 = applyGameMode({ on: true, config: cfg, deps })
+  const [r1, r2, r3] = await Promise.all([p1, p2, p3])
+  assert.equal(r1.superseded, true, '第一下该被顶掉')
+  assert.equal(r2.superseded, true, '第二下该被顶掉')
+  assert.equal(r3.superseded, undefined)
+  assert.deepEqual(calls, ['keepAlive:false', 'stop', 'embed'], '中间那两下不该去启停进程')
+  assert.equal(cfg.gameModeOn, true, '最终状态必须等于最后一次的意图')
+})
+
+await t('刚拉起 SoVITS 就点关：不急着判「本来就没在跑」', async () => {
+  const { stopSovits } = await import('../plugin/dsh-qq-whale/lib/game-mode.js')
+  let probes = 0
+  let sent = false
+  // 第一次探测：还没监听；之后监听上了；收到 exit 之后端口关掉
+  const portOpenImpl = async () => { probes++; if (sent) return false; return probes > 1 }
+  let exitCalled = 0
+  const fetchImpl = async () => { exitCalled++; sent = true }
+  const r = await stopSovits({ startedAt: Date.now(), portOpenImpl, fetchImpl, startGraceMs: 2000, waitMs: 2000 })
+  assert.equal(exitCalled, 1, '等它监听上之后要真的发 exit')
+  assert.match(String(r.note), /已(优雅退出|硬杀)/)
+})
+
+await t('本来就没跑：不等待、不发 exit', async () => {
+  const { stopSovits } = await import('../plugin/dsh-qq-whale/lib/game-mode.js')
+  let exitCalled = 0
+  const r = await stopSovits({ startedAt: 0, portOpenImpl: async () => false, fetchImpl: async () => { exitCalled++ } })
+  assert.equal(exitCalled, 0)
+  assert.match(String(r.note), /本来就没在跑/)
+})
+
 await t('仓库根：从 dataDir 往上找（装进 node_modules 的情况）', () => {
   // 造一个「仓库 + data 子目录」的形状：lib 在别处时只有 dataDir 指得回来
   const fake = fs.mkdtempSync(path.join(os.tmpdir(), 'gm-root-'))

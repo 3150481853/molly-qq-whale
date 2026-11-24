@@ -205,12 +205,31 @@ export function killListeners(port) {
   }
 }
 
+/** 上次「拉起 SoVITS」的时刻。用于「刚点开又点关」时别急着判「本来就没在跑」。 */
+let lastStartAt = 0
+const START_GRACE_MS = 90_000
+
 /**
  * 让 GPT-SoVITS 退。它常常是以管理员身份起的（11-24 实测 Stop-Process 被拒），
  * 但它自己带 `GET /control?command=exit`，优雅退出不需要权限。
+ *
+ * 2026-11-24（主人 m05133「如果我快速连续开关会不会出问题」）：
+ * `startSovits` 只是把脚本 detach 出去，**9880 要 20–40 秒后才监听**。如果紧接着点「关」，
+ * 旧代码看到端口没开就回「本来就没在跑」直接走人 —— 于是 SoVITS 过一会儿自己就起来了，
+ * 开关却显示「开」。所以刚拉起来过就先等它监听（最多 `startGraceMs`），再发 exit。
  */
-export async function stopSovits({ fetchImpl = fetch, waitMs = 8000 } = {}) {
-  if (!(await portOpen(SOVITS_PORT))) return { ok: true, note: '本来就没在跑' }
+export async function stopSovits({ fetchImpl = fetch, waitMs = 8000, startGraceMs = 20000, portOpenImpl = portOpen, nowFn = Date.now, startedAt = lastStartAt } = {}) {
+  if (!(await portOpenImpl(SOVITS_PORT))) {
+    const sinceStart = nowFn() - startedAt
+    if (!startedAt || sinceStart >= START_GRACE_MS) return { ok: true, note: '本来就没在跑' }
+    const t = nowFn()
+    let up = false
+    while (nowFn() - t < startGraceMs) {
+      await sleep(250)
+      if (await portOpenImpl(SOVITS_PORT)) { up = true; break }
+    }
+    if (!up) return { ok: true, note: '刚拉起来的那个没等到，先当它没在跑' }
+  }
   try {
     await fetchImpl(`http://127.0.0.1:${SOVITS_PORT}/control?command=exit`, { signal: AbortSignal.timeout(5000) })
   } catch {
@@ -218,12 +237,12 @@ export async function stopSovits({ fetchImpl = fetch, waitMs = 8000 } = {}) {
   }
   const t0 = Date.now()
   while (Date.now() - t0 < waitMs) {
-    if (!(await portOpen(SOVITS_PORT))) return { ok: true, note: '已优雅退出' }
+    if (!(await portOpenImpl(SOVITS_PORT))) return { ok: true, note: '已优雅退出' }
     await sleep(250)
   }
   const killed = killListeners(SOVITS_PORT)
   await sleep(400)
-  if (!(await portOpen(SOVITS_PORT))) return { ok: true, note: `已硬杀（pid ${killed || '?'}）` }
+  if (!(await portOpenImpl(SOVITS_PORT))) return { ok: true, note: `已硬杀（pid ${killed || '?'}）` }
   return { ok: false, note: '还占着 9880（多半是管理员进程，得手工关）' }
 }
 
@@ -236,6 +255,7 @@ export function startSovits({ config } = {}) {
       '/c', 'start', '""', '/b', 'powershell.exe',
       '-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', p.sovitsScript,
     ], { cwd: p.root, windowsHide: true, timeout: 15000, stdio: 'ignore' })
+    lastStartAt = Date.now()
     return { ok: true, note: '已拉起（首次加载 20–40 秒）' }
   } catch (err) {
     return { ok: false, note: String(err?.message || err).slice(0, 120) }
@@ -255,10 +275,34 @@ export async function stopEmbed({ waitMs = 5000 } = {}) {
 }
 
 /**
- * 一次把游戏模式拨到位。开着的时候顺带把重活收掉；
- * 关的时候把开关还原（按开启前记下的 backup，不硬把本来关着的东西打开）。
+ * 一次把游戏模式拨到位 —— **串行 + 后来居上**。
+ *
+ * 2026-11-24（主人 m05133「如果我快速连续开关会不会出问题」）：
+ * 原来并发进来两个 POST 就会同时跑 applyGameMode，`__gmBackup` 互相覆盖、
+ * 「停 SoVITS」和「起 SoVITS」互相插队，最后可能变成「开关显示开着但 SoVITS 还在吃 9GB」，
+ * 或者「开关关了、语音保活却被写成 false，语音再也回不来」。
+ *
+ * 现在所有拨动走一条队列；排队期间又有新请求时，旧的那次直接标记 `superseded` 并让位 ——
+ * 最终落地的永远是**最后一次**的意图，中间那几下不会真的去启停进程。
  */
-export async function applyGameMode({ on, config, engine, logger = () => {}, quiet = false, deps = {} } = {}) {
+let _seq = 0
+let _latestSeq = 0
+let _applyChain = Promise.resolve()
+
+export function applyGameMode(opts = {}) {
+  const seq = ++_seq
+  _latestSeq = seq
+  const run = async () => {
+    if (_latestSeq !== seq) {
+      const st = gameModeState({ config: opts.config, engine: opts.engine, fresh: true })
+      return { on: st.on, superseded: true, flags: {}, reclaimed: {}, note: '被后来的拨动顶掉了，这一轮不折腾进程' }
+    }
+    return runApplyGameMode(opts)
+  }
+  _applyChain = _applyChain.then(run, run)
+  return _applyChain
+}
+async function runApplyGameMode({ on, config, engine, logger = () => {}, quiet = false, deps = {} } = {}) {
   const cfg = config || engine?.config || {}
   const want = Boolean(on)
   const facts = { on: want, source: quiet ? 'restore' : 'switch', flags: {}, reclaimed: {} }

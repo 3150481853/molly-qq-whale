@@ -24,6 +24,9 @@ import { execFileSync, spawn } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+// 2026-11-24（主人 m04942）：游戏模式开着时不许再把嵌入 sidecar 拉起来（它常驻 ~4.8GB）。
+// 只读 game-mode.js，不反向依赖，避免循环 import。
+import { gameModeState } from './game-mode.js'
 
 const DEFAULT_URL = 'http://127.0.0.1:8791'
 const DEFAULT_PYTHON = 'G:\\Molly\\data\\singing\\venv312\\Scripts\\python.exe'
@@ -109,6 +112,14 @@ export function createSidecar({ logger = () => {}, root = '' } = {}) {
    */
   const ensure = () => {
     if (off) return false
+    /*
+     * 2026-11-24（主人 m04942「就不能把 SoVITS 这种占用大的绑在游戏模式吗」）：
+     * 游戏模式一开，嵌入 sidecar（常驻 ~4.8GB 提交内存）就不再拉起；
+     * 检索自动退回纯关键词，关掉游戏模式后下一次 ensure 自然恢复。
+     */
+    try {
+      if (gameModeState().on) return false
+    } catch {}
     /*
      * 2026-11-08（线上实测）：原来的 `spawned` 是一次性开关，起过一次就再也不问服务端。
      * 可 sidecar 空闲 30 分钟会自己退出，于是插件活着的剩下时间里向量与重排全部

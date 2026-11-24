@@ -23,6 +23,14 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+// 游戏模式总闸（2026-11-24，主人 m04935「开了游戏模式实际上啥用没有」/
+// m04942「把 SoVITS 这种占用大的绑在游戏模式」）：单一真源 + 重活回收都在 game-mode.js。
+import {
+  gameModeState as gmStateShared,
+  persistGameMode,
+  applyGameMode,
+  startGameModeSupervisor,
+} from './game-mode.js'
 
 import { addLearnedHash, removeLearnedHash } from './sticker-learn.js'
 import { clockText, parseHHMM } from './clock.js'
@@ -246,6 +254,7 @@ export class WebWidget {
     this.moduleSnapshot = moduleSnapshot
     this.widgetJs = ''
     this.disposers = []
+    this.startGameModeSupervisor()
   }
 
   loadWidgetJs() {
@@ -1285,35 +1294,9 @@ export class WebWidget {
      * 只在内存里的话，DSH 一重启就没了，闲逛 / 识图照旧开浏览器。
      * 落 <dataDir>/game-mode.json，插件起来时读回来（drift.js 与私有钩子共用同一份）。
      */
-    const gameModeFile = path.join(String(this.config?.dataDir || '.'), 'game-mode.json')
-    const readGameModeFile = () => {
-      try {
-        return JSON.parse(fs.readFileSync(gameModeFile, 'utf8'))?.on === true
-      } catch {
-        return false
-      }
-    }
-    const persistGameMode = (on) => {
-      try {
-        fs.mkdirSync(path.dirname(gameModeFile), { recursive: true })
-        fs.writeFileSync(gameModeFile, JSON.stringify({ on, at: Date.now() }), 'utf8')
-      } catch (err) {
-        this.logger?.('warn', `游戏模式开关落盘失败（本次照常生效）：${err?.message || err}`)
-      }
-    }
+    // 2026-11-24：开关的真源与落盘都挪到 lib/game-mode.js，这里只读它。
     if (!this._gameMode) this._gameMode = { on: false, backup: null }
-    if (readGameModeFile() && !this._gameMode.on) {
-      this._gameMode.backup = {
-        voiceEnabled: this.config.voiceEnabled !== false,
-        singingEnabled: this.config.singingEnabled !== false,
-      }
-      this.config.voiceEnabled = false
-      this.config.singingEnabled = false
-      this.config.gameModeOn = true
-      this._gameMode.on = true
-      this.logger('warn', '游戏模式 → 按落盘状态恢复为开（语音合成 / 点歌热禁用 / 识图不拉浏览器）')
-    }
-    const gameModeState = () => ({ on: this._gameMode?.on === true })
+    const gameModeState = () => gmStateShared({ config: this.config, engine: this.engineRef?.() || null })
     add({
       kind: 'exact',
       path: `${ROUTE_PREFIX}/gamemode`,
@@ -1340,29 +1323,17 @@ export class WebWidget {
           return
         }
         if (!this._gameMode) this._gameMode = { on: false, backup: null }
-        if (on && !this._gameMode.on) {
-          this._gameMode.backup = {
-            voiceEnabled: this.config.voiceEnabled !== false,
-            singingEnabled: this.config.singingEnabled !== false,
-          }
-          this.config.voiceEnabled = false
-          this.config.singingEnabled = false
-          // 2026-11-20（主人 m04031）：游戏模式也要管住「开浏览器查东西」。
-          // 插件本体从不拉浏览器；会拉的是私有钩子 recognize.mjs 的 headless Edge。
-          // 这里放一个运行时开关，钩子读 engine.config.gameModeOn 自己决定跳过浏览器类引擎。
-          this.config.gameModeOn = true
-          this._gameMode.on = true
-          persistGameMode(true)
-          this.logger('warn', '游戏模式 → 开（语音合成 / 点歌热禁用 / 识图不拉浏览器）')
-        } else if (!on && this._gameMode.on) {
-          const b = this._gameMode.backup || {}
-          this.config.voiceEnabled = b.voiceEnabled !== false
-          this.config.singingEnabled = b.singingEnabled !== false
-          this.config.gameModeOn = false
-          this._gameMode.on = false
-          persistGameMode(false)
-          this.logger('info', '游戏模式 → 关（语音合成 / 点歌 / 识图浏览器恢复）')
-        }
+        // 2026-11-24（主人 m04935 / m04942）：一次拨到位。
+        // 运行时开关、watchdog 的语音保活、SoVITS、嵌入 sidecar 全在 lib/game-mode.js 里收口；
+        // 谁占内存谁认这个闸，不再出现「开关拨了但什么也没变」。
+        persistGameMode(on, { config: this.config })
+        const facts = await applyGameMode({
+          on,
+          config: this.config,
+          engine: this.engineRef?.() || null,
+          logger: this.logger,
+        })
+        this._gameMode.on = on
         sendJson(res, 200, {
           ok: true,
           data: {
@@ -1370,6 +1341,7 @@ export class WebWidget {
             voiceEnabled: this.config.voiceEnabled !== false,
             singingEnabled: this.config.singingEnabled !== false,
             browserBlocked: this.config.gameModeOn === true,
+            reclaimed: facts.reclaimed,
           },
         })
       }),
@@ -3439,6 +3411,23 @@ export class WebWidget {
     }
   }
 
+  /**
+   * 2026-11-24：游戏模式的看门狗。
+   * 每 5 秒对一次盘 —— 控制台点了、手工改了文件、或者刚重启，状态一变就自己 apply。
+   */
+  startGameModeSupervisor() {
+    try {
+      this._gmSupervisor = startGameModeSupervisor({
+        config: this.config,
+        engine: this.engineRef?.() || null,
+        logger: this.logger,
+      })
+      this.logger('info', '游戏模式看门狗已启动（每 5 秒对一次盘）')
+    } catch (err) {
+      this.logger('warn', '游戏模式看门狗启动失败：' + (err && err.message ? err.message : err))
+    }
+  }
+
   /** 桌面端注入行：必须在 apply 阶段就挂上，见文件头注释 */
   registerIndexInjectRow(root) {
     try {
@@ -3462,6 +3451,9 @@ export class WebWidget {
   }
 
   dispose() {
+    try {
+      this._gmSupervisor?.stop?.()
+    } catch {}
     for (const d of this.disposers) {
       try {
         d()

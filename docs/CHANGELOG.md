@@ -7,6 +7,51 @@
 
 ---
 
+## 2026-11-24 · 游戏模式做成总闸：SoVITS 和嵌入 sidecar 也跟着关
+
+> 主人 m04935：「你游戏模式能不能做好了，为什么开了游戏模式实际上啥用没有？」
+> 主人 m04942：「就不能把 SoVITS 这种占用大的绑在游戏模式吗」
+
+**为什么之前「啥用没有」**
+
+- `/gamemode` 只翻两个**内存**开关（`voiceEnabled` / `singingEnabled`），DSH 一重启就全没了；
+- 控制台写 `out\mem-config.json`、插件写 `data\qq-whale\game-mode.json`，两边各写各的，重启后没人把状态推回来；
+- 真正吃内存的两个家伙根本不看这个开关：**GPT-SoVITS（9GB 提交 + 显存）**、**嵌入 sidecar（4.8GB）**。
+  11-24 那次「游戏闪退 + 控制台设置进不去」就是提交内存只剩 0.7GB 撑爆的（`VALORANT` 0xe06d7363、
+  `msedgewebview2` 0xe0000008 同秒崩）。
+- 还有一层：11-22 做的「开关落盘 + drift 读盘」**根本没被加载过** —— 进程 11-21 21:39 就起来了，
+  而那两个文件是 11-22 12:17 才改的。老代码一直在跑。
+
+**改了什么**
+
+- 新增 `plugin\dsh-qq-whale\lib\game-mode.js`（零依赖，**唯一真源 + 唯一收口**）：
+  - `gameModeState()` 按 runtime → engine.config → `data\qq-whale\game-mode.json` → 控制台 `mem-config.json`
+    依次找信号，3 秒缓存，`ignoreRuntime` 供看门狗只认盘；
+  - `applyGameMode({on})` 一次拨到位：开关 + `watchdog-config.json` 的 `voiceKeepAlive` +
+    停/起 GPT-SoVITS + 停嵌入 sidecar，返回值里带 `reclaimed`；
+  - SoVITS 常常是**管理员身份**起的，`Stop-Process` 会被拒，所以走它自己的
+    `GET http://127.0.0.1:9880/control?command=exit` 优雅退出，退不掉才按端口硬杀；
+  - `startGameModeSupervisor()` 每 5 秒对一次盘（串行排队，不丢拍），状态一变就自己 apply ——
+    重启后也不需要控制台补推。
+- `lib\web.js` 的 `/gamemode` 改成调 `applyGameMode()`，响应里多一个 `reclaimed`（这次收掉了什么）；
+  构造时启动看门狗，`dispose()` 里停掉。
+- `lib\sidecar.js` 的 `ensure()` 开头加闸：游戏模式开着就不再把嵌入 sidecar 拉起来
+  （检索自动退回纯关键词，关掉游戏模式后下一次 ensure 自然恢复）。
+
+**验证**
+
+- `node --check` 三个文件全过；新增 `tools\test-game-mode.mjs`：**17 过 / 0 挂**
+  （四档信号优先级、坏 JSON、3 秒缓存与 `fresh` 穿透、落盘、watchdog 保活不改其它键、
+  开/关一次拨到位的调用顺序、看门狗「起来就收活/状态没变不重复干活/盘上关了会拉回来」、
+  sidecar 与 web.js 的接线断言）。
+- 真机端口：9880（SoVITS）与 8791（嵌入）在腾内存那轮之后一直是关着的，`applyGameMode` 会如实报
+  「本来就没在跑」。
+
+**怎么退回去**：把 `web.js` 的 `/gamemode` 处理换回原来那段内存开关代码、删掉 `lib\game-mode.js`
+与 `sidecar.js` 里那三行闸即可；`watchdog-config.json` 的 `voiceKeepAlive` 手工改回 `true` 就恢复语音保活。
+
+---
+
 ## 2026-11-23 · 「一周里的分布」全是绿的：配色只有五档，97% 和 100% 被画成同一种颜色
 
 > 主人 m04802：「为什么上面明明有黄色的不在线时间，底下按一周分布全是绿的」。

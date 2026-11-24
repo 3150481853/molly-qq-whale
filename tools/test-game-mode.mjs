@@ -197,6 +197,29 @@ await t('看门狗：起来时磁盘说开着 → 立刻静默收活；变了才
   sup.stop()
 })
 
+await t('仓库根：从 dataDir 往上找（装进 node_modules 的情况）', () => {
+  // 造一个「仓库 + data 子目录」的形状：lib 在别处时只有 dataDir 指得回来
+  const fake = fs.mkdtempSync(path.join(os.tmpdir(), 'gm-root-'))
+  const repo = path.join(fake, 'qq-whale')
+  fs.mkdirSync(path.join(repo, 'tools'), { recursive: true })
+  fs.mkdirSync(path.join(repo, 'plugin'), { recursive: true })
+  fs.writeFileSync(path.join(repo, 'watchdog-config.json'), JSON.stringify({ voiceKeepAlive: true }), 'utf8')
+  fs.writeFileSync(path.join(repo, 'tools', 'voice-sovits-start.ps1'), '# stub\n', 'utf8')
+  const dataDir = path.join(repo, 'data', 'qq-whale')
+  fs.mkdirSync(dataDir, { recursive: true })
+  const p = gameModePaths({ dataDir })
+  assert.equal(p.root, repo, '应该找到那个同时有 tools/ 与 plugin/ 的目录')
+  assert.equal(p.watchdogConfig, path.join(repo, 'watchdog-config.json'))
+  assert.equal(p.sovitsScript, path.join(repo, 'tools', 'voice-sovits-start.ps1'))
+  // 真机同款：${MOLLY_ROOT}\data\qq-whale → ${MOLLY_ROOT}\qq-whale
+  if (fs.existsSync('G:\\Molly\\qq-whale\\tools')) {
+    const real = gameModePaths({ dataDir: 'G:\\Molly\\data\\qq-whale' })
+    assert.equal(real.root, 'G:\\Molly\\qq-whale')
+    assert.equal(real.stateFile, 'G:\\Molly\\data\\qq-whale\\game-mode.json')
+  }
+  fs.rmSync(fake, { recursive: true, force: true })
+})
+
 await t('sidecar 认这个闸（源码断言）', () => {
   const src = fs.readFileSync(path.join(HERE, 'plugin', 'dsh-qq-whale', 'lib', 'sidecar.js'), 'utf8')
   assert.match(src, /import \{ gameModeState \} from '\.\/game-mode\.js'/)

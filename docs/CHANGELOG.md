@@ -37,13 +37,18 @@
   构造时启动看门狗，`dispose()` 里停掉。
 - `lib\sidecar.js` 的 `ensure()` 开头加闸：游戏模式开着就不再把嵌入 sidecar 拉起来
   （检索自动退回纯关键词，关掉游戏模式后下一次 ensure 自然恢复）。
+- `findRepoRoot(config)`：插件装进 `node_modules\dsh-qq-whale` 之后，
+  `path.resolve(HERE,'..','..','..')` 指向的是 `node_modules`，`watchdog-config.json` 与
+  `tools\voice-sovits-start.ps1` 于是全报「读不到 / 缺少」—— 拨开关什么也没发生。
+  现在按 env `MOLLY_REPO_ROOT` → `config.gmRepoRoot` → 从 `dataDir` 逐级往上（每级试它和它的
+  `qq-whale` 子目录）→ 源码树 `HERE/../../..` 的顺序，找「同时有 `tools/` 与 `plugin/`」的目录。
 
 **验证**
 
-- `node --check` 三个文件全过；新增 `tools\test-game-mode.mjs`：**17 过 / 0 挂**
+- `node --check` 三个文件全过；新增 `tools\test-game-mode.mjs`：**18 过 / 0 挂**
   （四档信号优先级、坏 JSON、3 秒缓存与 `fresh` 穿透、落盘、watchdog 保活不改其它键、
   开/关一次拨到位的调用顺序、看门狗「起来就收活/状态没变不重复干活/盘上关了会拉回来」、
-  sidecar 与 web.js 的接线断言）。
+  仓库根在「dataDir 与 lib 分居」时也能找对、sidecar 与 web.js 的接线断言）。
 - 真机端口：9880（SoVITS）与 8791（嵌入）在腾内存那轮之后一直是关着的，`applyGameMode` 会如实报
   「本来就没在跑」。
 

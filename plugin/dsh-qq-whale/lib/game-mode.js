@@ -26,8 +26,50 @@ import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-/** `.../plugin/dsh-qq-whale/lib` → `${MOLLY_ROOT}\qq-whale` */
+/** `.../plugin/dsh-qq-whale/lib` → `${MOLLY_ROOT}\qq-whale`（**只在源码树里成立**，见 findRepoRoot） */
 export const REPO_ROOT = path.resolve(HERE, '..', '..', '..')
+
+const isRepoRoot = (dir) => {
+  try {
+    return Boolean(dir) && fs.existsSync(path.join(dir, 'tools')) && fs.existsSync(path.join(dir, 'plugin'))
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 真正的仓库根目录。
+ *
+ * 2026-11-24 踩过：插件装到 `${HOME}\.dsh\profiles\desktop\node_modules\dsh-qq-whale\lib` 之后，
+ * `path.resolve(HERE,'..','..','..')` 是 `node_modules`，于是 `watchdog-config.json` 和
+ * `tools\voice-sovits-start.ps1` 全都「读不到 / 缺少」——开关拨了却什么也没发生。
+ *
+ * 所以按顺序找：env `MOLLY_REPO_ROOT` → `config.gmRepoRoot` / `config.repoRoot` → 源码树的
+ * `HERE/../../..` → 从 dataDir 逐级往上（每一级试它自己和它的 `qq-whale` 子目录）。
+ * 判据：这个目录里同时有 `tools/` 与 `plugin/`。
+ */
+export function findRepoRoot(config = {}) {
+  const cands = []
+  const push = (d) => { if (d && !cands.includes(d)) cands.push(d) }
+  push(process.env.MOLLY_REPO_ROOT)
+  push(config?.gmRepoRoot)
+  push(config?.repoRoot)
+  // dataDir 是「真机上的地址」，比源码树相对路径更可信，所以排在它前面
+  const dataDir = String(config?.dataDir || config?.memoryDir || '')
+  if (dataDir) {
+    let cur = path.resolve(dataDir)
+    for (let i = 0; i < 5; i++) {
+      push(path.join(cur, 'qq-whale'))
+      push(cur)
+      const up = path.dirname(cur)
+      if (up === cur) break
+      cur = up
+    }
+  }
+  push(REPO_ROOT)
+  for (const c of cands) if (isRepoRoot(c)) return c
+  return REPO_ROOT
+}
 
 export const GAME_MODE_FILE = 'game-mode.json'
 export const SOVITS_PORT = 9880
@@ -44,18 +86,23 @@ function readJson(file) {
   }
 }
 
-/** 所有相关路径。config 只用来定位 dataDir，没有也能跑（退到仓库默认位置）。 */
+/**
+ * 所有相关路径。config 只用来定位 dataDir / 仓库根，没有也能跑（退到源码树位置）。
+ * `config.gmPaths` 可整套覆盖（测试用；进程内也一样能覆盖）。
+ */
 export function gameModePaths(config = {}) {
   const dataDir = String(config?.dataDir || config?.memoryDir || '')
+  const root = findRepoRoot(config)
   const memConfigs = []
   if (process.env.MOLLY_OUT_DIR) memConfigs.push(path.join(process.env.MOLLY_OUT_DIR, 'mem-config.json'))
-  memConfigs.push(path.join(REPO_ROOT, 'out', 'mem-config.json'))
+  memConfigs.push(path.join(root, 'out', 'mem-config.json'))
   const base = {
     dataDir,
+    root,
     stateFile: dataDir ? path.join(dataDir, GAME_MODE_FILE) : '',
     memConfigs,
-    watchdogConfig: path.join(REPO_ROOT, 'watchdog-config.json'),
-    sovitsScript: path.join(REPO_ROOT, 'tools', 'voice-sovits-start.ps1'),
+    watchdogConfig: path.join(root, 'watchdog-config.json'),
+    sovitsScript: path.join(root, 'tools', 'voice-sovits-start.ps1'),
   }
   // 测试用：config.gmPaths 可以整套替换（不碰真机的文件）
   const override = config?.gmPaths
@@ -183,12 +230,12 @@ export async function stopSovits({ fetchImpl = fetch, waitMs = 8000 } = {}) {
 /** 把 SoVITS 拉回来（关游戏模式时）。用法跟 watchdog 一模一样：cmd /c start，脱离本进程。 */
 export function startSovits({ config } = {}) {
   const p = gameModePaths(config)
-  if (!fs.existsSync(p.sovitsScript)) return { ok: false, note: '缺少 tools/voice-sovits-start.ps1' }
+  if (!fs.existsSync(p.sovitsScript)) return { ok: false, note: '缺少 tools/voice-sovits-start.ps1（' + p.sovitsScript + '）' }
   try {
     execFileSync('C:\\Windows\\System32\\cmd.exe', [
       '/c', 'start', '""', '/b', 'powershell.exe',
       '-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', p.sovitsScript,
-    ], { cwd: REPO_ROOT, windowsHide: true, timeout: 15000, stdio: 'ignore' })
+    ], { cwd: p.root, windowsHide: true, timeout: 15000, stdio: 'ignore' })
     return { ok: true, note: '已拉起（首次加载 20–40 秒）' }
   } catch (err) {
     return { ok: false, note: String(err?.message || err).slice(0, 120) }

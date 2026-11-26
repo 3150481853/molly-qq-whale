@@ -487,6 +487,76 @@ export function rankCandidates(list, query) {
  *
  * 不是每部番都有（AniBT 没收录的字幕组就没有），空数组就照旧退回 RSS 那份。
  */
+/**
+ * 标题相似度 + 模糊回退（2026-11-26 真机，群 666666666）：
+ *
+ * 群友把番名说成「我是爱上心人所托来做恋爱迷情药的魔女」，真名是
+ * 「你好，我是受心上人所托来做恋爱药的魔女。」。AniBT 的搜索是**字面子串**匹配
+ * （实测同一台机器：「魔女」→50 条、「恋爱药的魔女」→1 条，而错两个字就 0 条），
+ * Bangumi 在这台机器上又连不上（bgm.tv 被污染），于是她只能回「没查到」。
+ *
+ * 所以：正路空手时，用「末段关键词」粗搜一遍，再按
+ *   「候选标题里有多少字出现在提问里」（covTitle）
+ * 与「提问里有多少字被候选标题覆盖」（covQuery）取平均打分，够 0.55 才认。
+ */
+export function titleOverlap(item, query) {
+  const clean = (s) => String(s || '').replace(/[^\p{Script=Han}A-Za-z0-9]/gu, '')
+  const title = clean(item?.nameCn || item?.name || '')
+  const q = clean(query)
+  if (!title || !q) return 0
+  const inQ = new Set([...q])
+  const seen = new Set()
+  let hit = 0
+  for (const ch of title) {
+    if (seen.has(ch)) continue
+    seen.add(ch)
+    if (inQ.has(ch)) hit += 1
+  }
+  const covTitle = seen.size ? hit / seen.size : 0
+  const covQuery = inQ.size ? hit / inQ.size : 0
+  return (covTitle + covQuery) / 2
+}
+
+/** 从一整句描述里抠几个「末段关键词」候选（越靠后的词越有辨识度） */
+export function fuzzyKeywords(query) {
+  const q = String(query || '')
+  const runs = q.match(/[\p{Script=Han}]{2,}/gu) || []
+  const out = []
+  const push = (s) => {
+    const v = String(s || '').trim()
+    if (v.length >= 2 && !out.includes(v)) out.push(v)
+  }
+  for (const r of runs) {
+    for (const len of [4, 3, 2]) if (r.length >= len) push(r.slice(-len))
+    if (r.length > 4) push(r.slice(0, 4))
+  }
+  return out.slice(0, 3)
+}
+
+/** 模糊回退：拿关键词粗搜 AniBT，再按相似度筛，返回带 _fuzzy 标记的条目 */
+export async function fuzzyAnibt(query, { proxy, timeoutMs, minScore = 0.55 } = {}) {
+  const seen = new Set()
+  const pool = []
+  for (const kw of fuzzyKeywords(query)) {
+    let hits = []
+    try {
+      hits = await searchAnibt(kw, { proxy, timeoutMs: Math.min(timeoutMs || DEFAULT_TIMEOUT_MS, 8000) })
+    } catch {
+      continue
+    }
+    for (const h of hits) {
+      const key = String(h?.id || h?.name || '')
+      if (!key || seen.has(key)) continue
+      seen.add(key)
+      const score = titleOverlap(h, query)
+      if (score >= minScore) pool.push({ ...h, _score: score, _fuzzy: true })
+    }
+  }
+  return pool
+    .sort((a, b) => (b._score - a._score) || ((b.resources || 0) - (a.resources || 0)))
+    .slice(0, 6)
+}
+
 export async function searchAnibtMagnets(bgmId, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   const id = String(bgmId || '').trim()
   if (!/^\d+$/.test(id)) return []
@@ -956,6 +1026,13 @@ export async function animeFind(query, { proxy, scope = 'all', timeoutMs = DEFAU
     } catch (err) {
       errors.push(`Bangumi：${err?.message || err}`)
     }
+    // 两条正路都空手：再拿末段关键词粗搜一次（见 fuzzyAnibt 注释里的真机事故）
+    try {
+      const fuzzy = await withDeadline(fuzzyAnibt(q, { proxy, timeoutMs }), 9000, '模糊回退')
+      if (fuzzy.length > 0) return fuzzy
+    } catch (err) {
+      errors.push(`模糊回退：${err?.message || err}`)
+    }
     return []
   }
 
@@ -972,7 +1049,7 @@ export async function animeFind(query, { proxy, scope = 'all', timeoutMs = DEFAU
   const magnetPromise = wantMagnet ? magnetJob() : Promise.resolve({ items: [], failed: [] })
   const rawHits = await (wantInfo ? infoJob() : Promise.resolve([]))
 
-  const ranked = rankCandidates(rawHits, q)
+  const ranked = rawHits.length > 0 && rawHits[0]?._fuzzy ? rawHits : rankCandidates(rawHits, q)
   const subject = ranked[0] || null
   if (subject) subject.alternatives = ranked.slice(1, 4)
 
@@ -999,7 +1076,7 @@ export async function animeFind(query, { proxy, scope = 'all', timeoutMs = DEFAU
     return {
       ok: false,
       query: q,
-      text: `搜不到「${q}」${why}。要是这台机器的代理没开，我这边是出不了网的——让主人把代理起回来再试。`,
+      text: `没搜到「${q}」${why}。这台机器上 Bangumi 连不上，我只能拿 AniBT 的片单去对，名字差一两个字就会空手——换个说法或者只给我关键词再试一次（比如只给「魔女」两个字）。`,
     }
   }
 

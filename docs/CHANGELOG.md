@@ -1,3 +1,40 @@
+## 2026-11-27 · 搜番叫不动 + 「乱叫主人」：一条是触发没认出来，一条是引用框挂错了人
+
+**现象**（主人 m05816 截图，群 666666666，23:51）
+
+他发「@Molly 搜番 我是爱上心人所托来做恋爱迷情药的魔女」。她没搜，只在聊天里回「这描述勾到我了…多给个关键词」；紧接着两分钟后又引用别人那句「可以这么比喻吗」说「主人，这个我翻不到，不敢乱编」——群里看着就像她在管别人叫主人。
+
+**为什么没搜**
+
+1. `maybeAnimeFind()` 把 `^(?:搜番|找番)\s*\S` 直接怼整串文本。真 at 进来时 OneBot 已经把 at 段剥掉、文本常以空格开头（`" 搜番 xxx"`）；手打 `@Molly` 时整段又还在——两种都匹配不上，于是掉进聊天链路。
+2. 就算触发了也大概率空手：这台机器 `api.bgm.tv` 直连必失败（10 秒 TypeError），只能靠 AniBT；AniBT 是字面子串匹配，「爱上心人…迷情药」这种说法 0 命中，换成「受心上人所托来做恋爱药的魔女」才命中（bgmId 624923）。
+3. 默认 `animeFindTimeoutMs` 8000 太紧——实测冷启动要 13~22 秒。
+
+**为什么像在叫别人主人**
+
+不是模型的问题。`jasmine/trace.jsonl` 里那条气泡的 `qq` 是 222222222（主人本人），她那一轮确实在对主人说话；是引用框挂错了人：`deliver()` 的 `anchorId` 只在有 carry（合并进来的消息）时才赋值，没有 carry 就交给 `pickQuoteTarget()` 的 newest 兜底 → 永远引「最后一条」。认人（谁在说话）和引用（引谁）指向了不同的人，群里就成了「她对着别人喊主人」。A/B 采样（fastai `deepseek-v4.1-flash-1017` 与 wb-proxy `deepseek-v4.1-flash` 各 5~6 次）在 `engine-context.js` 的「# 现在跟你说话的是谁」护栏下都是 0 次叫主人，也可反证这点。
+
+**改了什么**
+
+- `lib/engine.js` `maybeAnimeFind()`：先剥 `@昵称` 与前导空白得到 `head`，`hashCmd` / `bare` 都改成测 `head`；`query` 也从 `head` 抠；默认超时 8000 → **20000**。
+- `lib/engine.js` 发送处：`anchorId` 在没有 carry 时改成「这一轮的触发消息」本身（`isPureNudge(ev) ? '' : String(ev?.message_id ?? '')`），纯 @ 仍走 nudge 分支。
+- `lib/anime-find.js`：新增 `titleOverlap()` / `fuzzyKeywords()` / `fuzzyAnibt()`；`infoJob()` 在 AniBT + Bangumi 都空手后跑一次模糊回退（`withDeadline(…, 9000, '模糊回退')`，阈值 `minScore = 0.55`）；模糊结果不再被 `rankCandidates()` 打散；搜不到的文案改成说清「Bangumi 连不上、名字差一两个字会空手，给个关键词再试」。
+- 新增 `tools/test-anime-fuzzy.mjs`（13 条：titleOverlap 边界、fuzzyKeywords、engine 触发口径与锚点、模糊回退接线）。
+
+**怎么退回**
+
+`animeFindEnabled: false` 关掉整条搜番；只想去掉模糊回退就把 `fuzzyAnibt` 那段 `withDeadline` 删掉（`lib/anime-find.js` 的 `infoJob()`）。引用锚点那条退回办法是把 `anchorId` 恢复成 `carry.length ? … : ''`。
+
+**验证**
+
+- `tools/test-anime-fuzzy.mjs` 13 过 / 0 挂；`test-anime-find.mjs` 33 过 / 0 挂；`test-quote-anchor.mjs` 51 PASS / 0 FAIL；`test-split-reply.mjs` 8 PASS / 0 FAIL。
+- 真机探针 `probe-anime-wire3.mjs`：`scene=group_mention` + `" 搜番 …"` → handled=true（11.7s）；`scene=group` + `@Molly 搜番 …` → handled=true（11.3s）；普通群裸「搜番 …」→ false（不该抢话）。
+- `probe-anime-fuzzy.mjs`：冷启动 14.7 秒 ok=true，命中「你好，我是受心上人所托来做恋爱药的魔女。」（bgmId 624923、评分 6.6、55 条资源、前三条 ToonsHub 真 magnet）。
+
+**已知限制**
+
+Bangumi 仍要靠代理，本机连不上时评分一律显示「评分 X（AniBT）」；AniBT 对「同义改写」的召回有限，模糊回退只是把明显同名的捞回来。
+
 # 变更日志（插件 / 配置 / 外部程序）
 
 > 谁改了什么、为什么改、怎么退回去。用户原始要求（m00001）：

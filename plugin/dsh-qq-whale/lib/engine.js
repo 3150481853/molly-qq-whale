@@ -4161,15 +4161,25 @@ export class ChatEngine {
     if (!animeFindQuery) return false
     const textStr = String(text || '').trim()
     if (!textStr) return false
-    // 带 # 的指令在哪都执行；不带 # 的只认私聊 / 被 @ / 手打 @昵称
-    const hashCmd = /^[#＃]\s*(?:茉莉)?\s*(?:搜番|找番|番剧)/iu.test(textStr)
-    const bare = /^(?:搜番|找番)\s*\S/u.test(textStr)
-    if (!hashCmd && !bare) return false
+    /*
+     * 2026-11-26 真机（群 666666666，主人 m05816 截图）：「@Molly 搜番 我是爱上心人所托…」
+     * 她压根没搜，只在聊天里回「这描述勾到我了」。
+     *
+     * 原因：真 at 进来时 OneBot 会把 at 段剥掉、文本常常以空格开头（" 搜番 xxx"），
+     * 手打的 @Molly 则整段仍留在文本里。原来的 bare 用 ^(?:搜番|找番) 直接怼整串，
+     * 这两种都匹配不上 → 掉到聊天链路。这里先剥 @昵称 / 前导空白，再判断。
+     */
     const handAt = /^(?:@|＠)\s*(?:molly|茉莉|莫莉|小鱼|小莫|小茉莉)/iu.test(textStr)
-    if (!hashCmd && scene !== SCENE_PRIVATE && scene !== SCENE_MENTION && !handAt) return false
-
-    const query = textStr
+    const head = textStr
       .replace(/^(?:@|＠)\s*(?:molly|茉莉|莫莉|小鱼|小莫|小茉莉)[\s,，:：、]*/iu, '')
+      .replace(/^[\s\u3000]+/u, '')
+    // 带 # 的指令在哪都执行；不带 # 的只认私聊 / 被 @ / 手打 @昵称
+    const hashCmd = /^[#＃]\s*(?:茉莉)?\s*(?:搜番|找番|番剧)/iu.test(head)
+    const bare = /^(?:搜番|找番)\s*\S/u.test(head)
+    if (!hashCmd && !bare) return false
+    if (!hashCmd && !handAt && scene !== SCENE_PRIVATE && scene !== SCENE_MENTION) return false
+
+    const query = head
       .replace(/^[#＃]\s*/u, '')
       .replace(/^(?:茉莉)?\s*(?:搜番|找番|番剧)[\s,，:：、]*/iu, '')
       .replace(/^(?:搜番|找番)[\s,，:：、]*/iu, '')
@@ -4180,7 +4190,9 @@ export class ChatEngine {
     }
 
     const proxy = this.config.animeFindProxy === undefined ? 'http://127.0.0.1:12450' : String(this.config.animeFindProxy || '')
-    const timeoutMs = Number(this.config.animeFindTimeoutMs) > 0 ? Number(this.config.animeFindTimeoutMs) : 8000
+    // 2026-11-26 实测：同一串番名冷启动要 13~22 秒（AniBT 索引 + 磁力转换），
+    // 原来默认 8000ms 必然空手，用户看到的就是「她说没查到」。热起来之后 6 秒左右。
+    const timeoutMs = Number(this.config.animeFindTimeoutMs) > 0 ? Number(this.config.animeFindTimeoutMs) : 20000
     try {
       const res = await animeFindQuery(query, { proxy, scope: 'all', timeoutMs })
       await this.sayQuick(ev, scene, String(res?.text || '没搜到，换个名字再试？'))
@@ -5456,8 +5468,20 @@ export class ChatEngine {
         conv,
         reply,
         signal: controller.signal,
-        // 这一串消息里最早的那条才是她真正要接的（见 deliver 里的 quotePick.anchored）
-        anchorId: carry.length ? String(carry[0]?.ev?.message_id ?? '') : '',
+        /*
+         * 这一串消息里最早的那条才是她真正要接的（见 deliver 里的 quotePick.anchored）。
+         *
+         * 2026-11-26 追加（群 666666666，主人 m05816 截图）：她答的是主人那句
+         * 「@Molly 搜番 …」，引用框却挂在两分钟后星怜海那句「可以这么比喻吗」上，
+         * 于是群里看到的就是「主人，这个我翻不到」指着别人——看起来像乱叫主人。
+         * 原来的 anchorId 只在 carry（合并进来的消息）时才有值，没有 carry 就交给
+         * pickQuoteTarget 的 newest 兜底，所以永远引「最后一条」。
+         * 现在：没有 carry 时把「这一轮的触发消息」本身钉成 anchor；
+         * 但纯 @（没有正文）不算——那种情况该引对方上一条有话说的话（nudge 分支）。
+         */
+        anchorId: carry.length
+          ? String(carry[0]?.ev?.message_id ?? '')
+          : (isPureNudge(ev) ? '' : String(ev?.message_id ?? '')),
       }))
       if (!controller.signal.aborted) {
         this.stats.replies++

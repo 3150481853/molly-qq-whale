@@ -7,6 +7,50 @@
 
 ---
 
+## 2026-11-26 · 群里冒出「📊 [ACP] acp_status result:」：统计报表不许出门
+
+> 主人 m05249（截图，QQ 群 666666666）：群友说了句「这谁绷得住」，Molly 连发 5 颗气泡，
+> 把上下文统计整块贴了出来。
+
+**现象**（09:58:57–09:59:23，五颗气泡，全部由她发出）
+
+```
+📊 [ACP] acp_status result:
+[acp-status]
+ACTIVE SURFACE: pack=default | host=billion-context 0.1.216 (6a641f378)
+CONTEXT BREAKDOWN
+0 tool (0%) | 2.5K text (100%) | 0 summaries (0%)Top tools: text (100%)（细节不在这儿刷了，要的话我私聊你）
+```
+
+**为什么之前没拦住**
+
+清洗层 `lib/persona-sanitize.js` 的 ⑥ 只认「**行首就是** `[ACP]`」的回执（11-19 那次
+`❌ [ACP] Compression FAILED` 就是这么挡的）。这回前面还挂着 📊，第 96 行那条正则匹配不上，
+整块原样出门。
+
+**改了什么**
+
+- `lib/persona-sanitize.js` 新增 ⑥b：行首允许先有任意表情符号再是 `[ACP]`；
+  另外几条机器味很重的整行也一起删 —— `[acp-status]`、`ACTIVE SURFACE: …`、
+  `CONTEXT BREAKDOWN`、`pack=… | host=billion-context …`、
+  「`0 tool (0%) | 2.5K text (100%) | …`」这类占比行（连同黏在同一行的 `Top tools:`）。
+  只认**整行**，句子中间提到“tool / ACTIVE”不受影响。
+- `lib/persona.js` 在「系统动作回执」那句后面补一条：上下文用量/字数占比/额度这类统计报表
+  属于内部日志，聊天里一句都不要贴，更不要自己编个假表出来。
+- 新增 `tools/test-acp-leak.mjs`：**9 过 / 0 挂**（这次那五颗气泡逐条喂进去必须清空；
+  前后有正常话时只删报表；「我这边 tool 链没接上」「2.5K 个字我也不嫌多」这类日常句子一个字不动）。
+
+**怎么退回去**
+
+删掉 ⑥b 那几行正则 + persona 新增那一句；`tools/test-acp-leak.mjs` 一并删。
+
+**验证**
+
+`node tools/test-acp-leak.mjs` → 9 过 / 0 挂；`tools/test-sanitize.mjs` 38/0、`test-dsml-leak.mjs` 8/0、
+`test-split-reply.mjs` 8/0 全部照旧。
+
+---
+
 ## 2026-11-24 · 连点开关不会打架：一次只干一件事，后来的说了算
 
 > 主人 m05133：「如果我快速连续开关会不会出问题」

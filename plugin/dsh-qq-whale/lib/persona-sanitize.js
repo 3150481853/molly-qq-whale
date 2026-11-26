@@ -95,6 +95,22 @@ function stripInternalMarks(s) {
   //    所以正常聊天里提到 "compression" 不受影响。
   s = s.replace(/^[^\S\n]*(?:[❌⚠⛔]\ufe0f?\s*)?\[ACP\][^\n]*$/gim, '')
   s = s.replace(/^[^\S\n]*\[Compression\s+(?:FAILED|refused|no-op)\b[^\n]*$/gim, '')
+  // ⑥b acp_status 回执（2026-11-26 真机泄漏，QQ 群 666666666，09:58:57–09:59:23 连发 5 颗）：
+  //     她照抄了上下文里 acp_status 的结果（也可能是提示里的示例）——
+  //     「📊 [ACP] acp_status result:」/「[acp-status]」
+  //     「ACTIVE SURFACE: pack=default | host=billion-context 0.1.216 (6a641f378)」
+  //     「CONTEXT BREAKDOWN」/「0 tool (0%) | 2.5K text (100%) | 0 summaries (0%)Top tools: text (100%)」。
+  //     ⑥ 只认行首就是 `[ACP]`，而这回前面还挂着 📊，所以漏了。
+  //     下面这些模式都很有「机器味」，正常聊天不会这么说，整行删掉是安全的。
+  s = s.replace(/^[^\S\n]*(?:[\p{Extended_Pictographic}\uFE0F\u200D]+\s*)*\[ACP\][^\n]*$/gimu, '')
+  s = s.replace(/^[^\S\n]*\[acp-status\][^\n]*$/gim, '')
+  s = s.replace(/^[^\S\n]*ACTIVE SURFACE\s*:[^\n]*$/gim, '')
+  s = s.replace(/^[^\S\n]*CONTEXT BREAKDOWN[^\n]*$/gim, '')
+  s = s.replace(/^[^\S\n]*pack=[^\n]*\bhost=billion-context[^\n]*$/gim, '')
+  // 「0 tool (0%) | 2.5K text (100%) | 0 summaries (0%)」这类占比行（可能和后面的
+  // 「Top tools: …」粘在同一行，一起砍掉）
+  s = s.replace(/^[^\S\n]*\d+(?:\.\d+)?\s*[KM]?\s+(?:tools?|text|summaries)\b[^\n]*$/gim, '')
+  s = s.replace(/^[^\S\n]*Top tools\s*:[^\n]*$/gim, '')
   // 占位清理：连同前面那个分隔符一起删，避免留下「，，」
   s = s.replace(/[，,、；;：:]?\s*\u0002\s*/g, '')
   s = s.replace(/\u0002/g, '')

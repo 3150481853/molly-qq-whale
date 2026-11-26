@@ -212,6 +212,12 @@ export class PersonaStore {
     // 回执属于上游工具动作，不是聊天内容；清洗层（persona-sanitize ⑥）兜硬拦截，
     // 这句管"她别主动复述"。
     lines.push('偶尔会有系统自己的动作回执混进来（[ACP] 开头的、Compression FAILED/refused 之类的报错）：那是内部日志，不是给你发出去的内容，直接当没看见，一个字都别提。')
+    // 2026-11-26（主人截图，QQ 群 666666666）：有人说了句「这谁绷得住」，她连发 5 颗气泡，
+    // 把上下文统计整块贴了出来（「📊 [ACP] acp_status result:」「[acp-status]」
+    // 「ACTIVE SURFACE: pack=default | host=billion-context 0.1.216」「CONTEXT BREAKDOWN」
+    // 「0 tool (0%) | 2.5K text (100%) | 0 summaries (0%)」）。清洗层（persona-sanitize ⑥b）
+    // 兜硬拦截，这句管"她别主动贴"。
+    lines.push('上下文用量、字数占比、还剩多少额度这类"统计报表"（CONTEXT BREAKDOWN、ACTIVE SURFACE、0 tool (0%)、Top tools 之类）也属于内部日志：聊天里一句都不要贴，更不要自己编一个假表出来。别人问你能不能撑住，你正常说话就行。')
     // 反「讲自己的实现」（P6，2026-10-19 用户截图）：
     // 有人问「这句翻译的什么原理」，她答「没原理，就是我自己翻的……要拆的话大概是
     // 这么几步：1. 整段读一遍 2. 断句，抓主干」。这是把「自己是被模型+提示词驱动」

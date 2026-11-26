@@ -80,4 +80,11 @@
 - `api.bgm.tv` 在本机 DNS 被污染，Bangumi 评分只能在「有代理」时补齐；平时显示的是 AniBT 的评分（会明确标出来源，不编「0 人评分」）。
 - 搜番依赖公开源，蜜柑 / 动漫花园偶尔超时；某源挂了会在结果里明说挂了哪家。
 - 游戏模式期间识图只剩 saucenao / tracemoe 两个直连引擎，命中率会低一些（会提示「你在打游戏，浏览器类引擎这轮没开」）。
-- 控制台 exe 与插件版本号是两套：exe 里烧的是 `FALLBACK_VERSION`，插件读自己的 `package.json`；两边都改成 `1.1.9` 才算齐。
+- 控制台 exe 与插件版本号是两套：exe 里烧的是 `FALLBACK_VERSION`，插件读自己的 `package.json`；两边都改成 `1.1.9` 才算齐（本次已重编 `dist/molly-console.exe` → `molly-console 1.1.9 (sea)`，sha256 `405ba4bc…`）。
+
+## 十、升级方式
+
+- **源码部署**：覆盖 `plugin/dsh-qq-whale/lib/` 里改动的文件（本次新增 `game-mode.js` / `web-lookup.js` / `anime-find.js`，改动 `web.js` / `drift.js` / `sidecar.js` / `persona.js` / `persona-sanitize.js` / `bili-sing.js` / `main.js` / `engine.js`）→ **重启 DSH**（插件模块在宿主内，不会热更）。
+- **用发布包**：解压覆盖同名目录，同样重启。
+- 控制台前端（`console/`）改的是静态资源，覆盖后刷新即可；控制台服务端（`tools/console-server.mjs`）改动需要重启控制台进程（或重编 exe）。
+- 本仓库发布不带二进制附件，插件以源码形式分发。

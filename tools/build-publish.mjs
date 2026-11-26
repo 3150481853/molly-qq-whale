@@ -79,6 +79,8 @@ const FILES = [
   ['docs/RELEASE-1.1.8.md', 'docs/RELEASE-1.1.8.md'],
   /* 2026-11-19 1.1.9-preview.1：搜番 + 唱歌内存预检 + 表情包滚动条 */
   ['docs/RELEASE-1.1.9-preview.1.md', 'docs/RELEASE-1.1.9-preview.1.md'],
+  /* 2026-11-26 1.1.9 正式版：搜番 / web_lookup / 游戏模式总闸 / 内部日志清洗 / 唱歌兜底 */
+  ['docs/RELEASE-1.1.9.md', 'docs/RELEASE-1.1.9.md'],
   /* 2026-11-07 问题反馈页：页面说明 + 给论坛站长的匿名提交接口申请 */
   ['docs/console-feedback-page.md', 'docs/console-feedback-page.md'],
   ['docs/forum-anonymous-bug-api-request.md', 'docs/forum-anonymous-bug-api-request.md'],
